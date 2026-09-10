@@ -1,0 +1,150 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Token definitions. The light palette lives on bare `:root` so nothing is defined only inside a
+ * media query; dark overrides come from the `.dark` class that `index.html` sets and the theme
+ * toggle flips.
+ */
+:root {
+  color-scheme: light;
+
+  --canvas: 246 247 245;
+  --surface: 255 255 255;
+  --surface-raised: 250 251 250;
+  --line: 224 228 227;
+  --line-strong: 202 208 206;
+  --ink: 22 29 32;
+  --ink-muted: 88 100 104;
+  --ink-subtle: 130 142 145;
+
+  --brand: 13 92 78;
+  --brand-soft: 224 240 236;
+  --brand-ink: 255 255 255;
+
+  --good: 22 128 92;
+  --warn: 176 118 8;
+  --bad: 190 42 42;
+  --info: 32 96 152;
+  --estimated: 122 92 168;
+}
+
+.dark {
+  color-scheme: dark;
+
+  --canvas: 11 17 22;
+  --surface: 18 25 31;
+  --surface-raised: 24 33 40;
+  --line: 36 48 56;
+  --line-strong: 54 70 80;
+  --ink: 232 238 240;
+  --ink-muted: 152 168 175;
+  --ink-subtle: 110 126 134;
+
+  --brand: 46 170 142;
+  --brand-soft: 20 46 42;
+  --brand-ink: 8 20 18;
+
+  --good: 58 186 130;
+  --warn: 224 168 54;
+  --bad: 238 104 96;
+  --info: 96 168 232;
+  --estimated: 176 148 232;
+}
+
+@layer base {
+  * {
+    @apply border-line;
+  }
+
+  html {
+    @apply antialiased;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-canvas text-ink font-sans text-base;
+    /* The 360 viewer and floor-plan editor both drag; a stray text selection during a drag looks
+       like a bug, so selection is opted into per element rather than out of. */
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* A single visible focus treatment, keyboard-only, so the dashboard stays navigable without a
+     mouse without drawing rings on every click. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand ring-offset-2 ring-offset-canvas;
+  }
+
+  /* Tabular numerals everywhere a figure is compared down a column. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full;
+    background: rgb(var(--line-strong));
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--ink-subtle));
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-lg border border-line bg-surface;
+  }
+
+  .panel-pad {
+    @apply panel p-4;
+  }
+
+  .label {
+    @apply text-2xs font-medium uppercase tracking-wider text-ink-subtle;
+  }
+
+  .stat {
+    @apply tnum text-2xl font-semibold text-ink;
+  }
+
+  /* A hatched fill marks anything estimated rather than measured (§46). The pattern reads as
+     "provisional" at a glance, which a colour alone does not. */
+  .estimated-hatch {
+    background-image: repeating-linear-gradient(
+      45deg,
+      rgb(var(--estimated) / 0.28) 0px,
+      rgb(var(--estimated) / 0.28) 3px,
+      transparent 3px,
+      transparent 7px
+    );
+  }
+
+  .skeleton {
+    @apply rounded bg-surface-raised;
+    background-image: linear-gradient(
+      90deg,
+      rgb(var(--surface-raised)) 0%,
+      rgb(var(--line)) 50%,
+      rgb(var(--surface-raised)) 100%
+    );
+    background-size: 200% 100%;
+    @apply animate-shimmer;
+  }
+}

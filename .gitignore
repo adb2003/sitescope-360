@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+coverage/
+*.tsbuildinfo
+
+# Runtime state: local database, uploaded/derived objects, logs
+var/
+
+# Secrets — .env.example is committed, .env never is
+.env
+.env.local
+.env.*.local
+
+# Generated sample imagery. The generator is committed; its output is not, because it is
+# hundreds of megabytes of files this repository can recreate on demand.
+sample-data/panoramas/
+sample-data/floorplans/
+sample-data/manifest.json
+
+# Expo
+.expo/
+.expo-shared/
+*.jks
+*.p12
+*.mobileprovision
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp

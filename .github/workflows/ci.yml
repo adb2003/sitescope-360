@@ -1,0 +1,270 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+
+jobs:
+  backend:
+    name: Backend — lint, types, tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    # The suite runs against SQLite by default so it needs no services, but a Postgres run also
+    # happens below — a schema that only works on SQLite is not a schema that ships.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          uv venv --python ${{ env.PYTHON_VERSION }}
+          uv pip install -e ".[dev]"
+
+      - name: Ruff (lint)
+        run: uv run ruff check app tests
+
+      - name: Ruff (format check)
+        run: uv run ruff format --check app tests
+
+      - name: mypy
+        run: uv run mypy app
+
+      - name: Tests
+        run: uv run pytest -q --cov=app --cov-report=term-missing:skip-covered
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/.coverage
+          if-no-files-found: ignore
+
+  migrations:
+    name: Migrations — PostgreSQL
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: sitescope
+          POSTGRES_USER: sitescope
+          POSTGRES_PASSWORD: sitescope
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sitescope"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      DATABASE_URL: postgresql+psycopg://sitescope:sitescope@localhost:5432/sitescope
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          uv venv --python ${{ env.PYTHON_VERSION }}
+          uv pip install -e ".[dev]"
+
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+
+      - name: Migrations match the models
+        # Autogenerate must produce an empty migration. If it does not, a model changed without a
+        # migration and the next deploy would run against a stale schema.
+        run: |
+          uv run alembic revision --autogenerate -m "drift check" --rev-id drift_check
+          if grep -qE '^\s+op\.(create|drop|alter|add)' alembic/versions/drift_check_*.py; then
+            echo "::error::Models have drifted from the migrations. Run: alembic revision --autogenerate"
+            cat alembic/versions/drift_check_*.py
+            exit 1
+          fi
+          rm alembic/versions/drift_check_*.py
+          echo "Schema matches the models."
+
+      - name: Downgrade cleanly
+        run: uv run alembic downgrade base
+
+  contracts:
+    name: Shared contracts are in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install backend
+        working-directory: backend
+        run: |
+          uv venv --python ${{ env.PYTHON_VERSION }}
+          uv pip install -e .
+
+      - name: Check generated contracts
+        # `shared/contracts.ts` is generated from the backend enums. A stale copy means the UI
+        # could be rendering against status values the API no longer emits.
+        run: backend/.venv/bin/python infrastructure/scripts/export_contracts.py --check
+
+  frontend:
+    name: Frontend — lint, types, tests, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: TypeScript
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7
+
+  docker:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false
+          load: true
+          tags: sitescope-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          # Root context: the frontend imports the generated contracts from shared/.
+          context: .
+          file: ./frontend/Dockerfile
+          push: false
+          load: true
+          tags: sitescope-frontend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Validate the compose file
+        env:
+          JWT_SECRET: ci-only-not-a-real-secret-0000000000
+          STORAGE_SIGNING_SECRET: ci-only-not-a-real-secret-1111111
+        run: docker compose config --quiet
+
+  stack:
+    name: Stack smoke test
+    runs-on: ubuntu-latest
+    needs: [docker]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the stack
+        env:
+          JWT_SECRET: ci-only-not-a-real-secret-0000000000
+          STORAGE_SIGNING_SECRET: ci-only-not-a-real-secret-1111111
+          POSTGRES_PASSWORD: ci-postgres
+        run: docker compose up --build --detach --wait --wait-timeout 300
+
+      - name: The API is healthy behind nginx
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error http://localhost:8080/health
+          curl --fail --silent --show-error http://localhost:8080/api/system/health | tee /dev/stderr | grep -q '"status": *"ok"'
+
+      - name: The SPA is served
+        run: curl --fail --silent --show-error http://localhost:8080/ | grep -qi 'SiteScope'
+
+      - name: Seed and sign in end to end
+        env:
+          JWT_SECRET: ci-only-not-a-real-secret-0000000000
+          STORAGE_SIGNING_SECRET: ci-only-not-a-real-secret-1111111
+        run: |
+          set -euo pipefail
+          docker compose exec -T api python -m app.seed --demo --quick
+          TOKEN=$(curl --fail --silent http://localhost:8080/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"admin@demo.example.com","password":"SiteScope360!demo"}' \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+          # A processed capture must be visible through the API, not merely present in the database.
+          curl --fail --silent http://localhost:8080/api/dashboard \
+            -H "Authorization: Bearer $TOKEN" | python3 -c '
+          import json, sys
+          body = json.load(sys.stdin)
+          assert body["total_projects"] >= 1, body
+          assert body["total_frames"] >= 1, "the seeded capture produced no frames"
+          print("dashboard ok:", body["total_projects"], "projects,", body["total_frames"], "frames")'
+
+      - name: Worker picked up jobs from Redis
+        run: |
+          docker compose logs worker --tail 200 | grep -qi 'worker' \
+            || (docker compose logs worker; exit 1)
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes

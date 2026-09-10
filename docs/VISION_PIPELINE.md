@@ -1,0 +1,283 @@
+# Vision pipeline
+
+What the computer vision in SiteScope 360 actually does, how well it does it, and — at least as
+importantly — what it does not do.
+
+This document is deliberately specific about limits. A construction team that trusts a wrong
+capture path will walk to the wrong place; a mapper that is right most of the time and
+confidently wrong occasionally is worse than no mapper at all.
+
+---
+
+## 1. The engine
+
+```
+VisionEngine                                  (app/vision/engine.py)
+ ├── FeatureDetector    OrbFeatureDetector     ORB, equatorial band
+ ├── FeatureMatcher     BruteForceMatcher      Hamming + Lowe ratio + spherical RANSAC
+ ├── MotionEstimator    EssentialMotionEstimator  spherical essential matrix
+ ├── PositionEstimator  DeadReckoningPositionEstimator
+ ├── KeyframeSelector                          near-duplicate and quality rejection
+ └── MapBuilder                                Umeyama similarity fit to a floor plan
+```
+
+Every component is injected through the constructor, so ORB-SLAM3, OpenVSLAM, COLMAP or OpenSfM
+can replace the estimator without touching the pipeline stages or the API. The stages call only
+methods on `VisionEngine`.
+
+---
+
+## 2. Image quality (§10) — *measured*
+
+`app/vision/quality.py`. Classical measurements, not a learned model:
+
+| Score | Method | Catches |
+| --- | --- | --- |
+| `blur_score` | Variance of the Laplacian, log-normalised | Walking blur, out-of-focus |
+| `brightness_score` | Mean luma + shadow/highlight clipping fraction | Dark corridors, blown windows |
+| `contrast_score` | Luma standard deviation | Flat, featureless frames |
+| `resolution_score` | Pixel width against a construction-usability floor | Panoramas too small to read detail |
+| `completeness_score` | Dead-area fraction + wrap-seam continuity | Failed stitches, partial panoramas |
+
+`quality_score` is a weighted mean, but the **verdict is not**: any single catastrophic axis makes
+a frame `unusable` regardless of the average. A perfectly exposed, perfectly sharp image of
+nothing is still not a capture.
+
+Calibration worth knowing:
+
+- The resolution floor for a panorama is **1024 px wide**, and the target is 4096 px (≈11 px per
+  degree — enough to read a rebar tag). A 1024-wide panorama is *deliberately* scored `poor`, and
+  the warning names the recommended width. This surprised us in testing and is now an explicit
+  test.
+- Near-duplicates are detected with a 64-bit **dHash**. dHash compares adjacent pixel brightness
+  rather than absolute values, so it survives an exposure change — which matters because the same
+  corridor shot twice minutes apart must be recognised as a duplicate.
+
+No claim is made that this matches any commercial vendor's proprietary quality algorithm. It
+catches the failures that actually waste a site visit.
+
+---
+
+## 3. Feature detection and matching — *measured*
+
+ORB, because it is free of patent restrictions, ships in the base OpenCV wheel, and is fast enough
+to run on every frame of a long walkthrough.
+
+**Detection is restricted to the equatorial band** (the middle ~55% of the image height). Features
+near the poles of an equirectangular image are stretched by `1/cos(latitude)`, so their
+descriptors are unstable and their bearing estimates noisy. On a construction site the walls,
+columns and openings — the things worth matching — are around the horizon anyway.
+
+Matching is Hamming brute force, then Lowe's ratio test at 0.75, then **geometric verification**.
+That last step is not optional: scaffolding, formwork and ceiling tiles are visually repetitive,
+and a ratio test alone accepts many wrong matches on them.
+
+### Verification on the sphere
+
+For calibrated bearing vectors the epipolar constraint is:
+
+```
+b₂ᵀ E b₁ = 0
+```
+
+This formulation needs **no pinhole model**, which is precisely why it works on a full 360 sphere
+where a perspective homography or `cv2.findEssentialMat` would be invalid — points behind the
+camera have no image-plane projection at all. So the essential matrix is estimated directly from
+bearings with an 8-point solver under RANSAC (`verify_spherical`), followed by a refit on the
+consensus set.
+
+Measured on rendered ground truth: with half the correspondences replaced by random noise,
+verification recovers ≥70 inliers with **under 5% contamination**.
+
+---
+
+## 4. Relative motion — *estimated*
+
+`app/vision/motion.py` recovers the **rotation** and the **direction of translation** between two
+panoramas by decomposing the spherical essential matrix, choosing among the four (R, t)
+candidates by cheirality (which puts the most points in front of both cameras).
+
+### It cannot recover distance
+
+A single moving camera gives direction but not scale. That is a property of monocular geometry,
+not a shortcoming of this implementation. Step length is therefore modelled as `pace × Δt` with a
+single unknown pace, so the track's **shape** is meaningful and its **size** is arbitrary until
+anchored to a floor plan.
+
+### Pure rotation is detected and refused
+
+If the operator turns in place, the essential matrix is identically zero and its SVD returns
+numerical noise — a decomposition would happily produce a confident, meaningless translation.
+
+So degeneracy is checked **first**, with an orthogonal Procrustes rotation-only fit:
+
+```
+minimise Σ ‖R·b₁ᵢ − b₂ᵢ‖²   over rotations R
+```
+
+The median angular residual after removing the best rotation *is* the parallax. Below 0.35° the
+platform reports rotation with **zero translation** and says why. (An earlier version decomposed
+first and inspected the result afterwards — judging degeneracy with the very numbers the
+degeneracy had corrupted. The ground-truth test caught it.)
+
+### Confidence
+
+The per-pair confidence is the **geometric mean** of four terms — inlier ratio, inlier count,
+parallax, and cheirality agreement. A geometric mean, not an arithmetic one: every term must hold
+up, and one weak axis should not be averaged away.
+
+---
+
+## 5. Position estimation — *estimated*
+
+`app/vision/position.py` dead-reckons a floor-plane track from consecutive motions. Two
+assumptions, stated because they are the reason the output is labelled *estimated*:
+
+1. **Scale** — constant pace × elapsed time (see above).
+2. **Planarity** — only the horizontal (X, Z) components are integrated. On a single floor that
+   holds well; on a ramp or a stair it does not.
+
+Confidence decays **multiplicatively** along the chain, which is the honest model of dead
+reckoning: one bad link poisons everything downstream of it. A link below 15% confidence *breaks*
+the chain rather than contaminating it — the position is held, the break is recorded, and the
+chain confidence collapses.
+
+### Frame spacing is the dominant factor
+
+Measured on rendered panoramas of the same room, verified correspondences after RANSAC:
+
+| Frame spacing | Verified inliers | Usable? |
+| --- | --- | --- |
+| 0.5 m | ~363 | Comfortably |
+| 1.0 m | ~229 | Yes |
+| 2.0 m | ~125 | Yes |
+| 4.0 m | ~25 | **No** — below what the solver needs |
+
+An operator walking at roughly 1 m/s with a frame every 1–2 s lands squarely in the usable range.
+This is why `DEFAULT_STEP_M` is 1.5 m and why the default video frame interval is 2 s.
+
+### Measured accuracy
+
+From `backend/tests/vision/test_mapping.py`, a 21-frame L-shaped walk through a 20 × 12 m room at
+1.5 m spacing, aligned to ground truth with the same similarity fit that floor-plan anchoring
+performs:
+
+```
+confidence      high (100% median)
+recovered scale 1.011
+recovered rotation +0.1°
+mean error      0.13 m
+median error    0.14 m
+max error       0.29 m
+```
+
+Accuracy is only meaningful *after* the similarity fit, because the estimator is scale-free by
+construction — and that is exactly how the platform uses it.
+
+The same test asserts the opposite property: at 6 m spacing the mapper **must** report low
+confidence and demand manual placement.
+
+---
+
+## 6. Publishing a result — the §46 gate
+
+`summarize_mapping` decides what the platform is willing to show. The published confidence is the
+**median step confidence** — not the mean, not the best. A walkthrough is only as mappable as its
+typical link.
+
+If that median falls below `MAPPING_CONFIDENCE_THRESHOLD` (default 0.45, configurable):
+
+```
+Automatic mapping confidence: Low (37%) — manual placement recommended.
+1 of 5 frame pairs could not be related geometrically.
+```
+
+`requires_manual_placement` becomes true, no automatic path is drawn, and the interface renders
+that message **verbatim**. The UI does not paraphrase it: restating a refusal in friendlier words
+is exactly how "low confidence" turns into something a site team reads as an answer.
+
+An estimated path that *is* published is drawn **dashed** on the floor plan; a manually placed one
+is solid.
+
+---
+
+## 7. Anchoring to a floor plan
+
+`app/vision/mapbuilder.py`. The track's shape is meaningful but its position, rotation and scale
+are arbitrary, so anchoring is a **similarity transform** (uniform scale + rotation + translation)
+fitted in closed form with the Umeyama estimator to two or more user-supplied anchors.
+
+Deliberately *not* affine or projective: allowing shear or perspective would let a single bad
+anchor silently distort the geometry into something that looks plausible and is wrong. Reflection
+is also forbidden — a mirrored walkthrough is never the right answer.
+
+Refusals:
+
+- Fewer than two anchors → scale and rotation are undetermined.
+- Collinear or coincident anchors → the fit is refused with an explanation.
+- Residual above 60 px → reported as a poor fit, and manual placement is recommended.
+
+---
+
+## 8. What is not implemented
+
+`app/vision/ai.py` declares these as interfaces and they raise `NotImplementedError` rather than
+returning plausible numbers. `GET /api/system/capabilities` reports them as unavailable, and the
+UI reads that endpoint rather than hard-coding assumptions.
+
+| Capability | Status |
+| --- | --- |
+| Object detection | Not implemented — Phase 3 |
+| Defect detection | Not implemented — Phase 3. Defects are recorded manually as annotations. |
+| Progress detection | Not implemented — Phase 3. Needs a trained model *and* capture history. |
+| BIM comparison | Not implemented — Phase 3. Interfaces in `app/bim/`. |
+| Loop closure / global optimisation | Not implemented. This is not SLAM. |
+| Metric positioning | Not possible monocularly. Direction only. |
+
+`HistoricalProgressDetector.compare()` returns an `UnavailableAnalysis` naming exactly what is
+missing, rather than a percentage.
+
+The one honest change signal the platform *can* offer between two dates is
+`VisionEngine.similarity()` — the verified inlier ratio between two frames at the same location.
+It is labelled a **similarity measurement**, not a progress percentage.
+
+---
+
+## 9. Demo and test imagery
+
+`app/processing/synthetic.py` renders equirectangular panoramas by ray-casting a 3D room
+(ray/box for the shell, ray/cylinder for structural columns, blocky value noise for texture).
+
+Generated rather than downloaded for two reasons. The licensing question disappears — every pixel
+is produced by that file. And, more usefully, the panoramas have **real geometry**: because they
+are cast from known camera positions, consecutive frames contain true parallax, so the matcher,
+the essential-matrix solver and the position estimator operate on genuine multi-view geometry and
+their output can be checked against the camera path that produced it. Two unrelated stock
+panoramas would only ever exercise the code paths, never the correctness.
+
+The projection convention matches `app/vision/panorama.py` exactly — and a frontend test
+(`geometry.test.ts`) asserts the TypeScript viewer agrees with the Python backend term by term,
+because a flipped sign there would misplace every annotation pin and look like a rendering bug.
+
+---
+
+## 10. Performance
+
+Measured locally on the demo dataset (2048 × 1024 panoramas):
+
+| Stage | Cost |
+| --- | --- |
+| Validate | ~0.2 s per file |
+| Metadata | ~0.02 s per file |
+| Frame extraction (stills) | ~0.08 s per frame incl. thumbnail + preview |
+| Quality | ~0.14 s per frame |
+| Features | ~0.19 s per frame |
+| Mapping | ~0.08 s per frame pair |
+
+Feature detection and matching are analysed at **2048 px width** regardless of source resolution
+(`MAPPING_ANALYSIS_WIDTH`). Matching quality saturates well below native resolution, so this is
+roughly a 10× saving on an 8k panorama with no measurable accuracy loss.
+
+Video frames are extracted by **sequential decode with a modulo test**, not by seeking. Seeking
+with `CAP_PROP_POS_FRAMES` on a long-GOP 360 video is both slow (it re-decodes from the previous
+keyframe anyway) and unreliable across containers. One frame is live in memory at a time.

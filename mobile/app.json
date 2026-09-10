@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "SiteScope 360 Capture",
+    "slug": "sitescope-capture",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0b1116",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "local.sitescope.capture",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "Select 360 photos and videos recorded on your camera to upload to a capture session.",
+        "NSLocationWhenInUseUsageDescription": "Records an approximate location with each capture session, when available.",
+        "NSCameraUsageDescription": "Capture site photos directly, in addition to importing from a 360 camera."
+      }
+    },
+    "android": {
+      "package": "local.sitescope.capture",
+      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "CAMERA"]
+    },
+    "extra": {
+      "apiBaseUrl": "http://10.0.2.2:8000"
+    }
+  }
+}

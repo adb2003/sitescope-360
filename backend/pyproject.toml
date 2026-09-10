@@ -1,0 +1,82 @@
+[project]
+name = "sitescope-backend"
+version = "0.1.0"
+description = "SiteScope 360 — independent construction 360° site monitoring platform (backend)"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+
+dependencies = [
+    # web
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-multipart>=0.0.17",
+    "pydantic[email]>=2.9",
+    "pydantic-settings>=2.6",
+    # database
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14",
+    "psycopg[binary]>=3.2",
+    # auth
+    "bcrypt>=4.0,<5",
+    "pyjwt>=2.10",
+    # queue (optional at runtime; ThreadQueue backend needs neither)
+    "redis>=5.2",
+    "rq>=2.0",
+    # vision / media
+    "numpy>=1.26",
+    "pillow>=11.0",
+    "opencv-python-headless>=4.10",
+    # reporting
+    "reportlab>=4.2",
+    # camera adapters
+    "httpx>=0.28",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    # FastAPI dependency injection is declared in defaults by design.
+    "B008",
+    # Mutable class attributes are how Pydantic and SQLAlchemy models are written.
+    "RUF012",
+    # Ambiguous-unicode rules. Prose here deliberately uses en/em dashes, 00d7, 00b0, 00a7 and
+    # arrows; they are documentation, not identifiers, and rewriting them to ASCII makes the
+    # explanations worse.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"alembic/*" = ["E501"]
+"tests/*" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = false
+plugins = []

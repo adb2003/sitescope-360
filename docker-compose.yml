@@ -1,0 +1,141 @@
+# SiteScope 360 — full local stack (§38).
+#
+#   docker compose up --build
+#
+# Brings up: postgres, redis, api, worker, frontend, nginx.
+#
+# Two notes on the design:
+#
+#   * The API and the worker are the *same image* with different commands. They share the ORM
+#     models, the storage providers and the vision engine, so building two images would mean
+#     either duplicating that code or maintaining a third shared package.
+#   * Storage is a named volume shared by the API and the worker. The worker writes extracted
+#     frames; the API serves them. With `STORAGE_BACKEND=s3` the volume becomes unnecessary and
+#     the two services need not share a filesystem at all.
+
+name: sitescope
+
+x-backend-env: &backend-env
+  ENVIRONMENT: production
+  DEBUG: "false"
+  DATABASE_URL: postgresql+psycopg://sitescope:${POSTGRES_PASSWORD:-sitescope}@db:5432/sitescope
+  REDIS_URL: redis://redis:6379/0
+  QUEUE_BACKEND: redis
+  STORAGE_BACKEND: local
+  STORAGE_ROOT: /var/lib/sitescope/storage
+  # Both MUST be overridden in a real deployment. The API logs an error at startup if it sees
+  # the development defaults with ENVIRONMENT=production.
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env - generate with: python -c "import secrets; print(secrets.token_urlsafe(48))"}
+  STORAGE_SIGNING_SECRET: ${STORAGE_SIGNING_SECRET:?set STORAGE_SIGNING_SECRET in .env}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+  FRAME_INTERVAL_SECONDS: ${FRAME_INTERVAL_SECONDS:-2.0}
+  MAPPING_CONFIDENCE_THRESHOLD: ${MAPPING_CONFIDENCE_THRESHOLD:-0.45}
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: sitescope
+      POSTGRES_USER: sitescope
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sitescope}
+      # Keeps index scans predictable regardless of the host's locale.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sitescope -d sitescope"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # Persist the queue so a restart does not silently drop in-flight processing jobs.
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment: *backend-env
+    volumes:
+      - storage-data:/var/lib/sitescope/storage
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Migrations run here rather than in a separate one-shot service: `alembic upgrade head` is
+    # idempotent, and running it in the entrypoint means the schema is never behind the code
+    # that expects it.
+    command:
+      - sh
+      - -c
+      - |
+        alembic upgrade head &&
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment: *backend-env
+    volumes:
+      - storage-data:/var/lib/sitescope/storage
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    command: ["python", "-m", "app.workers.run"]
+    # Frame extraction and feature detection are CPU-bound; scale this service, not the API.
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        # Baked in at build time: Vite inlines env vars, so this cannot be changed at runtime.
+        # Empty means "same origin", which is what the nginx reverse proxy provides.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  redis-data:
+  storage-data:

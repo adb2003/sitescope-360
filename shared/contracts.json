@@ -1,0 +1,141 @@
+{
+  "_generated_from": "backend/app/core/enums.py",
+  "_regenerate": "python infrastructure/scripts/export_contracts.py",
+  "enums": {
+    "Role": [
+      "admin",
+      "project_manager",
+      "site_engineer",
+      "viewer"
+    ],
+    "ProjectStatus": [
+      "planning",
+      "active",
+      "on_hold",
+      "completed",
+      "archived"
+    ],
+    "CaptureSessionStatus": [
+      "draft",
+      "recording",
+      "uploading",
+      "uploaded",
+      "processing",
+      "extracting_frames",
+      "analyzing",
+      "mapping",
+      "ready",
+      "failed",
+      "cancelled"
+    ],
+    "CaptureSource": [
+      "human_operator",
+      "robot",
+      "drone",
+      "fixed_camera"
+    ],
+    "FileKind": [
+      "panorama",
+      "perspective_image",
+      "video_360",
+      "video_flat",
+      "unknown"
+    ],
+    "ProjectionType": [
+      "equirectangular",
+      "perspective",
+      "unknown"
+    ],
+    "JobType": [
+      "validate",
+      "metadata",
+      "frame_extraction",
+      "quality",
+      "features",
+      "mapping",
+      "viewer_data",
+      "thumbnails"
+    ],
+    "JobStatus": [
+      "queued",
+      "running",
+      "complete",
+      "failed",
+      "skipped"
+    ],
+    "QualityVerdict": [
+      "good",
+      "warning",
+      "poor",
+      "unusable"
+    ],
+    "DataProvenance": [
+      "measured",
+      "estimated",
+      "ai_predicted",
+      "manual"
+    ],
+    "MappingConfidence": [
+      "none",
+      "low",
+      "medium",
+      "high"
+    ],
+    "AnnotationPriority": [
+      "low",
+      "medium",
+      "high",
+      "critical"
+    ],
+    "AnnotationStatus": [
+      "open",
+      "in_progress",
+      "resolved"
+    ],
+    "CaptureFrequencyStatus": [
+      "ok",
+      "due",
+      "overdue",
+      "never_captured"
+    ],
+    "ReportType": [
+      "project_summary",
+      "floor_coverage",
+      "capture_history",
+      "annotation_log"
+    ],
+    "ReportFormat": [
+      "pdf",
+      "csv",
+      "json"
+    ],
+    "ReportStatus": [
+      "queued",
+      "generating",
+      "ready",
+      "failed"
+    ],
+    "CameraTransport": [
+      "file_upload",
+      "folder_import",
+      "wifi_osc",
+      "usb",
+      "bluetooth"
+    ]
+  },
+  "pipeline_order": [
+    "validate",
+    "metadata",
+    "frame_extraction",
+    "quality",
+    "features",
+    "mapping",
+    "viewer_data"
+  ],
+  "role_rank": {
+    "viewer": 0,
+    "site_engineer": 1,
+    "project_manager": 2,
+    "admin": 3
+  }
+}

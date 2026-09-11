@@ -6,9 +6,14 @@ VisionEngine
  ├── FeatureMatcher     BruteForceMatcher   (ratio test + spherical RANSAC)
  ├── MotionEstimator    EssentialMotionEstimator
  ├── PositionEstimator  DeadReckoningPositionEstimator
+ ├── SlamEstimator     GraphSlamPositionEstimator  (loop closure + SE(2) pose graph)
  ├── KeyframeSelector
  └── MapBuilder
 ```
+
+Two entry points for tracks, and the difference is deliberate. :meth:`estimate_track` is plain
+odometry. :meth:`estimate_track_with_slam` additionally looks for revisits and reconciles them,
+returning *both* results so a caller can say which one it is showing.
 
 Every component is injected, so replacing the estimator with ORB-SLAM3, OpenVSLAM, COLMAP or
 OpenSfM is a constructor change — the pipeline stages call only the methods on this class.
@@ -38,6 +43,12 @@ from app.vision.position import (
     summarize_mapping,
 )
 from app.vision.quality import ImageQualityAnalyzer
+from app.vision.slam import (
+    GraphSlamPositionEstimator,
+    LoopClosureDetector,
+    OptimisationReport,
+    SlamOutcome,
+)
 from app.vision.types import (
     FeatureSet,
     ImageInfo,
@@ -59,6 +70,7 @@ class VisionEngine:
         keyframe_selector: KeyframeSelector | None = None,
         map_builder: MapBuilder | None = None,
         quality_analyzer: ImageQualityAnalyzer | None = None,
+        slam_estimator: GraphSlamPositionEstimator | None = None,
     ) -> None:
         self.detector = detector or OrbFeatureDetector()
         self.matcher = matcher or BruteForceMatcher()
@@ -67,6 +79,13 @@ class VisionEngine:
         self.keyframe_selector = keyframe_selector or KeyframeSelector()
         self.map_builder = map_builder or MapBuilder()
         self.quality_analyzer = quality_analyzer or ImageQualityAnalyzer()
+        # Shares the matcher and motion estimator: loop closure verifies candidates with
+        # exactly the geometry the odometry uses, so a closure can never be accepted on
+        # evidence the rest of the pipeline would reject.
+        self.slam_estimator = slam_estimator or GraphSlamPositionEstimator(
+            self.position_estimator,
+            LoopClosureDetector(self.matcher, self.motion_estimator),
+        )
 
     # ---- single-frame analysis -----------------------------------------
     def describe(self, image: np.ndarray, *, xmp_projection: str | None = None) -> ImageInfo:
@@ -137,6 +156,85 @@ class VisionEngine:
         poses = self.position_estimator.integrate(motions, intervals)
         return summarize_mapping(poses, motions)
 
+    def estimate_track_with_slam(
+        self,
+        features: list[FeatureSet],
+        intervals: list[float],
+        hashes: list[str],
+    ) -> tuple[MappingOutcome, SlamOutcome]:
+        """Estimate a track, then close any loops in it (§15).
+
+        Returns both outcomes rather than only the refined one, because the caller needs to know
+        what changed and why. The odometry outcome carries the published confidence and the §46
+        refusal decision; the SLAM outcome says which revisits were verified and how far the
+        track moved. A consumer that shows a track must be able to say which of the two produced
+        it, so :meth:`SlamOutcome.to_dict` names the method explicitly.
+
+        ``hashes[i]`` is the perceptual hash of the frame behind ``features[i]``. They come from
+        the pipeline, which already computes them for near-duplicate rejection, so loop closure
+        adds no hashing work.
+        """
+        if len(features) < 2:
+            empty = summarize_mapping([], [])
+            return empty, SlamOutcome(
+                [],
+                [],
+                OptimisationReport(True, 0, 0.0, 0.0, 0.0, 0, ["no frames"]),
+                empty.confidence,
+                unchanged=True,
+            )
+
+        motions: list[RelativeMotion] = []
+        for index in range(len(features) - 1):
+            motions.append(
+                self.motion_estimator.estimate(
+                    self.matcher.match(features[index], features[index + 1]),
+                    features[index].image_width,
+                    features[index].image_height,
+                )
+            )
+
+        poses = self.position_estimator.integrate(motions, intervals)
+        outcome = summarize_mapping(poses, motions)
+
+        # Closing loops on a track the platform has already refused would be wasted work, and
+        # publishing a "refined" version of a track nobody will show would be misleading.
+        if outcome.requires_manual_placement:
+            return outcome, SlamOutcome(
+                poses,
+                [],
+                OptimisationReport(
+                    True,
+                    0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0,
+                    ["odometry confidence too low to publish - loop closure not attempted"],
+                ),
+                outcome.confidence,
+                unchanged=True,
+            )
+
+        slam = self.slam_estimator.refine(
+            poses, motions, features, hashes, base_confidence=outcome.confidence
+        )
+        if slam.unchanged:
+            return outcome, slam
+
+        refined = MappingOutcome(
+            poses=slam.poses,
+            confidence=outcome.confidence,
+            confidence_score=outcome.confidence_score,
+            note=(
+                f"{outcome.note} Loop closure reconciled {len(slam.closures)} verified "
+                f"revisit(s); the largest pose correction was "
+                f"{slam.report.max_correction:.2f} track units."
+            ),
+            requires_manual_placement=outcome.requires_manual_placement,
+        )
+        return refined, slam
+
     def describe_capabilities(self) -> dict[str, Any]:
         """Machine-readable statement of what is real, so the UI never overclaims (§46)."""
         return {
@@ -164,8 +262,21 @@ class VisionEngine:
                 "limitations": [
                     "no metric scale — direction only",
                     "assumes planar motion on one floor",
-                    "drifts over long sequences",
-                    "not SLAM; no loop closure or global optimisation",
+                    "drifts over long sequences unless a loop is closed",
+                ],
+            },
+            "loop_closure": {
+                "implemented": True,
+                "method": (
+                    "perceptual-hash shortlist, geometric verification, SE(2) pose-graph "
+                    "optimisation (Levenberg-Marquardt)"
+                ),
+                "provenance": "estimated",
+                "limitations": [
+                    "only helps a walkthrough that revisits a place it has already been",
+                    "closures constrain bearing and heading, never distance",
+                    "no landmark map and no bundle adjustment over 3D points",
+                    "single session only — no relocalisation against an earlier capture",
                 ],
             },
             "object_detection": {"implemented": False, "phase": 3},

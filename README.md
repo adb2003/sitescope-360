@@ -182,7 +182,9 @@ Stated plainly, because "it builds" and "it works" are different claims.
 | Frontend: 43 tests, ESLint, TypeScript, production build | **Verified** |
 | Demo seed, live API over HTTP | **Verified** |
 | Docker Compose, Dockerfiles, nginx | **Written, not executed locally** — Docker is not installed on this machine. CI builds both images and runs a stack smoke test. |
-| Expo mobile app | **Complete and syntax-checked, not executed** — no iOS/Android toolchain here. |
+| Mobile: TypeScript, 31 camera-protocol tests | **Verified** — the OSC client takes its transport as a dependency, so it runs under Node in CI. |
+| Expo mobile app on a device | **Complete and type-checked, not executed** — no iOS/Android toolchain here. |
+| Camera control against physical hardware | **Not verified** — no 360 camera on this project. The protocol is tested against a fake transport; a real device may differ. |
 
 ---
 

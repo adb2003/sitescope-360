@@ -13,6 +13,15 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native'
 
 import { Badge, Body, Button, Callout, Card, Divider, Field, Heading, Input, Label } from '../components/ui'
+import {
+  snapshotFileUrls,
+  startRecording,
+  stopRecording,
+  transferToQueue,
+  type TransferProgress,
+} from '../lib/cameraCapture'
+import { CameraError } from '../lib/osc'
+import { useCamera } from '../lib/useCamera'
 import { api } from '../lib/api'
 import {
   createLocalSession,
@@ -42,11 +51,19 @@ export function CaptureScreen({
   online,
   onQueueChanged,
   onOpenQueue,
+  onOpenCamera,
 }: {
   online: boolean
   onQueueChanged: () => void
   onOpenQueue: () => void
+  onOpenCamera: () => void
 }) {
+  const { connection: camera } = useCamera()
+  const [cameraBusy, setCameraBusy] = useState(false)
+  const [transfer, setTransfer] = useState<TransferProgress | null>(null)
+  // File URLs already on the camera when recording began, so a camera that finalises its file
+  // asynchronously can still be matched to the one new recording.
+  const [urlsBeforeRecording, setUrlsBeforeRecording] = useState<string[]>([])
   const [projects, setProjects] = useState<Array<{ id: string; name: string; code: string }>>([])
   const [floors, setFloors] = useState<Floor[]>([])
   const [zones, setZones] = useState<Zone[]>([])
@@ -229,6 +246,67 @@ export function CaptureScreen({
     onQueueChanged()
   }
 
+  /**
+   * Start the camera recording as part of starting the session.
+   *
+   * Failures here are reported but do not abort the session: the operator may be recording with
+   * the camera's own button, and a session that refuses to start because a remote trigger failed
+   * would be worse than one that simply is not driving the camera.
+   */
+  async function triggerCameraStart() {
+    if (!camera) return
+    setCameraBusy(true)
+    setMessage(null)
+    try {
+      setUrlsBeforeRecording(await snapshotFileUrls(camera.client))
+      await startRecording(camera.client)
+      setMessage('Camera recording. Walk the path, then tap Finish.')
+    } catch (caught) {
+      setMessage(
+        caught instanceof CameraError
+          ? `Camera did not start: ${caught.message}`
+          : 'Camera did not start. You can record with the camera itself and import afterwards.',
+      )
+    } finally {
+      setCameraBusy(false)
+    }
+  }
+
+  /**
+   * Stop recording and pull the file across.
+   *
+   * Nothing is deleted from the camera. A transfer that fails, or an app that is killed
+   * mid-copy, must never be able to destroy the only copy of a walkthrough -- so the recording
+   * stays on the device until the operator removes it themselves.
+   */
+  async function stopAndTransfer() {
+    if (!camera || !sessionId) return
+    setCameraBusy(true)
+    setMessage(null)
+    try {
+      const produced = await stopRecording(camera.client, urlsBeforeRecording)
+      for (const file of produced) {
+        await transferToQueue(camera.client, sessionId, file, setTransfer)
+      }
+      setTransfer(null)
+      await refreshFiles()
+      setMessage(
+        produced.length === 1
+          ? 'Recording transferred and queued for upload.'
+          : `${produced.length} recordings transferred and queued for upload.`,
+      )
+    } catch (caught) {
+      setTransfer(null)
+      setMessage(
+        caught instanceof CameraError
+          ? caught.message
+          : 'Could not transfer from the camera. The recording is still on the camera.',
+      )
+    } finally {
+      setCameraBusy(false)
+    }
+  }
+
   function reset() {
     setPhase('setup')
     setSessionId(null)
@@ -236,6 +314,8 @@ export function CaptureScreen({
     setElapsed(0)
     setFiles([])
     setMessage(null)
+    setTransfer(null)
+    setUrlsBeforeRecording([])
   }
 
   const totalBytes = useMemo(
@@ -274,6 +354,8 @@ export function CaptureScreen({
               emptyLabel={online ? 'Loading projects…' : 'Connect once to load projects'}
             />
           </Field>
+
+          <CameraStatus camera={camera} onOpenCamera={onOpenCamera} />
 
           <Field label="Floor">
             <Chooser
@@ -350,6 +432,43 @@ export function CaptureScreen({
 
             <Divider />
 
+            {camera ? (
+              <>
+                <Label>Camera</Label>
+                {transfer ? (
+                  <View style={styles.transfer}>
+                    <Text style={styles.transferLabel}>
+                      Transferring {transfer.file} — {Math.round(transfer.fraction * 100)}%
+                    </Text>
+                    <View style={styles.transferTrack}>
+                      <View
+                        style={[styles.transferFill, { width: `${Math.round(transfer.fraction * 100)}%` }]}
+                      />
+                    </View>
+                    <Text style={styles.transferHint}>
+                      Stay on the camera&rsquo;s Wi-Fi until this finishes.
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={styles.buttonRow}>
+                    <Button
+                      label="Start camera"
+                      onPress={() => void triggerCameraStart()}
+                      loading={cameraBusy}
+                      style={styles.grow}
+                    />
+                    <Button
+                      label="Stop &amp; transfer"
+                      onPress={() => void stopAndTransfer()}
+                      loading={cameraBusy}
+                      style={styles.grow}
+                    />
+                  </View>
+                )}
+                <Divider />
+              </>
+            ) : null}
+
             <View style={styles.buttonRow}>
               <Button
                 label={paused ? 'Resume' : 'Pause'}
@@ -423,6 +542,47 @@ export function CaptureScreen({
 }
 
 // ---- small pieces -----------------------------------------------------------
+/**
+ * Whether a camera is connected, stated before the operator starts walking.
+ *
+ * Deliberately not a blocker. Importing files the camera's own app already copied to the phone
+ * remains a first-class path -- it is the only option for a camera that speaks no open protocol,
+ * and the fallback when a connection drops on site.
+ */
+function CameraStatus({
+  camera,
+  onOpenCamera,
+}: {
+  camera: ReturnType<typeof useCamera>['connection']
+  onOpenCamera: () => void
+}) {
+  if (!camera) {
+    return (
+      <View style={styles.cameraStatus}>
+        <Callout tone="info" title="No camera connected">
+          Connect one to start and stop recording from here and pull the file across
+          automatically. You can also capture with the camera itself and import the files below.
+        </Callout>
+        <Button label="Connect a camera" onPress={onOpenCamera} />
+      </View>
+    )
+  }
+
+  const battery = camera.state.batteryLevel
+  const percent = battery === null ? null : Math.round(battery * 100)
+  return (
+    <View style={styles.cameraStatus}>
+      <View style={styles.cameraRow}>
+        <Badge label="camera ready" tone="good" />
+        <Text style={styles.cameraModel} numberOfLines={1}>
+          {camera.info.model}
+          {percent === null ? '' : ` · ${percent}%`}
+        </Text>
+      </View>
+    </View>
+  )
+}
+
 function Chooser({
   options,
   value,
@@ -503,6 +663,19 @@ function formatBytes(bytes: number): string {
 }
 
 const styles = StyleSheet.create({
+  cameraStatus: { gap: spacing.sm, marginBottom: spacing.md },
+  cameraRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  cameraModel: { color: theme.inkMuted, flex: 1 },
+  transfer: { gap: spacing.xs, marginVertical: spacing.sm },
+  transferLabel: { color: theme.ink },
+  transferTrack: {
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: theme.line,
+    overflow: 'hidden',
+  },
+  transferFill: { height: 6, backgroundColor: theme.brand },
+  transferHint: { color: theme.inkSubtle, fontSize: 12 },
   flex: { flex: 1, backgroundColor: theme.canvas },
   content: { padding: spacing.lg, gap: spacing.lg, paddingBottom: spacing.xl * 2 },
   recordingHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },

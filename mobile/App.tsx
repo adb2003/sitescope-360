@@ -1,7 +1,8 @@
 /**
  * SiteScope 360 capture app (§5, §32).
  *
- * Two tabs and a sign-in gate, deliberately: a site engineer needs to start a capture and see
+ * Three tabs and a sign-in gate, deliberately: connect the camera, run the capture, watch the
+ * queue drain. The order is the order of the job. A site engineer needs to start a capture and see
  * what is still waiting to upload, and nothing else. Everything analytical lives in the web
  * dashboard.
  *
@@ -18,12 +19,13 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
 
 import { tokens } from './src/lib/api'
 import { openQueue, pendingCount, sync } from './src/lib/queue'
+import { CameraScreen } from './src/screens/CameraScreen'
 import { CaptureScreen } from './src/screens/CaptureScreen'
 import { QueueScreen } from './src/screens/QueueScreen'
 import { SignInScreen } from './src/screens/SignInScreen'
 import { spacing, theme } from './src/theme'
 
-type Tab = 'capture' | 'queue'
+type Tab = 'camera' | 'capture' | 'queue'
 
 export default function App() {
   const [ready, setReady] = useState(false)
@@ -124,11 +126,14 @@ export default function App() {
         </View>
 
         <View style={styles.flex}>
-          {tab === 'capture' ? (
+          {tab === 'camera' ? (
+            <CameraScreen onReady={() => setTab('capture')} />
+          ) : tab === 'capture' ? (
             <CaptureScreen
               online={online}
               onQueueChanged={refreshQueueCount}
               onOpenQueue={() => setTab('queue')}
+              onOpenCamera={() => setTab('camera')}
             />
           ) : (
             <QueueScreen online={online} onQueueChanged={refreshQueueCount} />
@@ -136,6 +141,7 @@ export default function App() {
         </View>
 
         <View style={styles.tabBar}>
+          <TabButton label="Camera" active={tab === 'camera'} onPress={() => setTab('camera')} />
           <TabButton
             label="Capture"
             active={tab === 'capture'}

@@ -104,6 +104,27 @@ path. Filenames are resolved and checked for containment before opening.
 ### `osc` — partial
 
 Open Spherical Camera is an open specification, so this adapter needs no vendor SDK.
+
+### The same protocol also lives in the mobile app
+
+`mobile/src/lib/osc.ts` is a second OSC client, and the duplication is deliberate rather than an
+oversight.
+
+A 360 camera serves its API over its own Wi-Fi access point. Reaching it means *joining that
+access point*, and a phone joined to a camera's AP has no route to the internet and therefore no
+route to this backend. So the server can never be the device that drives a camera in the field:
+
+    phone joins camera Wi-Fi -> phone drives camera -> phone stores file
+      -> phone rejoins the internet -> queue uploads to the platform
+
+`Generic360Provider` here remains the right component for a camera sitting on the site LAN, where
+the server *can* reach it. Neither replaces the other.
+
+The mobile client is covered by 31 tests against a fake transport (`osc.test.ts`,
+`cameraCapture.test.ts`), which exercise envelope parsing, the spec's error shape, missing and
+malformed fields, timeouts, address discovery and the finalising-file fallback. None of that
+proves a physical camera behaves as specified — there is no 360 camera on this project, and the
+docstrings say so rather than implying otherwise.
 `health()` speaks the documented `/osc/info` endpoint and will report a reachable camera's
 manufacturer, model and firmware.
 

@@ -28,6 +28,7 @@ from app.vision.slam import (
     GraphSlamPositionEstimator,
     LoopClosure,
     LoopClosureDetector,
+    OptimisationReport,
     PoseGraph,
     PoseGraphEdge,
     build_graph,
@@ -559,3 +560,127 @@ def test_a_bearing_closure_carries_no_distance_information() -> None:
     graph_far.add_edge(edge)
 
     assert np.allclose(graph_near._residual(edge), graph_far._residual(edge))
+
+
+# ---- outlier closures --------------------------------------------------------
+def test_contradictory_closures_are_rejected_and_reported() -> None:
+    """The fix for a measured regression, pinned.
+
+    On a rendered rectangular circuit the detector accepted twelve "verified" closures, two of
+    them between genuinely different corners of the room, and the optimised track came out 24%
+    *worse* than plain dead reckoning -- while reporting convergence, a 97.9% drop in constraint
+    error, and high confidence. Every internal signal said success.
+
+    Repetitive wall texture yields both a high ORB inlier count and a self-consistent essential
+    matrix between places that merely look alike, so no inlier threshold alone catches it. What
+    catches it is asking, after a robust solve, which constraints still disagree with everything
+    else. After this fix the same circuit improved 38% over odometry instead of degrading.
+    """
+    truth = square_loop()
+    poses, motions = dead_reckoned(truth, yaw_bias_deg=1.5)
+
+    honest = closing_observation(truth)
+    # Two mutually incompatible claims about the same pair: at most one can be satisfied, so a
+    # large residual must survive the solve.
+    conflicting = [
+        LoopClosure(
+            from_index=honest.from_index,
+            to_index=honest.to_index,
+            dx=-honest.dx,
+            dy=-honest.dy,
+            dtheta_deg=honest.dtheta_deg + 180.0,
+            inlier_count=95,
+            hash_distance=6,
+            confidence=0.9,
+        ),
+        honest,
+    ]
+
+    graph = build_graph(poses, motions, conflicting)
+    report = graph.optimise()
+
+    assert report.loop_closures_rejected >= 1, report.notes
+    assert any("rejected" in note for note in report.notes), report.notes
+
+
+def test_a_lone_absorbable_outlier_is_a_known_limitation() -> None:
+    """Documented honestly rather than papered over.
+
+    A *single* false closure that the graph can satisfy by deforming the track is not detectable
+    by these checks: the optimiser bends the poses until the residual vanishes, so there is no
+    surviving disagreement to reject. It is caught only when it contradicts something else.
+
+    A cluster-support filter was tried -- requiring each closure to be corroborated by another
+    with nearby endpoints, which is what the real data showed distinguished true from false. It
+    worked on this case and measurably *hurt* the real one, cutting the rendered circuit's
+    improvement from 38% to 12% by discarding true closures along with false. It was removed: a
+    filter that costs accuracy on real imagery to satisfy a synthetic case is the wrong trade.
+
+    So this test asserts the limitation exists, which is the honest state of the feature. The
+    defences that remain are a high inlier bar, the Huber kernel, and residual rejection, and
+    describe_capabilities() states that a single unchallenged false closure can still distort a
+    track.
+    """
+    truth = square_loop()
+    poses, motions = dead_reckoned(truth, yaw_bias_deg=1.5)
+    lone_outlier = LoopClosure(
+        from_index=6,
+        to_index=18,
+        dx=0.0,
+        dy=1.0,
+        dtheta_deg=170.0,
+        inlier_count=95,
+        hash_distance=6,
+        confidence=0.9,
+    )
+
+    graph = build_graph(poses, motions, [lone_outlier])
+    report = graph.optimise()
+
+    # Absorbed, not rejected -- the residual is driven to nothing by moving the poses.
+    assert report.loop_closures_rejected == 0
+    # The one guarantee that must still hold: never worse than what it was given.
+    assert report.final_error <= report.initial_error + 1e-9
+
+
+def test_a_huge_outlier_cannot_outvote_the_odometry() -> None:
+    """Why the Huber kernel exists.
+
+    Plain least squares weights a constraint by the *square* of how wrong it is, so one false
+    closure outvotes the whole odometry chain. With the robust kernel its influence grows only
+    linearly past the threshold. Checked with rejection disabled, so the kernel is what is under
+    test rather than the rejection pass hiding it.
+    """
+    truth = square_loop()
+    poses, motions = dead_reckoned(truth, yaw_bias_deg=1.5)
+    absurd = LoopClosure(
+        from_index=2,
+        to_index=20,
+        dx=-1.0,
+        dy=0.0,
+        dtheta_deg=180.0,
+        inlier_count=99,
+        hash_distance=1,
+        confidence=1.0,
+    )
+
+    graph = build_graph(poses, motions, [absurd])
+    graph.optimise(reject_outliers=False)
+
+    # The track may be distorted, but it must not have been folded in half to satisfy one edge.
+    span_truth = float(np.ptp(truth[:, 0]) + np.ptp(truth[:, 1]))
+    span_result = float(np.ptp(graph.poses[:, 0]) + np.ptp(graph.poses[:, 1]))
+    assert span_result > 0.4 * span_truth, (
+        f"one outlier collapsed the track: span {span_result:.1f} vs {span_truth:.1f}"
+    )
+
+
+def test_the_report_cannot_be_built_positionally() -> None:
+    """Guards the trap that caused a silent bug.
+
+    Adding `loop_closures_rejected` mid-signature shifted `notes` into an int field at six call
+    sites. Nothing failed there; the only symptom was an empty notes list in a test three files
+    away. Seven same-shaped fields must be keyword-only.
+    """
+    with pytest.raises(TypeError):
+        OptimisationReport(True, 0, 0.0, 0.0, 0.0, 0, [])  # type: ignore[misc]

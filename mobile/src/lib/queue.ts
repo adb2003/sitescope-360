@@ -22,7 +22,11 @@
  */
 
 import * as FileSystem from 'expo-file-system'
-import * as SQLite from 'expo-sqlite'
+import { Platform } from 'react-native'
+// Type-only: erased at compile time, so the web bundle never references the native module.
+// `expo-sqlite` throws from its *import*, not from its first call, so a runtime guard alone is
+// not enough -- the module has to be required lazily, after the platform check.
+import type * as SQLiteTypes from 'expo-sqlite'
 
 import { api } from './api'
 
@@ -59,10 +63,36 @@ export interface PendingFile {
   queuedAt: string
 }
 
-let database: SQLite.SQLiteDatabase | null = null
+let database: SQLiteTypes.SQLiteDatabase | null = null
 
-export async function openQueue(): Promise<SQLite.SQLiteDatabase> {
+/**
+ * True when the durable queue is usable on this platform.
+ *
+ * `expo-sqlite` is native-only without the OPFS headers a browser needs, and `expo-file-system`
+ * has no document directory on web. Expo web exists here to inspect the interface on a desktop,
+ * so the queue reports itself unavailable rather than crashing the app — and the UI says so
+ * instead of showing an empty queue that looks like "nothing pending".
+ */
+export const QUEUE_IS_AVAILABLE = Platform.OS !== 'web'
+
+export class QueueUnavailableError extends Error {
+  constructor() {
+    super(
+      'The upload queue needs the device app: a browser has no durable local database for ' +
+        'captures. Camera connection and capture setup can be reviewed here, but nothing is ' +
+        'queued or uploaded.',
+    )
+    this.name = 'QueueUnavailableError'
+  }
+}
+
+export async function openQueue(): Promise<SQLiteTypes.SQLiteDatabase> {
+  if (!QUEUE_IS_AVAILABLE) {
+    throw new QueueUnavailableError()
+  }
   if (database) return database
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const SQLite = require('expo-sqlite') as typeof SQLiteTypes
   database = await SQLite.openDatabaseAsync(DB_NAME)
 
   // WAL so a read during an upload does not block, and the schema in one place so a fresh

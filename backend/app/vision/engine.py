@@ -179,7 +179,15 @@ class VisionEngine:
             return empty, SlamOutcome(
                 [],
                 [],
-                OptimisationReport(True, 0, 0.0, 0.0, 0.0, 0, ["no frames"]),
+                OptimisationReport(
+                    converged=True,
+                    iterations=0,
+                    initial_error=0.0,
+                    final_error=0.0,
+                    max_correction=0.0,
+                    loop_closures_used=0,
+                    notes=["no frames"],
+                ),
                 empty.confidence,
                 unchanged=True,
             )
@@ -204,13 +212,13 @@ class VisionEngine:
                 poses,
                 [],
                 OptimisationReport(
-                    True,
-                    0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0,
-                    ["odometry confidence too low to publish - loop closure not attempted"],
+                    converged=True,
+                    iterations=0,
+                    initial_error=0.0,
+                    final_error=0.0,
+                    max_correction=0.0,
+                    loop_closures_used=0,
+                    notes=["odometry confidence too low to publish - loop closure not attempted"],
                 ),
                 outcome.confidence,
                 unchanged=True,
@@ -277,6 +285,12 @@ class VisionEngine:
                     "closures constrain bearing and heading, never distance",
                     "no landmark map and no bundle adjustment over 3D points",
                     "single session only — no relocalisation against an earlier capture",
+                    # Measured, not hypothetical: repetitive structure produced false closures
+                    # that made a rendered circuit 24% worse than plain odometry before the
+                    # robust kernel and residual rejection were added. Those catch closures that
+                    # contradict each other; a single unchallenged one can still distort a track.
+                    "a lone false closure the graph can absorb is not detectable — measured "
+                    "improvement on a rendered circuit is 38% over odometry, not a guarantee",
                 ],
             },
             "object_detection": {"implemented": False, "phase": 3},

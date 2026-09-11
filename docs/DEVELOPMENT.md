@@ -225,6 +225,26 @@ maintaining a third shared package.
 
 ---
 
+### Inspecting the mobile app on a desktop
+
+```bash
+npm run web --prefix mobile     # http://localhost:8081
+```
+
+Renders the Expo app through `react-native-web`. Useful for reviewing the camera and capture
+screens without a device, and **not a deployment target** — two things genuinely do not exist in
+a browser:
+
+| | On a device | Under `expo start --web` |
+| --- | --- | --- |
+| Tokens | `expo-secure-store`, the OS keychain | `localStorage`, which is not secure |
+| Upload queue | `expo-sqlite` + the filesystem | absent; the queue screen says so |
+
+`expo-sqlite` throws from its *import* rather than its first call, so it is required lazily after
+a platform check — a runtime guard alone still crashes the web bundle at load.
+
+The API must allow `http://localhost:8081` in `CORS_ORIGINS`; `.env.example` already does.
+
 ## Configuration
 
 Everything is an environment variable; `.env.example` documents the full set with comments. The

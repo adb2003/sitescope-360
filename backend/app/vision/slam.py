@@ -42,10 +42,17 @@ from app.vision.types import FeatureSet, RelativeMotion, RelativePose
 #: neighbour. Adjacent frames always look alike; that is odometry, and it is already in the graph.
 MIN_LOOP_SEPARATION = 8
 
-#: Verified inliers a candidate closure needs. Higher than the odometry threshold (20) on purpose:
-#: a false closure corrupts the whole track, a missed one costs only the drift it would have
-#: removed, so the asymmetry belongs in the threshold.
-MIN_LOOP_INLIERS = 35
+#: Verified inliers a candidate closure needs. Far higher than the odometry threshold (20) on
+#: purpose: a false closure corrupts the whole track, a missed one costs only the drift it would
+#: have removed, so the asymmetry belongs in the threshold.
+#:
+#: Raised from 35 after measurement. On a rendered rectangular circuit, 35 admitted two closures
+#: between genuinely different corners of the room -- one of them clearing the bar by a single
+#: inlier -- and the resulting track was 24% *worse* than plain dead reckoning. Repetitive wall
+#: texture produces both a high inlier count and a self-consistent essential matrix between
+#: places that merely look alike, so the inlier count alone was never going to be enough; see
+#: `RESIDUAL_OUTLIER_RADIANS` for the check that actually catches them.
+MIN_LOOP_INLIERS = 60
 
 #: Hamming distance between 64-bit dHashes below which two frames are worth verifying. Loose by
 #: design -- this stage only shortlists; geometry decides.
@@ -74,6 +81,22 @@ CONVERGENCE_DELTA = 1e-6
 #: observes two poses directly rather than through a chain, so it is worth more than a single
 #: step -- but not so much more that one bad closure can overwhelm the odometry that disagrees.
 LOOP_INFORMATION_SCALE = 4.0
+
+#: Huber threshold for loop-closure residuals, in radians (~11.5 deg).
+#:
+#: Beyond this a closure's influence grows linearly rather than quadratically, so one badly wrong
+#: constraint cannot dominate the solution. Least squares without a robust kernel gives an outlier
+#: weight proportional to the square of how wrong it is, which is precisely backwards.
+HUBER_DELTA_RADIANS = 0.20
+
+#: After a robust solve, a loop edge still disagreeing by more than this (~28.6 deg) is rejected
+#: as a false positive and the graph is solved again without it.
+#:
+#: The reasoning: a *true* revisit disagrees with the odometry by the accumulated drift, which the
+#: optimiser can absorb by distributing it around the loop. A false revisit disagrees with the
+#: rest of the graph in a way nothing can absorb, so a large surviving residual is the signature
+#: of a wrong constraint rather than of a drifted one.
+RESIDUAL_OUTLIER_RADIANS = 0.50
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,9 +139,15 @@ class PoseGraphEdge:
     is_loop: bool = False
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class OptimisationReport:
-    """What the solver did -- reported rather than assumed, so callers can refuse the result."""
+    """What the solver did -- reported rather than assumed, so callers can refuse the result.
+
+    Keyword-only, deliberately. Inserting ``loop_closures_rejected`` into the middle of a
+    positional signature silently shifted ``notes`` into an int field at six call sites, and not
+    one of them failed -- the only symptom was an empty notes list surfacing in a test three
+    files away. Seven same-shaped fields should never have been positional.
+    """
 
     converged: bool
     iterations: int
@@ -127,6 +156,8 @@ class OptimisationReport:
     #: Largest distance any pose moved, in the same units as the track (scale-free).
     max_correction: float
     loop_closures_used: int
+    #: Closures dropped as outliers after the robust solve. Reported, never silently discarded.
+    loop_closures_rejected: int = 0
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -145,6 +176,7 @@ class OptimisationReport:
             "error_reduction": round(self.error_reduction, 4),
             "max_correction": round(self.max_correction, 4),
             "loop_closures_used": self.loop_closures_used,
+            "loop_closures_rejected": self.loop_closures_rejected,
             "notes": list(self.notes),
         }
 
@@ -281,6 +313,9 @@ class PoseGraph:
         if initial.ndim != 2 or initial.shape[1] != 3:
             raise ValueError(f"initial poses must be (N, 3), got {initial.shape}")
         self.poses = np.array(initial, dtype=float)
+        #: The unoptimised track, kept so an outlier-rejection restart begins from a clean state
+        #: rather than from a configuration the outliers already distorted.
+        self._initial = np.array(initial, dtype=float)
         self.edges: list[PoseGraphEdge] = []
 
     @property
@@ -302,10 +337,32 @@ class PoseGraph:
         return float(total)
 
     def _information(self, edge: PoseGraphEdge) -> np.ndarray:
-        """Diagonal information matrix, sized to match the edge's residual."""
-        if edge.is_loop:
-            return np.diag([edge.info_xy, edge.info_theta])
-        return np.diag([edge.info_xy, edge.info_xy, edge.info_theta])
+        """Diagonal information matrix, sized to match the edge's residual.
+
+        Loop edges are down-weighted by a Huber factor once their residual exceeds
+        :data:`HUBER_DELTA_RADIANS`. Plain least squares weights a constraint by the *square* of
+        how wrong it is, so a single false closure outvotes the entire odometry chain -- which is
+        exactly backwards, and exactly what was measured before this existed.
+
+        Odometry edges are not robustified: they are the reference the closures are judged
+        against, and down-weighting them would let a confident outlier reshape the track.
+        """
+        if not edge.is_loop:
+            return np.diag([edge.info_xy, edge.info_xy, edge.info_theta])
+
+        weight = self._huber_weight(edge)
+        return np.diag([edge.info_xy * weight, edge.info_theta * weight])
+
+    def _huber_weight(self, edge: PoseGraphEdge) -> float:
+        """1 inside the Huber radius, falling off as delta/|r| outside it."""
+        magnitude = float(np.linalg.norm(self._raw_residual(edge)))
+        if magnitude <= HUBER_DELTA_RADIANS:
+            return 1.0
+        return HUBER_DELTA_RADIANS / magnitude
+
+    def _raw_residual(self, edge: PoseGraphEdge) -> np.ndarray:
+        """Alias for :meth:`_residual`, named at the call sites that must not be weighted."""
+        return self._residual(edge)
 
     def _residual(self, edge: PoseGraphEdge) -> np.ndarray:
         """Constraint violation. Three components for odometry, two for a loop closure.
@@ -352,9 +409,75 @@ class PoseGraph:
         )
 
     def optimise(
+        self,
+        *,
+        max_iterations: int = MAX_ITERATIONS,
+        tolerance: float = CONVERGENCE_DELTA,
+        reject_outliers: bool = True,
+    ) -> OptimisationReport:
+        """Solve the graph, discard loop closures that turn out to be false, solve again.
+
+        Two passes, because a robust kernel limits an outlier's influence but does not remove it.
+        The first solve is robust enough to find a sane configuration; any loop edge still
+        disagreeing by more than :data:`RESIDUAL_OUTLIER_RADIANS` in that configuration is a
+        false positive, and the second solve is run without it.
+
+        Measured need, not theory. Before this existed, a rendered rectangular circuit produced
+        twelve "verified" closures, two of them between different corners of the room, and the
+        optimised track was 24% *worse* than plain dead reckoning -- while reporting convergence,
+        a 97.9% drop in constraint error and high confidence. Every internal signal said success.
+
+        Rejections are counted in the report rather than silently dropped: a walkthrough where
+        half the closures were discarded is one to be suspicious of, and only the caller can
+        judge that.
+        """
+        first = self._solve_once(max_iterations=max_iterations, tolerance=tolerance)
+        if not reject_outliers:
+            return first
+
+        loop_edges = [edge for edge in self.edges if edge.is_loop]
+        if not loop_edges:
+            return first
+
+        outliers = [
+            edge
+            for edge in loop_edges
+            if float(np.linalg.norm(self._raw_residual(edge))) > RESIDUAL_OUTLIER_RADIANS
+        ]
+        if not outliers:
+            return first
+
+        kept = [edge for edge in self.edges if edge not in outliers]
+        if not any(edge.is_loop for edge in kept):
+            # Every closure was an outlier, so there is nothing to reconcile. Returning the
+            # odometry untouched is the honest answer, not a track bent by constraints that were
+            # all wrong.
+            self.poses = self._initial.copy()
+            self.edges = kept
+            report = self._solve_once(max_iterations=max_iterations, tolerance=tolerance)
+            report.loop_closures_rejected = len(outliers)
+            report.notes.append(
+                f"all {len(outliers)} candidate closure(s) were rejected as inconsistent - "
+                "the track is unchanged dead reckoning"
+            )
+            return report
+
+        # Restart from the unoptimised track: the first solve was distorted by the outliers, and
+        # using it as the starting point would carry that distortion into the second.
+        self.poses = self._initial.copy()
+        self.edges = kept
+        second = self._solve_once(max_iterations=max_iterations, tolerance=tolerance)
+        second.loop_closures_rejected = len(outliers)
+        second.notes.append(
+            f"rejected {len(outliers)} closure(s) that still disagreed by more than "
+            f"{np.degrees(RESIDUAL_OUTLIER_RADIANS):.0f}deg after the robust solve"
+        )
+        return second
+
+    def _solve_once(
         self, *, max_iterations: int = MAX_ITERATIONS, tolerance: float = CONVERGENCE_DELTA
     ) -> OptimisationReport:
-        """Gauss-Newton on the pose graph, holding node 0 at the origin.
+        """One Levenberg-Marquardt solve, holding node 0 at the origin.
 
         Node 0 is fixed because a pose graph built from relative constraints has a free global
         rigid transform: without an anchor the normal equations are singular and the solution
@@ -367,12 +490,28 @@ class PoseGraph:
         loops = sum(1 for edge in self.edges if edge.is_loop)
         if not self.edges:
             notes.append("no constraints - nothing to optimise")
-            return OptimisationReport(True, 0, 0.0, 0.0, 0.0, 0, notes)
+            return OptimisationReport(
+                converged=True,
+                iterations=0,
+                initial_error=0.0,
+                final_error=0.0,
+                max_correction=0.0,
+                loop_closures_used=0,
+                notes=notes,
+            )
         if loops == 0:
             # Optimising an open chain is a no-op: the odometry already satisfies every edge
             # exactly. Saying so is more useful than reporting a converged solve that did nothing.
             notes.append("no loop closures - the odometry chain is already the optimum")
-            return OptimisationReport(True, 0, initial_error, initial_error, 0.0, 0, notes)
+            return OptimisationReport(
+                converged=True,
+                iterations=0,
+                initial_error=initial_error,
+                final_error=initial_error,
+                max_correction=0.0,
+                loop_closures_used=0,
+                notes=notes,
+            )
 
         before = self.poses.copy()
         free = self.size - 1  # node 0 is fixed
@@ -432,7 +571,13 @@ class PoseGraph:
             )
             self.poses = before
             return OptimisationReport(
-                False, iterations, initial_error, initial_error, 0.0, loops, notes
+                converged=False,
+                iterations=iterations,
+                initial_error=initial_error,
+                final_error=initial_error,
+                max_correction=0.0,
+                loop_closures_used=loops,
+                notes=notes,
             )
 
         if not converged:
@@ -658,7 +803,13 @@ class GraphSlamPositionEstimator:
                 poses,
                 [],
                 OptimisationReport(
-                    True, 0, 0.0, 0.0, 0.0, 0, [f"only {len(poses)} poses - too short to loop"]
+                    converged=True,
+                    iterations=0,
+                    initial_error=0.0,
+                    final_error=0.0,
+                    max_correction=0.0,
+                    loop_closures_used=0,
+                    notes=[f"only {len(poses)} poses - too short to loop"],
                 ),
                 base_confidence,
                 unchanged=True,
@@ -670,7 +821,13 @@ class GraphSlamPositionEstimator:
                 poses,
                 [],
                 OptimisationReport(
-                    True, 0, 0.0, 0.0, 0.0, 0, ["no verified revisits - the path did not close"]
+                    converged=True,
+                    iterations=0,
+                    initial_error=0.0,
+                    final_error=0.0,
+                    max_correction=0.0,
+                    loop_closures_used=0,
+                    notes=["no verified revisits - the path did not close"],
                 ),
                 base_confidence,
                 unchanged=True,

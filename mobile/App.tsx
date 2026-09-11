@@ -18,7 +18,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-nati
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
 
 import { tokens } from './src/lib/api'
-import { openQueue, pendingCount, sync } from './src/lib/queue'
+import { openQueue, pendingCount, sync, QUEUE_IS_AVAILABLE } from './src/lib/queue'
 import { CameraScreen } from './src/screens/CameraScreen'
 import { CaptureScreen } from './src/screens/CaptureScreen'
 import { QueueScreen } from './src/screens/QueueScreen'
@@ -35,6 +35,7 @@ export default function App() {
   const [waiting, setWaiting] = useState(0)
 
   const refreshQueueCount = useCallback(() => {
+    if (!QUEUE_IS_AVAILABLE) return
     void pendingCount().then(setWaiting)
   }, [])
 
@@ -42,8 +43,12 @@ export default function App() {
   useEffect(() => {
     void (async () => {
       // The local queue must exist before anything else: a capture started while offline writes
-      // to it immediately.
-      await openQueue()
+      // to it immediately. Under Expo web there is no durable queue at all, and the app must
+      // still boot -- web exists to inspect the interface on a desktop, and refusing to start
+      // would defeat that while telling the operator nothing.
+      if (QUEUE_IS_AVAILABLE) {
+        await openQueue()
+      }
       const { access } = await tokens.get()
       setSignedIn(Boolean(access))
       refreshQueueCount()
@@ -64,7 +69,7 @@ export default function App() {
 
       setOnline((previous) => {
         // A transition from offline to online is the moment to drain the queue (§32).
-        if (!previous && reachable) {
+        if (!previous && reachable && QUEUE_IS_AVAILABLE) {
           void sync().finally(refreshQueueCount)
         }
         return reachable

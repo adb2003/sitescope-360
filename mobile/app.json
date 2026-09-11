@@ -6,7 +6,9 @@
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0b1116",
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "local.sitescope.capture",
@@ -18,10 +20,21 @@
     },
     "android": {
       "package": "local.sitescope.capture",
-      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "CAMERA"]
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "CAMERA"
+      ]
     },
     "extra": {
-      "apiBaseUrl": "http://10.0.2.2:8000"
-    }
+      "apiBaseUrl": "http://10.0.2.2:8000",
+      "apiBaseUrlWeb": "http://localhost:8000"
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-asset"
+    ]
   }
 }

@@ -140,8 +140,11 @@ class Generic360Provider(BaseCameraProvider):
         transport=CameraTransport.WIFI_OSC,
         implemented=False,
         description=(
-            "Talks the open OSC (Open Spherical Camera) HTTP protocol. Untested against physical "
-            "hardware in this build — use folder import or upload for production capture."
+            "Talks the open OSC (Open Spherical Camera) HTTP protocol from the server, for a "
+            "camera reachable on the site LAN. For capture in the field use the mobile app, "
+            "which speaks the same protocol from the phone — a camera on its own Wi-Fi access "
+            "point is unreachable from any server by definition. Neither path is verified "
+            "against physical hardware in this build."
         ),
         supports_live_transfer=True,
         supports_remote_trigger=True,

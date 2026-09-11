@@ -18,6 +18,7 @@ import {
   sync,
   type PendingFile,
   type PendingSession,
+  QUEUE_IS_AVAILABLE,
 } from '../lib/queue'
 import { spacing, theme } from '../theme'
 
@@ -35,6 +36,9 @@ export function QueueScreen({
   const [errors, setErrors] = useState<string[]>([])
 
   const load = useCallback(async () => {
+    // Without a durable queue there is nothing to list, and an empty list here would read as
+    // "nothing pending" -- which is a very different statement from "this platform cannot queue".
+    if (!QUEUE_IS_AVAILABLE) return
     const [loadedSessions, loadedFiles] = await Promise.all([listSessions(), listFiles()])
     setSessions(loadedSessions)
     setFiles(loadedFiles)
@@ -77,6 +81,21 @@ export function QueueScreen({
 
   const pending = files.filter((file) => file.status === 'pending' || file.status === 'failed')
   const uploaded = files.filter((file) => file.status === 'uploaded')
+
+  if (!QUEUE_IS_AVAILABLE) {
+    // Expo web has no durable local database, so there is no queue to show. Saying that plainly
+    // beats an empty list that looks like a drained queue.
+    return (
+      <ScrollView contentContainerStyle={styles.content}>
+        <Heading>Upload queue</Heading>
+        <Callout tone="warn" title="Not available in the browser">
+          The queue needs the installed app: a browser has no durable local database for
+          captures, so nothing can be held here and nothing is uploaded. Camera connection and
+          capture setup can be reviewed on this build; recording and upload need a device.
+        </Callout>
+      </ScrollView>
+    )
+  }
 
   return (
     <ScrollView

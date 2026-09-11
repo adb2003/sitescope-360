@@ -10,17 +10,28 @@
  */
 
 import Constants from 'expo-constants'
-import * as SecureStore from 'expo-secure-store'
+import { Platform } from 'react-native'
+
+// Imported for use below and re-exported so existing callers keep importing `tokens` from
+// here; the platform split lives in tokenStore.ts because a browser has no keychain.
+import { tokens } from './tokenStore'
+
+export { tokens }
 
 const ACCESS_KEY = 'sitescope_access_token'
 const REFRESH_KEY = 'sitescope_refresh_token'
 
 /**
  * `10.0.2.2` is the Android emulator's alias for the host machine; a physical device needs the
- * host's LAN address. Configured in `app.json` under `extra.apiBaseUrl`.
+ * host's LAN address. Configured in `app.json` under `extra.apiBaseUrl`, with
+ * `extra.apiBaseUrlWeb` used under Expo web -- 10.0.2.2 is the Android emulator's alias for
+ * the host and means nothing in a desktop browser.
  */
 export const API_BASE_URL: string =
-  (Constants.expoConfig?.extra?.apiBaseUrl as string | undefined) ?? 'http://10.0.2.2:8000'
+  Platform.OS === 'web'
+    ? ((Constants.expoConfig?.extra?.apiBaseUrlWeb as string | undefined) ??
+      'http://localhost:8000')
+    : ((Constants.expoConfig?.extra?.apiBaseUrl as string | undefined) ?? 'http://10.0.2.2:8000')
 
 const API_PREFIX = '/api'
 
@@ -34,28 +45,6 @@ export class ApiError extends Error {
     this.status = status
     this.code = code
   }
-}
-
-export const tokens = {
-  async get(): Promise<{ access: string | null; refresh: string | null }> {
-    const [access, refresh] = await Promise.all([
-      SecureStore.getItemAsync(ACCESS_KEY),
-      SecureStore.getItemAsync(REFRESH_KEY),
-    ])
-    return { access, refresh }
-  },
-  async set(access: string, refresh: string): Promise<void> {
-    await Promise.all([
-      SecureStore.setItemAsync(ACCESS_KEY, access),
-      SecureStore.setItemAsync(REFRESH_KEY, refresh),
-    ])
-  },
-  async clear(): Promise<void> {
-    await Promise.all([
-      SecureStore.deleteItemAsync(ACCESS_KEY),
-      SecureStore.deleteItemAsync(REFRESH_KEY),
-    ])
-  },
 }
 
 async function authHeaders(): Promise<Record<string, string>> {

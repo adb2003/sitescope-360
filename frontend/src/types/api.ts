@@ -202,6 +202,40 @@ export interface CaptureSchedule {
 }
 
 // ---- captures ---------------------------------------------------------------
+
+/**
+ * What loop closure did to a track.
+ *
+ * Mirrors `SlamOutcome.to_dict()` on the backend. Present so the UI can say which estimator
+ * produced the positions it is drawing -- the coordinates look the same either way, and a
+ * loop-closed track has bounded drift where a dead-reckoned one does not.
+ */
+export interface LoopClosureReport {
+  method: string
+  loop_closures: Array<{
+    from_index: number
+    to_index: number
+    dtheta_deg: number
+    inlier_count: number
+    hash_distance: number
+    confidence: number
+  }>
+  optimisation: {
+    converged: boolean
+    iterations: number
+    initial_error: number
+    final_error: number
+    error_reduction: number
+    max_correction: number
+    /** The same correction as a multiple of the track's median step -- the readable form. */
+    max_correction_steps: number
+    loop_closures_used: number
+    loop_closures_rejected: number
+    notes: string[]
+  }
+  confidence: string
+}
+
 export interface CaptureSession {
   id: string
   project_id: string
@@ -224,6 +258,10 @@ export interface CaptureSession {
   mapping_confidence: MappingConfidence
   mapping_confidence_score: number | null
   mapping_note: string | null
+  /** "dead_reckoning" | "pose_graph_slam"; null for sessions mapped before this was recorded. */
+  mapping_method: string | null
+  /** Null when loop closure found nothing to reconcile. */
+  loop_closure_report: LoopClosureReport | null
   frame_count: number
   file_count: number
   created_at: string

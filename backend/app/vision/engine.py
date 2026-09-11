@@ -235,9 +235,18 @@ class VisionEngine:
             confidence=outcome.confidence,
             confidence_score=outcome.confidence_score,
             note=(
-                f"{outcome.note} Loop closure reconciled {len(slam.closures)} verified "
-                f"revisit(s); the largest pose correction was "
-                f"{slam.report.max_correction:.2f} track units."
+                # `loop_closures_used`, not `len(slam.closures)`: the latter counts candidates
+                # including ones the optimiser then rejected as false, and reporting those as
+                # "reconciled" overstated the evidence behind the track.
+                f"{outcome.note} Loop closure reconciled "
+                f"{slam.report.loop_closures_used} verified revisit(s)"
+                + (
+                    f" and rejected {slam.report.loop_closures_rejected} as inconsistent"
+                    if slam.report.loop_closures_rejected
+                    else ""
+                )
+                + f"; the largest pose correction was "
+                f"{slam.report.max_correction_steps:.1f}x the median step."
             ),
             requires_manual_placement=outcome.requires_manual_placement,
         )
@@ -289,8 +298,13 @@ class VisionEngine:
                     # that made a rendered circuit 24% worse than plain odometry before the
                     # robust kernel and residual rejection were added. Those catch closures that
                     # contradict each other; a single unchallenged one can still distort a track.
-                    "a lone false closure the graph can absorb is not detectable — measured "
-                    "improvement on a rendered circuit is 38% over odometry, not a guarantee",
+                    "a lone false closure the graph can absorb is not detectable",
+                    # Both numbers measured on rendered circuits with known ground truth. They
+                    # point in opposite directions and both are reported, because a single
+                    # figure here would be a sales claim rather than a measurement.
+                    "helps when there is drift to remove (38% better on a drifted circuit) and "
+                    "can add a little error when there is not (37 mm worse on an already "
+                    "accurate one) — it bounds drift rather than always reducing error",
                 ],
             },
             "object_detection": {"implemented": False, "phase": 3},

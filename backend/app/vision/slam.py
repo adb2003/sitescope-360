@@ -36,7 +36,9 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from app.core.enums import MappingConfidence
-from app.vision.types import FeatureSet, RelativeMotion, RelativePose
+from app.vision.motion import _rotation_only_fit, _yaw_from_rotation
+from app.vision.panorama import pixels_to_bearings
+from app.vision.types import FeatureSet, MatchResult, RelativeMotion, RelativePose
 
 #: Minimum frames between two keyframes before a match counts as a loop, not just overlap with a
 #: neighbour. Adjacent frames always look alike; that is odometry, and it is already in the graph.
@@ -82,6 +84,22 @@ CONVERGENCE_DELTA = 1e-6
 #: step -- but not so much more that one bad closure can overwhelm the odometry that disagrees.
 LOOP_INFORMATION_SCALE = 4.0
 
+#: Extra inliers a co-located closure needs, as a multiple of the bearing-closure bar. It
+#: asserts position outright rather than a direction, so it must be better evidenced.
+COLOCATED_INLIER_MULTIPLIER = 1.5
+
+#: Parallax below which a pair is read as co-located rather than merely nearby. A few degrees
+#: means "close to"; asserting an exact revisit from that would inject real error as fact.
+MAX_COLOCATED_PARALLAX_DEG = 0.30
+
+#: Fraction of the frame the correspondences must span before a co-located verdict is allowed.
+#: Panoramas see all around, so a genuine revisit matches features across most of the width.
+MIN_COLOCATED_SPREAD_X = 0.35
+MIN_COLOCATED_SPREAD_Y = 0.10
+
+#: Inliers at which a co-located closure's support term saturates.
+SATURATION_LOOP_INLIERS = 150.0
+
 #: Huber threshold for loop-closure residuals, in radians (~11.5 deg).
 #:
 #: Beyond this a closure's influence grows linearly rather than quadratically, so one badly wrong
@@ -105,15 +123,27 @@ class LoopClosure:
 
     from_index: int
     to_index: int
-    #: Relative pose of ``to_index`` in ``from_index``'s frame.
+    #: Relative pose of ``to_index`` in ``from_index``'s frame. For a co-located closure both are
+    #: zero, which is the assertion being made: the two frames are in the same place.
     dx: float
     dy: float
     dtheta_deg: float
     inlier_count: int
     hash_distance: int
     confidence: float
+    #: True when the operator returned to the *same spot* rather than merely nearby.
+    #:
+    #: Such a pair has no parallax, so the essential matrix is degenerate and the motion
+    #: estimator refuses it -- correctly, because there is no translation to recover. That does
+    #: not make the pair useless; it makes it the strongest closure available. Zero parallax with
+    #: a large inlier count is positive evidence of co-location, and the heading change still
+    #: comes out of the rotation-only fit.
+    #:
+    #: Missing this case meant loop closure found nothing on the most natural walkthrough there
+    #: is: walk the floor and come back to where you began.
+    is_colocated: bool = False
 
-    def to_dict(self) -> dict[str, float | int]:
+    def to_dict(self) -> dict[str, float | int | str]:
         return {
             "from_index": self.from_index,
             "to_index": self.to_index,
@@ -121,6 +151,7 @@ class LoopClosure:
             "inlier_count": self.inlier_count,
             "hash_distance": self.hash_distance,
             "confidence": round(self.confidence, 3),
+            "kind": "colocated" if self.is_colocated else "bearing",
         }
 
 
@@ -136,7 +167,11 @@ class PoseGraphEdge:
     #: Diagonal information (inverse variance) for x, y and theta. Higher means "trust this more".
     info_xy: float
     info_theta: float
+    #: True for any closure edge: subject to the Huber kernel and to outlier rejection.
     is_loop: bool = False
+    #: True when the closure asserts *position* (same place) rather than a bearing. Its residual
+    #: is a full relative pose like odometry's; only its weighting is that of a closure.
+    is_colocated: bool = False
 
 
 @dataclass(slots=True, kw_only=True)
@@ -155,6 +190,13 @@ class OptimisationReport:
     final_error: float
     #: Largest distance any pose moved, in the same units as the track (scale-free).
     max_correction: float
+    #: The same correction as a multiple of the track's median step.
+    #:
+    #: Raw track units are unreadable on their own: the pipeline derives step length from frame
+    #: timestamps and an assumed pace, so a demo capture 12 s apart has steps of ~17 units and a
+    #: correction of "108" is six steps, not 108 metres. Reporting it as a step multiple is the
+    #: only form a reader can judge without knowing the scale.
+    max_correction_steps: float = 0.0
     loop_closures_used: int
     #: Closures dropped as outliers after the robust solve. Reported, never silently discarded.
     loop_closures_rejected: int = 0
@@ -175,6 +217,7 @@ class OptimisationReport:
             "final_error": round(self.final_error, 6),
             "error_reduction": round(self.error_reduction, 4),
             "max_correction": round(self.max_correction, 4),
+            "max_correction_steps": round(self.max_correction_steps, 2),
             "loop_closures_used": self.loop_closures_used,
             "loop_closures_rejected": self.loop_closures_rejected,
             "notes": list(self.notes),
@@ -281,28 +324,103 @@ class LoopClosureDetector:
 
             width, height = features[i].image_width, features[i].image_height
             motion = self.motion_estimator.estimate(matches, width, height)
-            if not motion.is_reliable or motion.confidence <= 0.0:
-                continue
-            if matches.inlier_count < self.min_inliers:
+
+            if motion.is_reliable and motion.confidence > 0.0:
+                # The translation is a unit direction; scale comes from the odometry chain, so a
+                # closure constrains bearing and heading, not distance.
+                closures.append(
+                    LoopClosure(
+                        from_index=i,
+                        to_index=j,
+                        dx=float(motion.translation[0]),
+                        dy=float(motion.translation[2]),
+                        dtheta_deg=motion.yaw_deg,
+                        inlier_count=matches.inlier_count,
+                        hash_distance=distance,
+                        confidence=motion.confidence,
+                    )
+                )
                 continue
 
-            # The translation is a unit direction; scale comes from the odometry chain, so a
-            # closure constrains direction and heading, not distance. Placed at unit length and
-            # given proportionally less positional weight than heading below.
-            dx, dy = float(motion.translation[0]), float(motion.translation[2])
-            closures.append(
-                LoopClosure(
-                    from_index=i,
-                    to_index=j,
-                    dx=dx,
-                    dy=dy,
-                    dtheta_deg=motion.yaw_deg,
-                    inlier_count=matches.inlier_count,
-                    hash_distance=distance,
-                    confidence=motion.confidence,
-                )
-            )
+            colocated = self._as_colocated(matches, width, height, distance, i, j)
+            if colocated is not None:
+                closures.append(colocated)
         return closures
+
+    def _as_colocated(
+        self,
+        matches: MatchResult,
+        width: int,
+        height: int,
+        hash_distance: int,
+        i: int,
+        j: int,
+    ) -> LoopClosure | None:
+        """Read a zero-parallax pair as "the operator stood here again", or refuse it.
+
+        The motion estimator rejected this pair, and for the right reason: with no translation
+        the essential matrix is degenerate and no direction of travel exists to recover. But the
+        *reason* matters. Sub-threshold parallax across a large, geometrically consistent set of
+        correspondences is not a failure to measure motion -- it is a measurement that there was
+        none, which is exactly what a return to the same spot looks like.
+
+        Rejecting it anyway is what left loop closure finding nothing on a walkthrough that
+        circled a floor and came back to its start: 31 frames, frames 0 and 30 identical to a
+        perceptual hash distance of zero, and not one closure accepted.
+
+        The bar is deliberately higher than for a bearing closure. Co-location asserts position
+        directly, which is a far stronger claim than a direction, so it demands more inliers and
+        parallax genuinely near zero rather than merely small -- a few degrees of parallax means
+        *nearby*, and asserting an exact revisit from that would inject a metre of error as fact.
+        """
+        if matches.inlier_count < self.min_inliers * COLOCATED_INLIER_MULTIPLIER:
+            return None
+
+        # Correspondences must come from around the whole view, not one patch of it. Zero
+        # parallax across a tight cluster says nothing: a blob of points on a blank wall agrees
+        # with itself under any pose, and a degenerate match set (every point at one pixel)
+        # produces a perfect zero-parallax fit that means nothing at all.
+        if not _is_well_spread(matches.points_a, width, height):
+            return None
+
+        bearings_a = pixels_to_bearings(matches.points_a, width, height)
+        bearings_b = pixels_to_bearings(matches.points_b, width, height)
+        rotation, parallax_deg = _rotation_only_fit(bearings_a, bearings_b)
+        if rotation is None or parallax_deg > MAX_COLOCATED_PARALLAX_DEG:
+            return None
+
+        # Confidence from how little parallax there is and how much agreed: both are evidence of
+        # the same thing, and neither alone is enough.
+        support = float(np.clip(matches.inlier_count / (SATURATION_LOOP_INLIERS), 0.0, 1.0))
+        stillness = float(np.clip(1.0 - parallax_deg / MAX_COLOCATED_PARALLAX_DEG, 0.0, 1.0))
+        confidence = float(np.sqrt(support * stillness))
+        if confidence <= 0.0:
+            return None
+
+        return LoopClosure(
+            from_index=i,
+            to_index=j,
+            dx=0.0,
+            dy=0.0,
+            dtheta_deg=_yaw_from_rotation(rotation),
+            inlier_count=matches.inlier_count,
+            hash_distance=hash_distance,
+            confidence=confidence,
+            is_colocated=True,
+        )
+
+
+def _is_well_spread(points: np.ndarray, width: int, height: int) -> bool:
+    """Do these correspondences cover enough of the frame to support a claim about pose?
+
+    A co-located verdict rests on parallax being near zero *everywhere*. Measured across a small
+    cluster that is not a finding, and across a degenerate set it is arithmetic on nothing.
+    """
+    if points.ndim != 2 or points.shape[0] < 3:
+        return False
+    span_x = float(np.ptp(points[:, 0])) / max(width, 1)
+    span_y = float(np.ptp(points[:, 1])) / max(height, 1)
+    return span_x >= MIN_COLOCATED_SPREAD_X and span_y >= MIN_COLOCATED_SPREAD_Y
 
 
 # ---- back end: reconciling them ---------------------------------------------
@@ -351,6 +469,8 @@ class PoseGraph:
             return np.diag([edge.info_xy, edge.info_xy, edge.info_theta])
 
         weight = self._huber_weight(edge)
+        if edge.is_colocated:
+            return np.diag([edge.info_xy * weight, edge.info_xy * weight, edge.info_theta * weight])
         return np.diag([edge.info_xy * weight, edge.info_theta * weight])
 
     def _huber_weight(self, edge: PoseGraphEdge) -> float:
@@ -384,7 +504,7 @@ class PoseGraph:
         pose_i, pose_j = self.poses[edge.i], self.poses[edge.j]
         predicted = _relative(pose_i, pose_j)
 
-        if not edge.is_loop:
+        if not edge.is_loop or edge.is_colocated:
             return np.array(
                 [
                     predicted[0] - edge.dx,
@@ -584,12 +704,17 @@ class PoseGraph:
             notes.append(f"stopped at the {max_iterations}-iteration limit without converging")
 
         corrections = np.linalg.norm(self.poses[:, :2] - before[:, :2], axis=1)
+        steps = np.linalg.norm(np.diff(before[:, :2], axis=0), axis=1)
+        median_step = float(np.median(steps)) if steps.size else 0.0
         return OptimisationReport(
             converged=converged,
             iterations=iterations,
             initial_error=initial_error,
             final_error=final_error,
             max_correction=float(corrections.max()),
+            max_correction_steps=(
+                float(corrections.max() / median_step) if median_step > 1e-9 else 0.0
+            ),
             loop_closures_used=loops,
             notes=notes,
         )
@@ -667,7 +792,7 @@ class PoseGraph:
         heading_i = np.array([0.0, 0.0, -1.0])
         heading_j = np.array([0.0, 0.0, 1.0])
 
-        if not edge.is_loop:
+        if not edge.is_loop or edge.is_colocated:
             return (
                 np.vstack([position_i, heading_i]),
                 np.vstack([position_j, heading_j]),
@@ -735,6 +860,7 @@ def build_graph(
                 dx=closure.dx,
                 dy=closure.dy,
                 dtheta=math.radians(closure.dtheta_deg),
+                is_colocated=closure.is_colocated,
                 # For a loop edge `info_xy` weights the *bearing* residual (see `_residual`).
                 # Bearing and heading are both angles observed by the same estimate, so they
                 # carry the same weight; there is no fabricated distance left to discount.

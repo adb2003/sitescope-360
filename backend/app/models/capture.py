@@ -113,6 +113,17 @@ class CaptureSession(Base, TimestampMixin):
     mapping_confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     mapping_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    #: Which estimator produced the stored positions: ``dead_reckoning`` or ``pose_graph_slam``.
+    #:
+    #: Recorded because the two are not interchangeable and a reader cannot tell them apart from
+    #: the coordinates. A track that had loop closure applied has bounded drift; one that did not
+    #: accumulates it. §46 requires that distinction be legible rather than inferred.
+    mapping_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    #: The loop-closure report: which revisits were verified, which were rejected as false, and
+    #: how far the optimiser moved the track. Null when SLAM did not run or found nothing.
+    loop_closure_report: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+
     #: Denormalised counters kept current by the pipeline; they make dashboards cheap.
     frame_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     file_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

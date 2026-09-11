@@ -56,7 +56,7 @@ from app.processing.floorplan_render import (
     world_to_plan_px,
 )
 from app.processing.media import encode_jpeg
-from app.processing.synthetic import Room, default_walk, render_panorama
+from app.processing.synthetic import Room, default_walk, loop_walk, render_panorama
 from app.storage import floorplan_key, get_storage, session_key
 
 logger = get_logger("sitescope.seed")
@@ -204,6 +204,11 @@ def seed_demo(db, *, quick: bool = False) -> dict[str, object]:
     )
     zones = {zone.name: zone for zone in db.scalars(select(Zone).where(Zone.floor_id == ground.id))}
     positions = default_walk(room, step_m=step_m)
+    # The newest walkthrough closes its loop. The others are open paths, so the demo carries both
+    # cases: three sessions where dead reckoning is all the imagery supports, and one where a
+    # genuine revisit lets loop closure bound the drift. Without a closing walk the SLAM feature
+    # would be invisible in the demo data, which is the same as not shipping it.
+    loop_positions = loop_walk(room, step_m=step_m)
 
     existing_sessions = int(
         db.scalar(select(CaptureSession.id).where(CaptureSession.floor_id == ground.id).limit(1))
@@ -222,6 +227,8 @@ def seed_demo(db, *, quick: bool = False) -> dict[str, object]:
             columns = room.columns[: min(len(room.columns), 2 + index)]
             scene = Room(columns=tuple(columns))
             brightness = 0.88 + 0.05 * index
+            is_newest = days_ago == min(capture_days)
+            walk = loop_positions if is_newest else positions
 
             session_id = _create_capture_session(
                 db,
@@ -231,17 +238,21 @@ def seed_demo(db, *, quick: bool = False) -> dict[str, object]:
                 zone=zones.get("North"),
                 started=started,
                 operator=engineer,
-                name=f"{started:%d %B %Y} — Morning walkthrough",
+                name=(
+                    f"{started:%d %B %Y} — Morning walkthrough"
+                    + (" (full circuit)" if is_newest else "")
+                ),
             )
             session_ids.append(session_id)
 
             logger.info(
-                "Rendering %d panoramas for %s (%d columns)",
-                len(positions),
+                "Rendering %d panoramas for %s (%d columns, %s)",
+                len(walk),
                 session_id,
                 len(columns),
+                "closed circuit" if is_newest else "open path",
             )
-            for order, position in enumerate(positions):
+            for order, position in enumerate(walk):
                 image = render_panorama(
                     scene,
                     position,

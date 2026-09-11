@@ -67,6 +67,11 @@ class CaptureSessionOut(ORMModel):
     mapping_confidence: MappingConfidence
     mapping_confidence_score: float | None
     mapping_note: str | None
+    #: "dead_reckoning" or "pose_graph_slam"; null for sessions mapped before this was recorded.
+    mapping_method: str | None = None
+    #: Verified revisits, rejected false positives, and how far the optimiser moved the track.
+    #: Null when loop closure found nothing to reconcile.
+    loop_closure_report: dict[str, Any] | None = None
     frame_count: int
     file_count: int
     created_at: datetime

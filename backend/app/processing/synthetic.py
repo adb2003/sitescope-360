@@ -348,3 +348,27 @@ DEFAULT_WAYPOINTS: list[tuple[float, float]] = [
 def default_walk(room: Room, *, step_m: float = DEFAULT_STEP_M) -> list[tuple[float, float, float]]:
     """The demo walkthrough: down one side, across, and back down the other."""
     return walk_path(room, DEFAULT_WAYPOINTS, step_m=step_m)
+
+
+#: A circuit that returns to where it started, so the walk contains a genuine revisit.
+LOOP_WAYPOINTS: list[tuple[float, float]] = [
+    (-7.5, -4.0),
+    (-7.5, 4.0),
+    (7.5, 4.0),
+    (7.5, -4.0),
+    (-7.5, -4.0),
+]
+
+
+def loop_walk(room: Room, *, step_m: float = DEFAULT_STEP_M) -> list[tuple[float, float, float]]:
+    """A closed circuit of the floor, for demonstrating loop closure.
+
+    Separate from :func:`default_walk` rather than replacing it, because the two exercise
+    different things and both are worth having in the demo data. An open path shows what dead
+    reckoning does on its own -- drift that nothing can correct. A closed one shows what loop
+    closure recovers, and it is the only shape where SLAM has anything to work with.
+
+    Kept distinct from the walk `test_mapping.py` measures against, so changing the demo cannot
+    silently move a test's ground truth.
+    """
+    return walk_path(room, LOOP_WAYPOINTS, step_m=step_m)

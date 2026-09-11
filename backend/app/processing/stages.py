@@ -653,15 +653,24 @@ def stage_mapping(db: Session, session: CaptureSession, spec: JobSpec) -> dict[s
 
     features: list[FeatureSet] = []
     intervals: list[float] = []
+    hashes: list[str] = []
     for index, frame in enumerate(frames):
         if not frame.feature_blob_key:
             continue
         features.append(deserialize_features(storage.read_bytes(frame.feature_blob_key)))
+        # Already computed by the FEATURES stage for near-duplicate rejection, so loop closure
+        # adds no hashing work. An empty string simply never shortlists a candidate.
+        hashes.append(frame.perceptual_hash or "")
         if index > 0:
             delta = (frame.captured_at - frames[index - 1].captured_at).total_seconds()
             intervals.append(max(delta, 0.1))
 
-    outcome = engine.estimate_track(features, intervals)
+    # Loop closure runs here rather than being an opt-in: a walkthrough that revisits a place has
+    # information the odometry chain cannot use, and leaving it on the floor means publishing a
+    # track with more drift than the imagery supports. `estimate_track_with_slam` returns the
+    # odometry outcome unchanged when there is nothing to close, so the non-looping case is
+    # identical to before.
+    outcome, slam = engine.estimate_track_with_slam(features, intervals, hashes)
 
     for pose in outcome.poses:
         if pose.frame_index >= len(frames):
@@ -676,6 +685,11 @@ def stage_mapping(db: Session, session: CaptureSession, spec: JobSpec) -> dict[s
     session.mapping_confidence = outcome.confidence
     session.mapping_confidence_score = outcome.confidence_score
     session.mapping_note = outcome.note
+    slam_report = slam.to_dict()
+    session.mapping_method = str(slam_report["method"])
+    # Stored only when loop closure actually did something, so a null column means "no revisits"
+    # rather than "an empty report".
+    session.loop_closure_report = None if slam.unchanged else slam_report
     db.flush()
 
     log_event(
@@ -684,6 +698,9 @@ def stage_mapping(db: Session, session: CaptureSession, spec: JobSpec) -> dict[s
         confidence=str(outcome.confidence),
         confidence_score=round(outcome.confidence_score, 4),
         requires_manual_placement=outcome.requires_manual_placement,
+        mapping_method=session.mapping_method,
+        loop_closures=len(slam.closures),
+        loop_closures_rejected=slam.report.loop_closures_rejected,
     )
 
     return {
@@ -694,6 +711,8 @@ def stage_mapping(db: Session, session: CaptureSession, spec: JobSpec) -> dict[s
         "note": outcome.note,
         "per_pair": outcome.per_pair,
         "normalized_track": engine.map_builder.normalize_track(outcome.poses),
+        "mapping_method": session.mapping_method,
+        "loop_closure": slam_report,
     }
 
 

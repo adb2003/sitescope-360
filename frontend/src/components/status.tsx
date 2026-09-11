@@ -35,6 +35,7 @@ import type {
   DataProvenance,
   JobStatus,
   MappingConfidence,
+  LoopClosureReport,
   QualityVerdict,
 } from '@/types/api'
 
@@ -232,15 +233,46 @@ export function MappingConfidenceBadge({
 export function MappingConfidenceNote({
   confidence,
   note,
+  method,
+  loopClosure,
 }: {
   confidence: MappingConfidence
   note: string | null | undefined
+  method?: string | null
+  loopClosure?: LoopClosureReport | null
 }) {
   if (!note) return null
   const tone = confidence === 'high' || confidence === 'medium' ? 'estimated' : 'warn'
+  const optimisation = loopClosure?.optimisation
   return (
     <Callout tone={tone} title={MAPPING[confidence]?.label ?? 'Mapping'}>
-      {note}
+      <div className="space-y-2">
+        <p>{note}</p>
+
+        {/*
+          Which estimator produced these positions, stated rather than left to be inferred. A
+          loop-closed track has bounded drift; a dead-reckoned one accumulates it, and the
+          coordinates themselves look identical either way.
+        */}
+        {method === 'pose_graph_slam' && optimisation ? (
+          <p className="text-xs text-ink-muted">
+            <span className="text-estimated">Loop closure applied.</span>{' '}
+            {optimisation.loop_closures_used} verified revisit
+            {optimisation.loop_closures_used === 1 ? '' : 's'} reconciled
+            {optimisation.loop_closures_rejected > 0
+              ? `, ${optimisation.loop_closures_rejected} rejected as inconsistent`
+              : ''}
+            . Largest correction {optimisation.max_correction_steps.toFixed(1)}x the median
+            step. A closure constrains bearing and heading, never distance, so this bounds drift
+            rather than removing it.
+          </p>
+        ) : method === 'dead_reckoning' ? (
+          <p className="text-xs text-ink-muted">
+            Dead reckoning only — this walkthrough did not revisit anywhere it had already been,
+            so there was no loop to close and drift accumulates along the path.
+          </p>
+        ) : null}
+      </div>
     </Callout>
   )
 }

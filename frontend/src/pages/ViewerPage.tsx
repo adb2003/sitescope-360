@@ -198,6 +198,8 @@ export function ViewerPage() {
           <MappingConfidenceNote
             confidence={session.data.mapping_confidence}
             note={session.data.mapping_note}
+            method={session.data.mapping_method}
+            loopClosure={session.data.loop_closure_report}
           />
         ) : null}
 

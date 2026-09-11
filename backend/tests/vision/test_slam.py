@@ -22,6 +22,7 @@ import pytest
 from app.core.enums import MappingConfidence, ProjectionType
 from app.vision.position import DeadReckoningPositionEstimator
 from app.vision.slam import (
+    COLOCATED_INLIER_MULTIPLIER,
     LOOP_INFORMATION_SCALE,
     MIN_LOOP_INLIERS,
     MIN_LOOP_SEPARATION,
@@ -459,15 +460,33 @@ def _stub_features() -> FeatureSet:
 
 
 class _StubMatcher:
-    """Returns a fixed inlier count, so threshold behaviour is what is being tested."""
+    """Returns a fixed inlier count, so threshold behaviour is what is being tested.
 
-    def __init__(self, inliers: int) -> None:
+    ``moved`` controls whether the two frames' points coincide. That distinction now matters:
+    identical spread correspondences are the signature of *co-location*, so a stub that always
+    produced them would exercise the co-located path in every test whether or not that was the
+    intent. Default is moved, i.e. an ordinary pair with parallax.
+    """
+
+    def __init__(self, inliers: int, *, moved: bool = True) -> None:
         self.inliers = inliers
+        self.moved = moved
 
     def match(self, a: FeatureSet, b: FeatureSet) -> MatchResult:
-        points = np.zeros((max(self.inliers, 1), 2))
+        # Spread across the frame, because a degenerate all-at-one-pixel set is refused outright
+        # and a stub producing one would test that refusal by accident.
+        count = max(self.inliers, 3)
+        rng = np.random.default_rng(3)
+        points_a = np.column_stack(
+            [rng.uniform(0, a.image_width, count), rng.uniform(0, a.image_height, count)]
+        )
+        # Needs a vertical component: a uniform *horizontal* shift on an equirectangular frame
+        # is a pure yaw, which the rotation-only fit absorbs completely and reports as zero
+        # parallax -- so [5, 0] looked co-located no matter how far it moved. Measured at 2.63
+        # deg, comfortably past MAX_COLOCATED_PARALLAX_DEG.
+        points_b = points_a + np.array([40.0, 12.0]) if self.moved else points_a
         # MatchResult takes raw_match_count before inlier_count.
-        return MatchResult(points, points, max(self.inliers, 1), self.inliers)
+        return MatchResult(points_a, points_b, count, self.inliers)
 
 
 class _StubMotion:
@@ -684,3 +703,81 @@ def test_the_report_cannot_be_built_positionally() -> None:
     """
     with pytest.raises(TypeError):
         OptimisationReport(True, 0, 0.0, 0.0, 0.0, 0, [])  # type: ignore[misc]
+
+
+# ---- co-located closures -----------------------------------------------------
+def test_returning_to_the_same_spot_is_a_closure_not_a_refusal() -> None:
+    """The case that made loop closure useless on the most natural walkthrough there is.
+
+    Walk a floor, come back to where you started. Frames 0 and 30 are the same place, so there is
+    no parallax between them -- the essential matrix is degenerate and the motion estimator
+    refuses the pair, correctly, because no direction of travel exists to recover.
+
+    Refusing the *closure* on that basis was the mistake. Sub-threshold parallax across a large,
+    well-spread, geometrically consistent correspondence set is not a failed measurement of
+    motion; it is a measurement that there was none, which is what standing in the same spot
+    looks like. On a rendered 31-frame circuit whose first and last frames hashed identically,
+    the old code accepted zero closures.
+    """
+    count = MIN_LOOP_SEPARATION + 4
+    features = [_stub_features() for _ in range(count)]
+    hashes = ["00"] * count
+
+    # Identical spread correspondences, and the motion estimator refusing: co-location.
+    detector = LoopClosureDetector(_StubMatcher(200, moved=False), _StubMotion(reliable=False))
+    closures = detector.detect(features, hashes)
+
+    assert closures, "a zero-parallax revisit must be usable"
+    assert all(closure.is_colocated for closure in closures)
+    # It asserts position directly, so both components are zero rather than a unit direction.
+    assert all(closure.dx == 0.0 and closure.dy == 0.0 for closure in closures)
+    assert closures[0].to_dict()["kind"] == "colocated"
+
+
+def test_a_co_located_closure_needs_more_evidence_than_a_bearing_one() -> None:
+    """Asserting "same place" is a stronger claim than "that direction", so the bar is higher."""
+    count = MIN_LOOP_SEPARATION + 4
+    features = [_stub_features() for _ in range(count)]
+    hashes = ["00"] * count
+
+    # Enough for a bearing closure, short of the co-located requirement.
+    just_under = int(MIN_LOOP_INLIERS * COLOCATED_INLIER_MULTIPLIER) - 1
+    detector = LoopClosureDetector(
+        _StubMatcher(just_under, moved=False), _StubMotion(reliable=False)
+    )
+    assert detector.detect(features, hashes) == []
+
+
+def test_a_tight_cluster_of_points_cannot_prove_co_location() -> None:
+    """Zero parallax across a blob says nothing; a blank wall agrees with itself under any pose.
+
+    A degenerate match set -- every correspondence at one pixel -- produces a flawless
+    zero-parallax fit that is arithmetic on nothing at all.
+    """
+
+    class _ClusteredMatcher:
+        def match(self, a: FeatureSet, b: FeatureSet) -> MatchResult:
+            # 200 points inside a few pixels of each other.
+            points = np.full((200, 2), [800.0, 400.0]) + np.linspace(0, 2, 400).reshape(200, 2)
+            return MatchResult(points, points, 200, 200)
+
+    count = MIN_LOOP_SEPARATION + 4
+    detector = LoopClosureDetector(_ClusteredMatcher(), _StubMotion(reliable=False))
+
+    assert detector.detect([_stub_features() for _ in range(count)], ["00"] * count) == []
+
+
+def test_a_co_located_edge_constrains_position_not_bearing() -> None:
+    """Its residual has three components, like odometry: it says *where*, not just *which way*."""
+    colocated = PoseGraphEdge(0, 1, 0.0, 0.0, 0.0, 1.0, 1.0, is_loop=True, is_colocated=True)
+    bearing = PoseGraphEdge(0, 1, 1.0, 0.0, 0.0, 1.0, 1.0, is_loop=True)
+
+    graph = PoseGraph(np.array([[0.0, 0.0, 0.0], [2.0, 1.0, 0.3]]))
+    graph.add_edge(colocated)
+    graph.add_edge(bearing)
+
+    assert graph._residual(colocated).shape == (3,)
+    assert graph._residual(bearing).shape == (2,)
+    # And the derivative shapes must agree with the residuals they belong to.
+    assert graph._jacobians(colocated)[0].shape == (3, 3)
+    assert graph._jacobians(bearing)[0].shape == (2, 3)

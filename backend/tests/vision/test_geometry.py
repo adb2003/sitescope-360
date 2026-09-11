@@ -8,12 +8,20 @@ imagery while being systematically wrong.
 
 from __future__ import annotations
 
+from unittest import mock
+
 import numpy as np
 import pytest
 
 from app.core.enums import ProjectionType
+from app.vision import motion as motion_module
 from app.vision.features import verify_spherical
-from app.vision.motion import EssentialMotionEstimator
+from app.vision.motion import (
+    MIN_AMBIGUITY_MARGIN,
+    EssentialMotionEstimator,
+    _decompose,
+    _essential_from_bearings,
+)
 from app.vision.panorama import bearings_to_pixels, pixels_to_bearings
 from app.vision.types import FeatureSet, MatchResult
 
@@ -87,6 +95,73 @@ def test_recovers_known_pose(yaw_deg: float, direction: np.ndarray) -> None:
     expected = move / np.linalg.norm(move)
     cosine = float(np.dot(motion.translation, expected))
     assert cosine > 0.99, f"translation direction off: cos={cosine:.4f}"
+
+
+def test_cheirality_choice_is_not_a_near_tie_on_a_clean_pair() -> None:
+    """The four-fold decomposition must win *clearly*, not by a hair.
+
+    `_decompose` picks among four (R, t) candidates by counting points in front of both cameras.
+    When two candidates score almost equally the winner is chosen by numerical noise rather than
+    by the data, and a wrongly picked `t` is roughly 180 degrees wrong -- dead reckoning then
+    carries that error through every subsequent frame. So the margin over the runner-up is
+    reported and feeds the confidence.
+
+    This test pins the well-conditioned case: on exact projections the margin must be wide. It is
+    the baseline that makes a *narrow* margin meaningful as a warning signal. Measured margins on
+    the demo walkthrough's real ORB matches run 0.86-1.00, consistent with this.
+    """
+    points = scene_points(n=300, seed=11)
+    rotation = rot_y(12.0)
+    baseline = np.array([1.4, 0.0, 0.35])
+
+    px_a = project(points, np.eye(3), np.zeros(3))
+    px_b = project(points, rotation, -rotation @ baseline)
+
+    b1 = pixels_to_bearings(px_a, WIDTH, HEIGHT)
+    b2 = pixels_to_bearings(px_b, WIDTH, HEIGHT)
+    essential = _essential_from_bearings(b1, b2)
+    assert essential is not None
+
+    _, _, cheirality_ratio, margin = _decompose(essential, b1, b2)
+
+    assert cheirality_ratio > 0.9, f"cheirality ratio {cheirality_ratio:.3f}"
+    assert margin > MIN_AMBIGUITY_MARGIN, f"margin {margin:.3f} is a near-tie on a clean pair"
+
+
+def test_a_near_tied_decomposition_is_refused_not_published() -> None:
+    """A near-tie must be refused outright, not published with a reduced score.
+
+    This is the distinction the earlier version of this code got wrong. The four candidates differ
+    by a sign on the translation, so a near-tie does not mean "somewhat less accurate" -- it means
+    the direction of travel is undetermined, and picking wrong is roughly 180 degrees out. Scaling
+    it as one term of a five-term geometric mean left a coin-flip pair at confidence 0.60, which
+    is above `MAPPING_CONFIDENCE_THRESHOLD` (0.45): it would have been published as an automatic
+    path. A fifth root cannot express a disqualifier.
+
+    Verified by calling the estimator with a hand-built margin rather than by contriving imagery
+    that ties, because the policy is what is under test -- driving it through the renderer would
+    test the renderer's ability to produce a tie instead.
+    """
+    points = scene_points(n=300, seed=11)
+    rotation = rot_y(12.0)
+    baseline = np.array([1.4, 0.0, 0.35])
+    px_a = project(points, np.eye(3), np.zeros(3))
+    px_b = project(points, rotation, -rotation @ baseline)
+    good_matches = MatchResult(px_a, px_b, len(px_a), len(px_a))
+
+    estimator = EssentialMotionEstimator()
+    clean = estimator.estimate(good_matches, WIDTH, HEIGHT)
+    assert clean.confidence > 0.7, f"a clean pair should be confident, got {clean.confidence:.3f}"
+
+    # Same imagery, but the decomposition reports a coin flip between two candidates.
+    with mock.patch.object(
+        motion_module, "_decompose", return_value=(rotation, baseline, 0.95, 0.02)
+    ):
+        tied = estimator.estimate(good_matches, WIDTH, HEIGHT)
+
+    assert tied.confidence == 0.0, f"a near-tie must be refused, got {tied.confidence:.3f}"
+    assert np.allclose(tied.translation, 0.0), "no translation may be published from a near-tie"
+    assert any("near-tied" in reason for reason in tied.reasons), tied.reasons
 
 
 def test_pure_rotation_is_refused() -> None:

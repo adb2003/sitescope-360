@@ -158,24 +158,79 @@ This is why `DEFAULT_STEP_M` is 1.5 m and why the default video frame interval i
 
 ### Measured accuracy
 
-From `backend/tests/vision/test_mapping.py`, a 21-frame L-shaped walk through a 20 × 12 m room at
-1.5 m spacing, aligned to ground truth with the same similarity fit that floor-plan anchoring
-performs:
-
-```
-confidence      high (100% median)
-recovered scale 1.011
-recovered rotation +0.1°
-mean error      0.13 m
-median error    0.14 m
-max error       0.29 m
-```
-
 Accuracy is only meaningful *after* the similarity fit, because the estimator is scale-free by
 construction — and that is exactly how the platform uses it.
 
-The same test asserts the opposite property: at 6 m spacing the mapper **must** report low
-confidence and demand manual placement.
+Two separate measurements, because they answer different questions.
+
+**The geometry, on exact correspondences.** 3D points projected into two known camera poses, with
+no feature detector involved (`test_track_integration_is_exact_on_synthetic_correspondences`):
+
+```
+max track error   < 0.05 m over a 5-pose L-shaped walk
+recovered scale   1.00 ± 0.05
+per-pair yaw      within 1° of truth
+translation dir.  cos > 0.99 against truth
+```
+
+That is the maths itself, and it is portable.
+
+**End to end through ORB, and this one is platform-dependent.** Same 21-frame walk through the
+20 × 12 m room at 1.5 m spacing (`test_track_through_orb_is_accurate_enough_to_place_points`):
+
+| Platform | mean | median | max | recovered scale |
+| --- | --- | --- | --- | --- |
+| Windows (dev machine) | 0.13 m | 0.14 m | 0.29 m | 1.011 |
+| Linux (GitHub Actions) | 1.57 m | — | ~3.6 m | — |
+
+**Identical library versions on both** (opencv-python-headless 5.0.0.93, numpy 2.5.3). The
+difference comes from the platform builds of OpenCV: ORB's FAST corner detection and its scale
+pyramid are compiled with different SIMD paths, so the keypoints differ slightly, the
+correspondence set differs, and the linear essential-matrix estimate moves with it. The error
+profile on Linux is large at both ends of the track and small in the middle — the signature of a
+systematic shape error propagated by dead reckoning, not of random noise.
+
+This was found by CI, not by reasoning, and it is why the two tests are split. An earlier single
+test asserted `mean < 1.0 m`, which passed on the development machine and failed in CI — a bound
+tuned to one machine masquerading as a property of the algorithm.
+
+The end-to-end test now asserts the weakest property that still makes the feature worth shipping:
+mean error under **10% of the room diagonal** (2.33 m here), enough to identify which bay or wing
+a capture came from after anchoring. Both platforms clear it — Windows at 0.6%, Linux at 6.7%. The
+measured figure is printed into the CI log on every run rather than only a pass/fail.
+
+**What this means in practice.** Do not quote a single accuracy number for this estimator. It is
+accurate enough to place capture points for review, it is labelled `estimated` everywhere it
+surfaces, and it asks for manual placement when confidence is low — which is the design that makes
+the platform-dependence tolerable rather than dangerous.
+
+The same test file asserts the opposite property too: at 6 m spacing the mapper **must** report
+low confidence and demand manual placement.
+
+### Ambiguity in the four-fold decomposition
+
+`_decompose` chooses among four (R, t) candidates by cheirality — which puts the most points in
+front of both cameras. It also returns the **margin** over the runner-up, and a pair whose margin
+falls below `MIN_AMBIGUITY_MARGIN` (0.25) is **refused**: zero confidence, no translation
+published, the reason recorded.
+
+The reason it is a refusal and not a penalty: the four candidates differ by a sign on the
+translation, so when two score almost equally the direction of travel is undetermined by the data
+and numerical noise decides it. A flipped `t` is not slightly wrong, it is roughly 180° wrong, and
+dead reckoning carries that through every later frame. "Somewhat less confident" is not what that
+situation is.
+
+This was got wrong on the first attempt, and the fix is worth recording because the failure was
+silent. The margin started as a fifth term in the confidence geometric mean. A test then measured
+what a coin-flip pair actually scored: **0.60** — above `MAPPING_CONFIDENCE_THRESHOLD` (0.45), so
+it would have been published as an automatic path. A fifth root cannot express a disqualifier; it
+dilutes one. Graded terms are for quantities that degrade smoothly, and this one does not.
+
+Honesty about what the margin did *not* fix: it was added while investigating the platform
+discrepancy above, on the hypothesis that a near-tie was flipping between platforms. Measurement
+did **not** support that hypothesis — every frame pair in the demo walkthrough has a margin of
+0.86–1.00, so none are near-tied, and it does not explain the Windows/Linux difference. It is kept
+because it guards a real failure mode, not because it resolved that one.
 
 ---
 

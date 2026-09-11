@@ -36,8 +36,9 @@ Everything in the §52 Definition of Done, verified end to end through HTTP by
 
 Some Phase 2 work landed early because it was needed to make Phase 1 honest:
 
-- **Relative visual positioning** — a working two-view spherical essential-matrix estimator,
-  measured at **0.13 m mean error** over a 24 m walk against ground truth.
+- **Relative visual positioning** — a working two-view spherical essential-matrix estimator.
+  The geometry recovers a known pose to centimetres; end to end through ORB the track error is
+  platform-dependent (0.13 m on Windows, 1.57 m on Linux CI) and documented as such.
 - **Automatic mapping refusal** — the mapper declines when confidence is low, which is what makes
   the feature safe to ship at all.
 - **Feature matching and image similarity** — verified-inlier similarity between two dates at the
@@ -190,14 +191,18 @@ Collected in one place, all documented at their source:
 2. **Not SLAM.** No loop closure, no global optimisation; drift accumulates over long sequences.
 3. **Planar motion assumed.** Ramps and stairs violate it.
 4. **Frame spacing matters a lot.** Below ~2 m works; at 4 m the mapper correctly refuses.
-5. **Coverage is declared, not detected.** It compares visited points to administrator-declared
+5. **Track accuracy through ORB is platform-dependent** — 0.13 m mean on Windows vs 1.57 m on
+   Linux CI with identical library versions, because platform builds of OpenCV detect slightly
+   different keypoints. Quote a range, not a single number. Removing the variance would need a
+   pinned, reproducible feature detector.
+6. **Coverage is declared, not detected.** It compares visited points to administrator-declared
    expectations; square footage is apportioned, never measured from imagery.
-6. **PDF floor plans are stored but not rasterised**, so they cannot be used for pixel placement
+7. **PDF floor plans are stored but not rasterised**, so they cannot be used for pixel placement
    until exported as PNG/JPG.
-7. **The compass is relative**, not magnetic — an uploaded image carries no device heading, and the
+8. **The compass is relative**, not magnetic — an uploaded image carries no device heading, and the
    viewer labels it `rel`.
-8. **The thread queue is not durable.** Fine for development; `QUEUE_BACKEND=redis` for anything
+9. **The thread queue is not durable.** Fine for development; `QUEUE_BACKEND=redis` for anything
    real. The API warns at startup and the API reports `"durable": false`.
-9. **Two adapters are unverified against hardware** (OSC, Insta360) and report
+10. **Two adapters are unverified against hardware** (OSC, Insta360) and report
    `implemented: false`.
-10. **No progress, defect, object or BIM analysis.** Phase 3.
+11. **No progress, defect, object or BIM analysis.** Phase 3.

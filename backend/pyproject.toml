@@ -74,6 +74,12 @@ ignore = [
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
 addopts = "-q"
+markers = [
+    # Tests that render synthetic panoramas and run real ORB feature detection over them. They
+    # are the slowest in the suite by an order of magnitude, and they are the ones whose
+    # measurements vary with the platform build of OpenCV - see tests/vision/test_mapping.py.
+    "slow: renders imagery and runs real feature detection (seconds, not milliseconds)",
+]
 
 [tool.mypy]
 python_version = "3.12"

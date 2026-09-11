@@ -26,6 +26,10 @@ MIN_PARALLAX_DEG = 0.35
 MIN_INLIERS = 20
 #: Inliers at which the count stops adding confidence.
 SATURATION_INLIERS = 80
+#: Cheirality margin over the runner-up candidate at which the decomposition is unambiguous.
+#: Below it the winner is decided by numerical noise rather than by the data, so the pair is
+#: refused outright rather than published with reduced confidence - see :func:`_decompose`.
+MIN_AMBIGUITY_MARGIN = 0.25
 
 _W = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
 
@@ -75,9 +79,31 @@ class EssentialMotionEstimator:
         if essential is None:
             return _no_motion(matches, "essential matrix could not be estimated")
 
-        rotation, translation, positive_depth_ratio = _decompose(essential, b1, b2)
+        rotation, translation, positive_depth_ratio, ambiguity_margin = _decompose(
+            essential, b1, b2
+        )
         if rotation is None or translation is None:
             return _no_motion(matches, "essential matrix decomposition was degenerate")
+
+        if ambiguity_margin < MIN_AMBIGUITY_MARGIN:
+            # Refused rather than merely penalised. The four candidates differ by a sign on the
+            # translation, so a near-tie does not mean "slightly less accurate" - it means the
+            # direction of travel is undetermined, and the wrong pick is roughly 180 degrees out.
+            # Dead reckoning would then carry that error through every later frame. The rotation
+            # from the Procrustes fit is still the well-determined part, so it is kept.
+            return RelativeMotion(
+                translation=np.zeros(3),
+                rotation=rotation_only,
+                yaw_deg=_yaw_from_rotation(rotation_only),
+                confidence=0.0,
+                inlier_count=inliers,
+                match_count=matches.raw_match_count,
+                reasons=[
+                    f"the four-fold essential-matrix decomposition is near-tied (margin "
+                    f"{ambiguity_margin:.1%}, needs {MIN_AMBIGUITY_MARGIN:.0%}) - the direction "
+                    f"of travel is not determined by this frame pair"
+                ],
+            )
 
         confidence = self._confidence(
             inlier_ratio=matches.inlier_ratio,
@@ -143,18 +169,33 @@ def _essential_from_bearings(b1: np.ndarray, b2: np.ndarray) -> np.ndarray | Non
 
 def _decompose(
     essential: np.ndarray, b1: np.ndarray, b2: np.ndarray
-) -> tuple[np.ndarray | None, np.ndarray | None, float]:
+) -> tuple[np.ndarray | None, np.ndarray | None, float, float]:
     """Pick the one of four (R, t) candidates that puts most points in front of both cameras.
 
     Convention: camera 1 at the origin with identity rotation; a world point ``X`` projects into
     camera 2 as ``R X + t``, so ``E = [t]_× R``. The returned ``translation`` is the unit
     direction of camera 2's centre expressed in camera 1's frame, which is what the position
     estimator integrates.
+
+    Returns ``(rotation, translation, cheirality_ratio, ambiguity_margin)``.
+
+    The **margin** — the gap between the winning candidate's cheirality ratio and the runner-up's
+    — matters as much as the winner, and :meth:`EssentialMotionEstimator.estimate` refuses the
+    pair outright when it falls below :data:`MIN_AMBIGUITY_MARGIN`. When two candidates score
+    almost equally the choice is genuinely undetermined by the data and floating-point noise
+    decides it. A flipped ``t`` is not slightly wrong, it is roughly 180° wrong, and dead
+    reckoning then carries that error through every later frame — so this is a disqualifier, not
+    a deduction from a score.
+
+    On the demo walkthrough's real matches every pair scores 0.86–1.00, so the gate does not fire
+    in practice. It was written while investigating a platform-dependent accuracy difference on
+    the hypothesis that a near-tie explained it; measurement showed it does not. The gate is kept
+    because the failure mode it prevents is real and silent, not because it explained that bug.
     """
     try:
         u, _, vt = np.linalg.svd(essential)
     except np.linalg.LinAlgError:
-        return None, None, 0.0
+        return None, None, 0.0, 0.0
 
     if np.linalg.det(u) < 0:
         u = -u
@@ -167,6 +208,7 @@ def _decompose(
 
     best: tuple[np.ndarray, np.ndarray] | None = None
     best_ratio = -1.0
+    runner_up_ratio = -1.0
     for rotation in (r_a, r_b):
         if abs(np.linalg.det(rotation) - 1.0) > 1e-6:
             continue
@@ -174,19 +216,23 @@ def _decompose(
             t = sign * t_unit
             ratio = _cheirality_ratio(rotation, t, b1, b2)
             if ratio > best_ratio:
-                best_ratio = ratio
-                best = (rotation, t)
+                runner_up_ratio = best_ratio
+                best_ratio, best = ratio, (rotation, t)
+            elif ratio > runner_up_ratio:
+                runner_up_ratio = ratio
 
     if best is None:
-        return None, None, 0.0
+        return None, None, 0.0, 0.0
+
+    margin = float(max(best_ratio - max(runner_up_ratio, 0.0), 0.0))
 
     rotation, t = best
     # Direction of camera 2's centre, in camera 1's coordinates.
     centre_direction = -rotation.T @ t
     norm = float(np.linalg.norm(centre_direction))
     if norm < 1e-9:
-        return rotation, None, best_ratio
-    return rotation, centre_direction / norm, float(max(best_ratio, 0.0))
+        return rotation, None, best_ratio, margin
+    return rotation, centre_direction / norm, float(max(best_ratio, 0.0)), margin
 
 
 def _cheirality_ratio(rotation: np.ndarray, t: np.ndarray, b1: np.ndarray, b2: np.ndarray) -> float:

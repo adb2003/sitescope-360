@@ -113,7 +113,7 @@ Then run a worker in a third terminal: `python -m app.workers.run`.
 ```bash
 cd backend
 
-python -m pytest -q                      # all 141
+python -m pytest -q                      # all 144
 python -m pytest tests/vision -q          # vision only
 python -m pytest tests/integration -q     # HTTP end-to-end
 python -m pytest -q -m "not slow"         # skip the slow rendering tests
@@ -144,7 +144,7 @@ npm run build
 | --- | --- |
 | `tests/integration/test_definition_of_done.py` | The whole §52 workflow, in order, through real HTTP. One test, shared state — because the requirement is that the *workflow* works, not that 18 endpoints each work alone. |
 | `tests/vision/test_geometry.py` | The two-view geometry recovers a **known** camera pose from rendered projections (yaw to <1°, translation direction to cos > 0.99). The only way to know the maths is right rather than plausible. |
-| `tests/vision/test_mapping.py` | Track accuracy vs ground truth (0.13 m mean), *and* that wide frame spacing is refused rather than guessed. |
+| `tests/vision/test_mapping.py` | Track accuracy vs ground truth — split into a deterministic geometry test (exact correspondences, centimetre bound, portable) and a `slow`-marked end-to-end test through ORB whose bound is a fraction of the room diagonal because the detector is platform-dependent. Also that wide frame spacing is refused rather than guessed. |
 | `tests/integration/test_pipeline.py` | Video frame extraction at a configurable interval, failure/retry, idempotent reprocessing, and that reprocessing **never deletes an original upload**. |
 | `tests/integration/test_permissions.py` | The §27 role matrix enforced at the HTTP boundary, token rotation, and that a role change invalidates an existing token immediately. |
 | `frontend/src/components/viewer/geometry.test.ts` | The TypeScript viewer's spherical convention matches the Python backend term by term. |

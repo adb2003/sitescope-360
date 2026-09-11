@@ -341,10 +341,19 @@ def test_system_capabilities_declares_what_is_not_implemented(
     assert vision["relative_positioning"]["implemented"] is True
     assert vision["relative_positioning"]["provenance"] == "estimated"
     assert "no metric scale — direction only" in vision["relative_positioning"]["limitations"]
-    assert (
-        "not SLAM; no loop closure or global optimisation"
-        in (vision["relative_positioning"]["limitations"])
-    )
+
+    # Loop closure is implemented, so the declaration must say so -- and must still name what is
+    # absent. This assertion previously pinned "not SLAM; no loop closure or global optimisation",
+    # and it failed in CI when that stopped being true, which is the test working: a §46 statement
+    # that drifts out of date is exactly the kind of overclaim (or underclaim) it exists to catch.
+    loop_closure = vision["loop_closure"]
+    assert loop_closure["implemented"] is True
+    assert loop_closure["provenance"] == "estimated"
+    limitations = loop_closure["limitations"]
+    assert any("revisits" in item for item in limitations), limitations
+    assert any("never distance" in item for item in limitations), limitations
+    assert any("bundle adjustment" in item for item in limitations), limitations
+    assert any("relocalisation" in item for item in limitations), limitations
 
     for feature in ("object_detection", "defect_detection", "progress_detection"):
         assert vision[feature]["implemented"] is False, feature

@@ -107,6 +107,15 @@ services:
       api:
         condition: service_healthy
     command: ["python", "-m", "app.workers.run"]
+    # Overrides the image's HEALTHCHECK, which polls the API's HTTP /health endpoint. The worker
+    # serves no HTTP, so the inherited probe could never pass and `up --wait` hung on it. This
+    # asks whether the RQ worker is registered and heartbeating instead.
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.workers.healthcheck"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
     # Frame extraction and feature detection are CPU-bound; scale this service, not the API.
     deploy:
       replicas: ${WORKER_REPLICAS:-1}

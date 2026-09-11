@@ -217,15 +217,25 @@ jobs:
     runs-on: ubuntu-latest
     needs: [docker]
 
+    # Job-level, not per-step: every `docker compose` invocation re-interpolates the compose file,
+    # so a step without these in scope fails before it runs. That is not hypothetical - it cost a
+    # run's worker logs, because "Dump logs on failure" died on the missing variable instead of
+    # dumping the logs that would have explained the failure.
+    env:
+      JWT_SECRET: ci-only-not-a-real-secret-0000000000
+      STORAGE_SIGNING_SECRET: ci-only-not-a-real-secret-1111111
+      POSTGRES_PASSWORD: ci-postgres
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Start the stack
-        env:
-          JWT_SECRET: ci-only-not-a-real-secret-0000000000
-          STORAGE_SIGNING_SECRET: ci-only-not-a-real-secret-1111111
-          POSTGRES_PASSWORD: ci-postgres
         run: docker compose up --build --detach --wait --wait-timeout 300
+
+      - name: Every service reports healthy
+        # Named explicitly so a future unhealthy service is identified by name in the log rather
+        # than as a bare non-zero exit from `--wait`.
+        run: docker compose ps --format '{{.Service}} {{.Health}} {{.Status}}'
 
       - name: The API is healthy behind nginx
         run: |
@@ -237,9 +247,6 @@ jobs:
         run: curl --fail --silent --show-error http://localhost:8080/ | grep -qi 'SiteScope'
 
       - name: Seed and sign in end to end
-        env:
-          JWT_SECRET: ci-only-not-a-real-secret-0000000000
-          STORAGE_SIGNING_SECRET: ci-only-not-a-real-secret-1111111
         run: |
           set -euo pipefail
           docker compose exec -T api python -m app.seed --demo --quick
@@ -256,10 +263,12 @@ jobs:
           assert body["total_frames"] >= 1, "the seeded capture produced no frames"
           print("dashboard ok:", body["total_projects"], "projects,", body["total_frames"], "frames")'
 
-      - name: Worker picked up jobs from Redis
+      - name: The worker is a live RQ worker, not just a running process
+        # The previous version grepped its logs for the word "worker", which the startup banner
+        # satisfies even if Redis was never reached. This asks the worker's own healthcheck.
         run: |
-          docker compose logs worker --tail 200 | grep -qi 'worker' \
-            || (docker compose logs worker; exit 1)
+          set -euo pipefail
+          docker compose exec -T worker python -m app.workers.healthcheck
 
       - name: Dump logs on failure
         if: failure()

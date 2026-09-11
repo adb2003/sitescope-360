@@ -29,6 +29,7 @@ import { Platform } from 'react-native'
 import type * as SQLiteTypes from 'expo-sqlite'
 
 import { api } from './api'
+import { isAlreadyProcessing, sessionsReadyForProcessing } from './syncPolicy'
 
 const DB_NAME = 'sitescope.db'
 const UPLOAD_DIR = `${FileSystem.documentDirectory}captures/`
@@ -273,6 +274,8 @@ export interface SyncResult {
   sessionsCreated: number
   filesUploaded: number
   filesFailed: number
+  /** Sessions handed to the processing pipeline, so they appear in the web app. */
+  sessionsProcessing: number
   errors: string[]
 }
 
@@ -286,6 +289,9 @@ export interface SyncResult {
  *
  * A failure stops the run rather than hammering through the whole queue: if this upload failed
  * for want of signal, so will the next.
+ *
+ * Finally, any session that is finished and fully uploaded is handed to the processing pipeline,
+ * because uploading bytes nobody processes leaves the capture invisible in the web app.
  */
 export async function sync(): Promise<SyncResult> {
   const db = await openQueue()
@@ -293,6 +299,7 @@ export async function sync(): Promise<SyncResult> {
     sessionsCreated: 0,
     filesUploaded: 0,
     filesFailed: 0,
+    sessionsProcessing: 0,
     errors: [],
   }
 
@@ -357,10 +364,57 @@ export async function sync(): Promise<SyncResult> {
     }
   }
 
+  await startProcessingForCompleteSessions(result)
   return result
 }
 
-/** Ask the server to process a session once all of its files have been uploaded. */
+/**
+ * Hand finished, fully-uploaded sessions to the pipeline.
+ *
+ * Without this the chain stops halfway: the bytes reach the server and nothing happens to them.
+ * No frames are extracted, no quality is scored, no positions are estimated -- so the capture is
+ * invisible in the web app, and the operator who walked the floor has no way to know that from
+ * the phone. Uploading was never the goal; being able to *see* the walkthrough is.
+ *
+ * Two conditions, both necessary. **Finished**, because a session still recording will receive
+ * more files and processing it now would produce a partial walkthrough that looks complete. And
+ * **every file uploaded**, because the pipeline maps a track across frames — running it on half
+ * of them yields a shorter path, not a partial one, with no indication anything is missing.
+ *
+ * Failures here are recorded, never thrown. The upload is the part that cannot be repeated
+ * without walking the site again; processing can be retried from either app at any time, so a
+ * pipeline that is busy or briefly unreachable must not turn a successful upload into a failed
+ * sync.
+ */
+async function startProcessingForCompleteSessions(result: SyncResult): Promise<void> {
+  const sessions = await listSessions()
+  const filesBySession = new Map<string, PendingFile[]>()
+  for (const session of sessions) {
+    filesBySession.set(session.id, await listFiles(session.id))
+  }
+
+  for (const sessionId of sessionsReadyForProcessing(sessions, filesBySession)) {
+    try {
+      await api.post(`/captures/${sessionId}/process`, {})
+      result.sessionsProcessing += 1
+    } catch (error) {
+      // sync runs whenever connectivity returns, so asking twice is normal, not an error.
+      if (isAlreadyProcessing(error)) {
+        result.sessionsProcessing += 1
+        continue
+      }
+      result.errors.push(`Processing ${sessionId}: ${describe(error)}`)
+    }
+  }
+}
+
+/**
+ * Ask the server to process a session on demand.
+ *
+ * `sync()` already does this automatically for finished, fully-uploaded sessions. This stays for
+ * the cases automation should not cover: retrying after a pipeline failure, and processing a
+ * session the operator wants looked at now rather than at the next sync.
+ */
 export async function requestProcessing(sessionId: string): Promise<void> {
   const files = await listFiles(sessionId)
   const outstanding = files.filter((file) => file.status !== 'uploaded')

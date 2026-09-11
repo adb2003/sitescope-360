@@ -238,10 +238,23 @@ export function useFloorPaths(floorId: string | null | undefined) {
 }
 
 // ---- captures ---------------------------------------------------------------
+/**
+ * The capture list, polled gently so work arriving from the field shows up on its own.
+ *
+ * Captures are created by the mobile app, not by this one: an operator finishes a walkthrough on
+ * site and the office is looking at a list that will never mention it. `useProcessingStatus`
+ * polls a session it already knows about, which does not help — the problem is learning that a
+ * *new* session exists.
+ *
+ * 20 seconds, and React Query pauses the timer while the tab is unfocused, so an abandoned tab
+ * costs nothing. Fast enough that "it should be there by now" is true within a coffee-length
+ * pause; slow enough that a dashboard left open all day is not hammering the API.
+ */
 export function useCaptures(filters: Record<string, QueryValue> = {}) {
   return useQuery({
     queryKey: keys.captures(filters),
     queryFn: () => api.get<Page<CaptureSession>>('/captures', { limit: 100, ...filters }),
+    refetchInterval: 20_000,
   })
 }
 

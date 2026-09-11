@@ -25,7 +25,7 @@ x-backend-env: &backend-env
   STORAGE_ROOT: /var/lib/sitescope/storage
   # Both MUST be overridden in a real deployment. The API logs an error at startup if it sees
   # the development defaults with ENVIRONMENT=production.
-  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env - generate with: python -c "import secrets; print(secrets.token_urlsafe(48))"}
+  JWT_SECRET: '${JWT_SECRET:?set JWT_SECRET in .env - generate one with python -c "import secrets; print(secrets.token_urlsafe(48))"}'
   STORAGE_SIGNING_SECRET: ${STORAGE_SIGNING_SECRET:?set STORAGE_SIGNING_SECRET in .env}
   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}

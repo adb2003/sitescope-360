@@ -38,6 +38,9 @@ dev = [
     "pytest-cov>=6.0",
     "ruff>=0.8",
     "mypy>=1.13",
+    # tests/unit/test_compose.py parses docker-compose.yml, so a YAML syntax error is caught
+    # without Docker installed. It arrived transitively before; declared here deliberately.
+    "pyyaml>=6.0",
 ]
 
 [build-system]

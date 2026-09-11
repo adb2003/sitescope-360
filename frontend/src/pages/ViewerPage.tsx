@@ -7,6 +7,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { PageBody, PageHeader } from '@/components/layout/AppShell'
 import { FloorPlanCanvas } from '@/components/floorplan/FloorPlanCanvas'
 import { MappingConfidenceNote } from '@/components/status'
+import { PlanMinimap, type MinimapOrientation } from '@/components/viewer/PlanMinimap'
 import { FrameFilmstrip, QualityPanel, Viewer360 } from '@/components/viewer/Viewer360'
 import {
   Badge,
@@ -51,6 +52,8 @@ export function ViewerPage() {
   const { can } = useAuth()
 
   const [frameId, setFrameId] = useState<string | null>(params.frameId ?? null)
+  // Mirrored from the viewer so the minimap's cone follows where the operator is looking.
+  const [viewerOrientation, setViewerOrientation] = useState<MinimapOrientation | undefined>()
   const [panel, setPanel] = useState<'quality' | 'plan' | 'issues'>('quality')
   const [pendingAnnotation, setPendingAnnotation] = useState<{ yaw: number; pitch: number } | null>(
     null,
@@ -203,22 +206,47 @@ export function ViewerPage() {
           />
         ) : null}
 
-        <div className="grid gap-3 xl:grid-cols-[1fr_340px]">
-          <div className="space-y-3">
+        <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_340px]">
+          {/* min-w-0 because a grid item defaults to min-width:auto, so it grows to fit its
+              widest child rather than shrinking. The frame filmstrip already asks for
+              overflow-x-auto, but it can only scroll inside a parent that is allowed to be
+              narrower than its contents -- without this the strip stretched the column to 2400px
+              on a 31-frame capture and gave the whole page a horizontal scrollbar. */}
+          <div className="min-w-0 space-y-3">
             {manifest.data ? (
-              <Viewer360
-                manifest={manifest.data}
-                annotations={annotations.data ?? []}
-                onSelectFrame={select}
-                onPlaceAnnotation={
-                  canAnnotate ? (yaw, pitch) => setPendingAnnotation({ yaw, pitch }) : undefined
-                }
-                onSelectAnnotation={(annotation) => {
-                  setPanel('issues')
-                  setNotice(`${annotation.title} — ${humanize(annotation.status)}`)
-                }}
-                className="h-[62vh] min-h-[420px]"
-              />
+              // Positioned so the minimap floats over the panorama, the way it does on site:
+              // where you are and what you are looking at belong on one screen, not two.
+              <div className="relative">
+                <Viewer360
+                  manifest={manifest.data}
+                  annotations={annotations.data ?? []}
+                  onSelectFrame={select}
+                  onPlaceAnnotation={
+                    canAnnotate ? (yaw, pitch) => setPendingAnnotation({ yaw, pitch }) : undefined
+                  }
+                  onSelectAnnotation={(annotation) => {
+                    setPanel('issues')
+                    setNotice(`${annotation.title} — ${humanize(annotation.status)}`)
+                  }}
+                  onOrientationChange={(next) =>
+                    setViewerOrientation({ yaw: next.yaw, fov: next.fov })
+                  }
+                  className="h-[62vh] min-h-[420px]"
+                />
+
+                {plan.data ? (
+                  <div className="pointer-events-none absolute right-3 top-3 z-10 flex justify-end">
+                    <PlanMinimap
+                      plan={plan.data}
+                      locations={locations.data ?? []}
+                      frames={orderedFrames}
+                      activeFrameId={frameId}
+                      orientation={viewerOrientation}
+                      onSelectFrame={select}
+                    />
+                  </div>
+                ) : null}
+              </div>
             ) : null}
 
             {orderedFrames.length > 1 ? (

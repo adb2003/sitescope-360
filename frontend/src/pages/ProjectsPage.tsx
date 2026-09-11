@@ -5,6 +5,7 @@ import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import { PageBody, PageHeader } from '@/components/layout/AppShell'
+import { ProjectGrid } from '@/components/projects/ProjectGrid'
 import {
   Badge,
   Button,
@@ -34,11 +35,16 @@ import {
 import { Capability, useAuth } from '@/hooks/useAuth'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { ApiError } from '@/lib/api'
-import { formatArea, formatNumber, formatRelative, humanize } from '@/lib/utils'
+import { cn, formatArea, formatNumber, formatRelative, humanize } from '@/lib/utils'
 import { PROJECT_STATUS_VALUES } from '../../../shared/contracts'
 
 export function ProjectsPage() {
   const [search, setSearch] = useState('')
+  // Grid by default: signing in and picking a site is the common case, and cards are the shape
+  // for choosing. The table stays one click away for comparing across many columns.
+  const [view, setView] = useState<'grid' | 'table'>(
+    () => (localStorage.getItem('sitescope.projects.view') as 'grid' | 'table' | null) ?? 'grid',
+  )
   const { data, isLoading, isError, error, refetch } = useProjects(
     search.trim() ? { q: search.trim() } : {},
   )
@@ -79,6 +85,35 @@ export function ProjectsPage() {
               aria-label="Search projects"
             />
           </div>
+
+          <div className="ml-auto flex items-center gap-1 text-xs text-ink-muted">
+            <span className="tabular-nums">{data?.total ?? 0} projects</span>
+            <div className="ml-2 flex overflow-hidden rounded-md border border-line">
+              {(['grid', 'table'] as const).map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => {
+                    setView(option)
+                    try {
+                      localStorage.setItem('sitescope.projects.view', option)
+                    } catch {
+                      // A browser refusing storage is not a reason to refuse the click.
+                    }
+                  }}
+                  aria-pressed={view === option}
+                  className={cn(
+                    'px-2.5 py-1 capitalize transition',
+                    view === option
+                      ? 'bg-brand text-brand-ink'
+                      : 'text-ink-muted hover:bg-surface-raised hover:text-ink',
+                  )}
+                >
+                  {option}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         {isError ? (
@@ -111,6 +146,13 @@ export function ProjectsPage() {
                 ) : null
               }
             />
+          ) : view === 'grid' ? (
+            <div className="p-3">
+              <ProjectGrid
+                projects={data.items}
+                onOpen={(id) => navigate(`/projects/${id}`)}
+              />
+            </div>
           ) : (
             <Table>
               <thead>

@@ -64,7 +64,7 @@ logger = get_logger("sitescope.seed")
 DEMO_PASSWORD = "SiteScope360!demo"
 
 ACCOUNTS = [
-    ("admin@demo.example.com", "Avery Doyle", Role.ADMIN),
+    ("admin@demo.example.com", "Aditya Bhandari", Role.ADMIN),
     ("manager@demo.example.com", "Priya Raman", Role.PROJECT_MANAGER),
     ("engineer@demo.example.com", "Sam Okafor", Role.SITE_ENGINEER),
     ("viewer@demo.example.com", "Jules Tan", Role.VIEWER),

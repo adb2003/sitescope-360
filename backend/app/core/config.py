@@ -64,6 +64,22 @@ class Settings(BaseSettings):
     s3_access_key_id: str | None = None
     s3_secret_access_key: str | None = None
 
+    #: Serve asset URLs from a CDN instead of straight from the storage origin.
+    #:
+    #: Unset by default, because turning it on is a deployment claim rather than a preference:
+    #: the CDN must already front the storage origin. Only the scheme, host and optional path
+    #: prefix are rewritten -- the object path, the expiry and the signature carry through
+    #: untouched, which is what lets one setting serve either provider:
+    #:
+    #: * ``local`` -- the signature is an HMAC over key and expiry and does not cover the host,
+    #:   so any cache that forwards to the API validates it identically.
+    #: * ``s3`` -- a SigV4 presigned URL *does* sign the ``Host`` header, so the distribution
+    #:   must use the same S3 endpoint as its origin and forward the ``X-Amz-*`` query string
+    #:   unmodified. It then sends the origin host upstream and the signature still verifies.
+    #:   Pointing this at a distribution with a different origin breaks every asset, which is
+    #:   why it is never inferred.
+    cdn_base_url: str | None = None
+
     # ---- uploads ---------------------------------------------------------
     max_upload_bytes: int = 2 * 1024 * 1024 * 1024  # 2 GiB
     allowed_image_extensions: Annotated[list[str], NoDecode] = Field(
@@ -128,6 +144,24 @@ class Settings(BaseSettings):
         resolved = (REPO_ROOT / path.lstrip("./")).resolve()
         resolved.parent.mkdir(parents=True, exist_ok=True)
         return f"{prefix}:///{resolved.as_posix()}"
+
+    @field_validator("cdn_base_url", mode="after")
+    @classmethod
+    def _normalise_cdn_base(cls, value: str | None) -> str | None:
+        """Reject a CDN base that cannot yield an absolute URL, and drop any trailing slash.
+
+        An empty string means "unset" rather than "an empty base", because that is what an
+        unfilled ``CDN_BASE_URL=`` line in a ``.env`` file produces; joining against it would
+        otherwise give a host-relative URL, which the browser resolves and the mobile app -- with
+        no origin of its own -- cannot. Validating at start-up rather than at the call site means
+        a typo fails on boot instead of on the first image an operator opens.
+        """
+        if value is None or not value.strip():
+            return None
+        cleaned = value.strip().rstrip("/")
+        if not cleaned.startswith(("http://", "https://")):
+            raise ValueError("CDN_BASE_URL must start with http:// or https://")
+        return cleaned
 
     @field_validator("storage_root", mode="after")
     @classmethod

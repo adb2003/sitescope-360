@@ -237,3 +237,19 @@ def test_planned_frame_count() -> None:
     assert media.planned_frame_count(10.0, 2.0) == 6
     assert media.planned_frame_count(None, 2.0) is None
     assert media.planned_frame_count(10.0, 0) is None
+
+
+def test_the_video_decoder_is_ffmpeg_backed() -> None:
+    """Frame extraction depends on FFmpeg, so assert it rather than assume the wheel has it.
+
+    `iter_video_frames` hands the container to `cv2.VideoCapture`, whose MP4/MOV support *is*
+    the bundled FFmpeg — OpenCV has no demuxer of its own for those. A build without it does not
+    fail to import or to run the image pipeline; it opens every video successfully-looking and
+    yields zero frames, so a capture would arrive, process, and report ready with nothing in it.
+    The wheels carry FFmpeg on every platform CI runs, which is exactly why this is worth
+    pinning: it holds until someone swaps the dependency, and then it stops holding silently.
+    """
+    backends = {cv2.videoio_registry.getBackendName(b) for b in cv2.videoio_registry.getBackends()}
+    assert "FFMPEG" in backends, (
+        f"OpenCV has no FFmpeg backend; video capture will yield nothing: {backends}"
+    )

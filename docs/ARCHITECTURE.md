@@ -163,7 +163,7 @@ Stages are independent, idempotent, and individually retryable. Each stage run i
 `ProcessingJob` row, so the admin job dashboard is a straight query rather than queue introspection.
 
 ```
-   POST /api/captures/{id}/files          (multipart upload → StorageProvider)
+   POST /api/captures/{id}/upload         (multipart, streamed → StorageProvider)
                 │
                 ▼
         ┌──────────────────┐
@@ -193,8 +193,10 @@ Stages are independent, idempotent, and individually retryable. Each stage run i
                  ▼
         ┌──────────────────┐
         │ 6 MAPPING        │  pairwise match → relative motion → dead-reckoned
-        │                  │  relative track → confidence. Low confidence ⇒
-        │                  │  "manual placement required", never a fake path.
+        │                  │  track → pose-graph SLAM re-optimises it against
+        │                  │  detected loop closures (`vision/slam.py`) →
+        │                  │  confidence. Low confidence ⇒ "manual placement
+        │                  │  required", never a fake path.
         └────────┬─────────┘
                  ▼
         ┌──────────────────┐
@@ -204,6 +206,68 @@ Stages are independent, idempotent, and individually retryable. Each stage run i
                  ▼
               READY
 ```
+
+### Deployment shape
+
+The same pipeline at the coarser grain a deployment diagram uses, naming the module behind each
+box:
+
+```
+[Web app / Mobile] ──(upload)──> [Object storage]
+  frontend/, mobile/              storage/{local,s3}.py
+                                        │
+                                POST /captures/{id}/process
+                                   services/captures.py
+                                        │
+                                        ▼
+                                 [Python worker]
+                          workers/run.py — RQ on Redis,
+                          ThreadQueue fallback for laptops
+                                        │
+               ┌────────────────────────┴────────────────────────┐
+               ▼                                                 ▼
+      [Frame extraction]                              [VIO / SLAM processing]
+   processing/media.py                             vision/motion.py  → relative
+   cv2.VideoCapture, FFmpeg-backed —               vision/slam.py    → pose graph,
+   asserted by test_media.py, because a            loop closure, LM + Huber
+   build without it yields zero frames
+   rather than an error
+               │                                                 │
+               └────────────────────────┬────────────────────────┘
+                                        ▼
+                        [Floor plan alignment algorithm]
+                            vision/mapbuilder.py — similarity
+                            transform (rotation + uniform scale +
+                            translation) fitted to ≥2 operator
+                            anchors; refuses collinear anchors
+                                        │
+                                        ▼
+                          [Database insertion & storage]
+                       PostgreSQL rows + object storage, served
+                       as expiring signed URLs, optionally through
+                       CDN_BASE_URL
+```
+
+Two boxes are deliberately *not* implemented as drawn, and the reasons are worth stating rather
+than leaving to be rediscovered:
+
+**Upload goes through the API, not straight to the bucket.** `store_upload` streams the body to
+the provider while hashing it, enforcing the extension allow-list, the magic-byte sniff and the
+size cap *before* the bytes land — so a disguised or oversized upload never becomes an object.
+Handing the client a presigned PUT would remove that, and move the size cap to a bucket policy
+and the type check to the VALIDATE stage, after storage has already been paid for. The cost of
+the current choice is that a multi-gigabyte video occupies an API worker for the duration of the
+transfer; the trade is deliberate and is the first thing to revisit if video sizes grow.
+
+**Positions are float columns, not PostGIS geometry.** The coordinates are floor-plan pixels and
+a relative metric track — a local Cartesian frame with no datum, so the spherical maths PostGIS
+exists for does not apply. Its remaining benefit would be a spatial index, and the one proximity
+query in the product ("which frame is nearest this click") is answered in the browser from points
+it has already loaded, in `frontend/src/components/viewer/minimapGeometry.ts`. Adding the
+extension would mean a PostGIS-only image, `geoalchemy2`, and a migration that no longer runs on
+the SQLite path the test suite and the laptop setup both use — a real cost against an index that
+would be scanning a few hundred rows per floor. Worth revisiting if frames per floor reach the
+scale where a sequential scan is measurable, not before.
 
 Status is surfaced to the client exactly as §34 specifies:
 `uploading → uploaded → processing → extracting_frames → analyzing → mapping → ready`, or
@@ -330,7 +394,11 @@ See [CAMERA_INTEGRATION.md](CAMERA_INTEGRATION.md).
   unmount to keep WebGL memory flat.
 - Aggregates (coverage, timeline buckets, dashboard tiles) are computed with SQL aggregation, not
   by materializing rows in Python.
-- Signed URLs are cacheable and CDN-frontable; the API is stateless, so it scales horizontally.
+- Signed URLs are cacheable and CDN-frontable via `CDN_BASE_URL`, which replaces the scheme, host
+  and any path prefix while carrying the signed query string through untouched. With `local`
+  storage that is unconditional (the HMAC does not cover the host); with `s3` the distribution
+  must use the same S3 endpoint as its origin, because SigV4 signs `Host`. The API is stateless,
+  so it scales horizontally.
 
 ---
 

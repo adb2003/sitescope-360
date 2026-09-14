@@ -26,8 +26,10 @@ import type {
   Building,
   CameraDevice,
   CameraProviderInfo,
+  AlignTrackResult,
   CaptureFileDetail,
   CapturesNearPoint,
+  TrackAnchor,
   CaptureFrameDetail,
   CapturePath,
   CaptureSchedule,
@@ -614,6 +616,29 @@ export function useUploadCaptureFiles(
       onProgress?.(null)
       void queryClient.invalidateQueries({ queryKey: keys.capture(sessionId) })
       void queryClient.invalidateQueries({ queryKey: keys.captureFiles(sessionId) })
+    },
+  })
+}
+
+/**
+ * Place a whole capture on the floor plan from a handful of manual anchors (§15).
+ *
+ * Invalidates broadly on success because one call moves every frame of the capture: the frame
+ * list gains locations, the floor gains capture points, and the drawn path changes. Refreshing
+ * only the capture would leave the plan showing the state before the walk was placed.
+ */
+export function useAlignCapture(sessionId: string, floorId: string | null | undefined) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (anchors: TrackAnchor[]) =>
+      api.post<AlignTrackResult>(`/captures/${sessionId}/align`, { anchors }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.capture(sessionId) })
+      void queryClient.invalidateQueries({ queryKey: keys.captureFrames(sessionId) })
+      if (floorId) {
+        void queryClient.invalidateQueries({ queryKey: keys.locations(floorId) })
+        void queryClient.invalidateQueries({ queryKey: keys.floorPaths(floorId) })
+      }
     },
   })
 }

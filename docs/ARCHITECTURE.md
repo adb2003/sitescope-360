@@ -310,7 +310,15 @@ scale-free everywhere it is surfaced.
 
 Anchoring (`POST /captures/{id}/align`, `services/alignment.py`) is where scale, rotation and
 origin all arrive at once. The operator names two or more frames and says where on the plan each
-was taken; a transform is fitted to those correspondences and applied to every other frame.
+was taken; a transform is fitted to those correspondences and applied to every other frame. The
+viewer's Plan tab drives it: open a frame, press *Anchor the current frame*, click the plan, then
+repeat on a frame further along and press *Place N frames*.
+
+Two anchors are the minimum and also a trap worth knowing about. A similarity transform has four
+degrees of freedom and two correspondences supply exactly four constraints, so the fit reproduces
+them perfectly however wrong they were — `rms_error_px` comes back 0.0 and means nothing. The UI
+says so rather than printing a zero that reads as "perfect", and asks for a third anchor if the
+operator wants the fit actually tested.
 
 That transform is a **similarity** — rotation, uniform scale, translation — and deliberately not
 an affine or projective one. "Stretching" the path to meet its anchors sounds accommodating and

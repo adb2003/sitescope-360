@@ -54,6 +54,26 @@ export interface FloorPlanCanvasProps {
   className?: string
   /** Hide the path polylines even when paths are supplied. */
   hidePaths?: boolean
+  /**
+   * Click the plan to report a coordinate, without adding or moving anything.
+   *
+   * Separate from `editable` on purpose. Anchoring needs the plan to *answer* "where was this
+   * frame taken", which is a read of the drawing — it must not also arm dragging and deleting
+   * the capture points already on it, where a stray drag would move somebody's real placement.
+   */
+  pickMode?: boolean
+  onPickPoint?: (x: number, y: number) => void
+  /** Extra points drawn over the plan, e.g. anchors placed but not yet submitted. */
+  markers?: PlanMarker[]
+}
+
+export interface PlanMarker {
+  id: string
+  x: number
+  y: number
+  /** Short text inside the pin — an index, usually. */
+  label: string
+  title?: string
 }
 
 interface Viewport {
@@ -74,6 +94,9 @@ export function FloorPlanCanvas({
   onDeleteLocation,
   className,
   hidePaths,
+  pickMode = false,
+  onPickPoint,
+  markers = [],
 }: FloorPlanCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [viewport, setViewport] = useState<Viewport>({ scale: 1, offsetX: 0, offsetY: 0 })
@@ -231,6 +254,20 @@ export function FloorPlanCanvas({
       if (!pan || pan.pointerId !== event.pointerId) return
       panState.current = null
 
+      if (pan.moved < CLICK_THRESHOLD_PX && pickMode && onPickPoint) {
+        const point = toPlan(event.clientX, event.clientY)
+        if (
+          point &&
+          point.x >= 0 &&
+          point.y >= 0 &&
+          point.x <= plan.width_px &&
+          point.y <= plan.height_px
+        ) {
+          onPickPoint(Math.round(point.x), Math.round(point.y))
+        }
+        return
+      }
+
       if (pan.moved < CLICK_THRESHOLD_PX && addMode && onAddLocation) {
         const point = toPlan(event.clientX, event.clientY)
         if (
@@ -252,6 +289,8 @@ export function FloorPlanCanvas({
       onSelectLocation,
       addMode,
       onAddLocation,
+      pickMode,
+      onPickPoint,
       toPlan,
       plan.width_px,
       plan.height_px,
@@ -349,7 +388,7 @@ export function FloorPlanCanvas({
         ref={containerRef}
         className={cn(
           'relative h-full min-h-[320px] w-full touch-none select-none overflow-hidden bg-surface-raised',
-          addMode ? 'cursor-crosshair' : 'cursor-grab',
+          addMode || pickMode ? 'cursor-crosshair' : 'cursor-grab',
         )}
         onWheel={onWheel}
         onPointerDown={onBackgroundPointerDown}
@@ -452,6 +491,26 @@ export function FloorPlanCanvas({
             </button>
           )
         })}
+
+        {markers.map((marker) => (
+          <div
+            key={marker.id}
+            style={{
+              left: viewport.offsetX + marker.x * viewport.scale,
+              top: viewport.offsetY + marker.y * viewport.scale,
+            }}
+            title={marker.title}
+            className={cn(
+              'pointer-events-none absolute z-[6] -translate-x-1/2 -translate-y-1/2',
+              'flex size-6 items-center justify-center rounded-full border-2 border-dashed',
+              // Dashed and in the "estimated" colour, because an anchor is a claim the operator
+              // has made and not yet committed; it must not read as a placed capture point.
+              'border-estimated bg-surface text-[10px] font-bold text-estimated shadow-panel',
+            )}
+          >
+            {marker.label}
+          </div>
+        ))}
       </div>
 
       {/* Legend + selection actions */}

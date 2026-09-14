@@ -339,6 +339,23 @@ export interface CapturesNearPoint {
   visits: CaptureVisit[]
 }
 
+/** One frame the operator has identified on the floor plan. */
+export interface TrackAnchor {
+  frame_id: string
+  x: number
+  y: number
+}
+
+/** What the anchor fit did, in terms the operator can check. */
+export interface AlignTrackResult {
+  placed_frames: number
+  scale: number
+  rotation_deg: number
+  /** How far the anchors ended up from where they were dropped. The number that matters. */
+  rms_error_px: number
+  note: string
+}
+
 export interface Quality {
   quality_score: number
   blur_score: number

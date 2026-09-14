@@ -8,6 +8,7 @@ import { PageBody, PageHeader } from '@/components/layout/AppShell'
 import { FloorPlanCanvas } from '@/components/floorplan/FloorPlanCanvas'
 import { MappingConfidenceNote } from '@/components/status'
 import { PlanMinimap, type MinimapOrientation } from '@/components/viewer/PlanMinimap'
+import { AnchorPlacement, type PendingAnchor } from '@/components/viewer/AnchorPlacement'
 import { TimeTravelPanel } from '@/components/viewer/TimeTravelPanel'
 import { FrameFilmstrip, QualityPanel, Viewer360 } from '@/components/viewer/Viewer360'
 import {
@@ -31,6 +32,7 @@ import {
   useCapture,
   useCaptureFrames,
   useCaptures,
+  useAlignCapture,
   useCapturesNear,
   useCreateAnnotation,
   useFloorPaths,
@@ -42,6 +44,7 @@ import {
 import { Capability, useAuth } from '@/hooks/useAuth'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { ApiError } from '@/lib/api'
+import type { AlignTrackResult } from '@/types/api'
 import { formatDateTime, humanize } from '@/lib/utils'
 import {
   ANNOTATION_PRIORITY_VALUES,
@@ -103,6 +106,14 @@ export function ViewerPage() {
   // Declared here rather than beside the `probe` state because it needs the floor, and the floor
   // is only known once the frame has loaded.
   const nearby = useCapturesNear(frame?.floor_id ?? undefined, probe, PROBE_RADIUS_PX)
+
+  // Anchors the operator has dropped but not yet submitted, and the pick mode that collects them.
+  const [anchors, setAnchors] = useState<PendingAnchor[]>([])
+  const [picking, setPicking] = useState(false)
+  const [alignResult, setAlignResult] = useState<AlignTrackResult | null>(null)
+  const [alignAnchorCount, setAlignAnchorCount] = useState<number | null>(null)
+  const [alignError, setAlignError] = useState<string | null>(null)
+  const align = useAlignCapture(frame?.session_id ?? '', frame?.floor_id ?? undefined)
   const assign = useAssignFrameLocation(frame?.floor_id ?? undefined)
 
   const canAnnotate = can(Capability.Annotate)
@@ -326,8 +337,74 @@ export function ViewerPage() {
                         onSelectLocation={(location) => {
                           if (location.latest_frame_id) select(location.latest_frame_id)
                         }}
+                        pickMode={picking}
+                        onPickPoint={(x, y) => {
+                          // One anchor per frame: clicking again moves it rather than adding a
+                          // second claim about the same frame, which the fit cannot satisfy.
+                          setAnchors((current) => [
+                            ...current.filter((anchor) => anchor.frameId !== frameId),
+                            { frameId, x, y },
+                          ])
+                          setPicking(false)
+                          setAlignResult(null)
+                          setAlignError(null)
+                        }}
+                        markers={anchors.map((anchor, index) => ({
+                          id: anchor.frameId,
+                          x: anchor.x,
+                          y: anchor.y,
+                          label: String(index + 1),
+                          title: `Anchor ${index + 1} — not yet placed`,
+                        }))}
                         className="h-64"
                       />
+
+                      {canPlace && orderedFrames.length >= 2 ? (
+                        <AnchorPlacement
+                          frames={orderedFrames}
+                          activeFrameId={frameId}
+                          anchors={anchors}
+                          picking={picking}
+                          pending={align.isPending}
+                          result={alignResult}
+                          anchorsUsed={alignAnchorCount}
+                          error={alignError}
+                          onTogglePicking={() => setPicking((value) => !value)}
+                          onRemove={(id) =>
+                            setAnchors((current) =>
+                              current.filter((anchor) => anchor.frameId !== id),
+                            )
+                          }
+                          onSubmit={() => {
+                            setAlignError(null)
+                            align.mutate(
+                              anchors.map((anchor) => ({
+                                frame_id: anchor.frameId,
+                                x: anchor.x,
+                                y: anchor.y,
+                              })),
+                              {
+                                onSuccess: (result) => {
+                                  setAlignResult(result)
+                                  setAlignAnchorCount(anchors.length)
+                                  setAnchors([])
+                                  void manifest.refetch()
+                                },
+                                // The server's refusals name what to do about them -- too few
+                                // anchors, anchors collinear in the track, a residual too large
+                                // to trust -- so they are shown rather than summarised.
+                                onError: (error) =>
+                                  setAlignError(
+                                    error instanceof ApiError
+                                      ? error.message
+                                      : 'Could not place this capture on the plan',
+                                  ),
+                              },
+                            )
+                          }}
+                        />
+                      ) : null}
+
                       {!frame?.location_id && canPlace ? (
                         <PlaceOnPlanForm
                           locations={locations.data ?? []}

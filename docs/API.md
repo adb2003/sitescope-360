@@ -246,7 +246,7 @@ explains that it cannot be used for pixel placement until rasterised.
 | GET | `/captures/{id}/frames` | Paginated frames; filter by `verdict` or `located`. |
 | GET | `/captures/{id}/path` | The ordered capture path for this visit. |
 | POST | `/captures/{id}/import` | Import from a registered camera device. |
-| POST | `/captures/{id}/align` | Pin the estimated track to the plan from ≥2 manual anchors. |
+| POST | `/captures/{id}/align` | Pin the estimated track to the plan from ≥2 manual anchors. Driven by the viewer's Plan tab. |
 
 **Which upload route.** `/upload` streams the body through the API and validates it *before*
 anything is stored, and de-duplicates identical bytes by checksum — the right default, and what

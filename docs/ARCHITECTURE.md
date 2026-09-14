@@ -178,7 +178,9 @@ Stages are independent, idempotent, and individually retryable. Each stage run i
                  ▼
         ┌──────────────────┐
         │ 3 FRAMES         │  stills → 1 frame; video → frame every N seconds
-        │                  │  (configurable per session), plus thumbnails
+        │                  │  (1.0 s default, configurable per session), minus
+        │                  │  the stretches where the operator stood still,
+        │                  │  plus thumbnails
         └────────┬─────────┘
                  ▼
         ┌──────────────────┐
@@ -271,6 +273,18 @@ One guarantee genuinely does not survive the move: there is no content checksum,
 computing one means reading the whole object back through the API, which is the cost the caller
 chose this route to avoid. Retries are idempotent *by key* instead, and `checksum_sha256` is
 left null rather than filled with something unverified.
+
+**Registration, not a storage event.** The usual sketch of this pattern finishes with the bucket
+firing an event (SQS, a webhook) that wakes the worker. This finishes with the client calling
+`/files` instead, for two reasons. It keeps the size and type checks: the server inspects the
+stored object and *deletes* it when it fails, which an event-driven worker discovering the object
+later cannot do before it has been paid for. And it works identically on `local` storage, so the
+whole chain runs on a laptop with no bucket, no queue service and no cloud account — which a
+storage-event trigger cannot.
+
+The cost is that a client which uploads and then dies leaves an unregistered object. That is a
+lifecycle-rule problem (expire unregistered keys under `source/`), not a correctness one: nothing
+references it and no capture claims it.
 
 With `local` storage the PUT target is `PUT /api/files/{key}`, signed the same way reads are —
 except the HMAC covers the verb. Without that domain separation every asset URL ever handed to a

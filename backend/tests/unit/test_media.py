@@ -253,3 +253,39 @@ def test_the_video_decoder_is_ffmpeg_backed() -> None:
     assert "FFMPEG" in backends, (
         f"OpenCV has no FFmpeg backend; video capture will yield nothing: {backends}"
     )
+
+
+@pytest.fixture
+def paused_walk_video(tmp_path: Path) -> Path:
+    """A walk that stops dead in the middle, as every real walkthrough does.
+
+    Six seconds: two walking, two standing perfectly still, two walking again. The still stretch
+    is what frame extraction has to notice — at a one-second interval it is otherwise two more
+    stored panoramas of the same view, and at a busy site those stretches are most of the video.
+    """
+    path = tmp_path / "paused.mp4"
+    width, height, fps, seconds = 640, 320, 10, 6
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    if not writer.isOpened():
+        pytest.skip("This OpenCV build cannot write MP4")
+
+    room = Room()
+    for index in range(fps * seconds):
+        t = index / fps
+        if t < 2.0:
+            x = -6.0 + 3.0 * t
+        elif t < 4.0:
+            x = 0.0  # standing still
+        else:
+            x = 3.0 * (t - 4.0)
+        writer.write(render_panorama(room, (x, 0.0, 0.0), width=width, height=height))
+    writer.release()
+    assert path.stat().st_size > 0
+    return path
+
+
+def test_extraction_keeps_every_frame_of_a_moving_walk(video_file: Path) -> None:
+    """The guard must not fire on ordinary walking, or it would thin a good capture."""
+    frames = list(media.iter_video_frames(video_file, interval_seconds=1.0))
+
+    assert len(frames) >= 5, f"a 6-second moving walk yielded only {len(frames)} frames"

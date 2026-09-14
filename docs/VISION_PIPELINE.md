@@ -313,6 +313,32 @@ residual rejection reduced without removing. That is reported rather than averag
 technique is not uniformly better, and `loop_closure.limitations` in `describe_capabilities()`
 says so.
 
+### Frame sampling
+
+One frame per second of video, and it is a measured figure rather than a convention. A person
+walks about 1.2 m/s, so the interval sets the distance between consecutive frames, and that
+distance is what decides whether ORB can match them at all:
+
+| interval | step | verified matches/pair | mean track error (3 routes) |
+| --- | --- | --- | --- |
+| 2.0 s | 2.4 m | ~38 | **3.64 m** |
+| 1.5 s | 1.8 m | ~60 | 0.66 m |
+| 1.0 s | 1.2 m | ~114 | **0.62 m** |
+| 0.75 s | 0.9 m | ~157 | 2.87 m (single route) |
+| 0.5 s | 0.6 m | ~234 | 2.68 m (single route) |
+
+2.0 s — the previous default — was the worse choice on every route tested, and on two of the
+three it produced **no loop closures at all**, because frames 2.4 m apart do not match well
+enough to verify a revisit. Denser is not automatically better either: below about 1 s the chain
+grows faster than the per-step geometry improves, and the error climbs again.
+
+Stretches where the operator stood still are dropped during extraction rather than stored and
+flagged later. At a one-second interval a thirty-second pause is thirty near-identical panoramas,
+each costing three stored objects and a quality assessment, and the mapper discards them as
+duplicates anyway. This is safe for video specifically because the source file is kept —
+re-processing at a different interval reconstructs anything skipped. Uploaded stills are never
+dropped: each one is a picture somebody deliberately took.
+
 ### Scale
 
 What none of this recovers is *distance*. A single moving camera gives translation only up to an

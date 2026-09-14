@@ -321,12 +321,18 @@ def stage_frame_extraction(db: Session, session: CaptureSession, spec: JobSpec) 
         if capture_file.validation_errors:
             continue
         if capture_file.kind in (FileKind.VIDEO_360, FileKind.VIDEO_FLAT):
-            count = _extract_video_frames(db, storage, session, capture_file, interval, sequence)
+            count, skipped = _extract_video_frames(
+                db, storage, session, capture_file, interval, sequence
+            )
             produced.append(
                 {
                     "file_id": capture_file.id,
                     "kind": "video",
                     "frames": count,
+                    # Reported, not silent: a walkthrough that yields far fewer frames than its
+                    # duration implies has a reason, and "the operator was standing still" is a
+                    # different problem from "extraction is broken".
+                    "skipped_stationary": skipped,
                     "interval_seconds": interval,
                 }
             )
@@ -450,15 +456,43 @@ def _extract_video_frames(
     capture_file: CaptureFile,
     interval_seconds: float,
     sequence_start: int,
-) -> int:
+) -> tuple[int, int]:
+    """Extract frames from one video, skipping the stretches where the operator stood still.
+
+    Returns ``(kept, skipped)``.
+
+    An operator pauses constantly — to open a door, to look at something, to talk to somebody —
+    and at a one-second interval a thirty-second pause is thirty near-identical panoramas. Each
+    would cost three stored objects, a quality assessment and a filmstrip slot, and contribute
+    nothing: the mapper already discards them as near-duplicates, so they are dead weight by the
+    time anything looks at them.
+
+    Dropping them here rather than flagging them later is safe *for video specifically*, because
+    the source file is kept: re-processing at a different interval reconstructs whatever was
+    skipped. An uploaded still is the opposite — each one is a picture somebody deliberately took
+    — so nothing like this applies to :func:`_create_still_frame`.
+
+    The comparison is against the last frame *kept*, not the last one seen. Comparing to the last
+    seen would let a slow drift accumulate frame by frame without any single step crossing the
+    threshold, and the operator would walk out of shot without a single frame being recorded.
+    """
     suffix = Path(capture_file.original_filename).suffix or ".mp4"
     base_time = capture_file.captured_at or session.started_at
     count = 0
+    skipped = 0
+    kept_hash: str | None = None
+    engine = get_vision_engine()
 
     with _staged_file(storage, capture_file.storage_key, suffix) as path:
         for offset_seconds, image in media.iter_video_frames(
             path, interval_seconds=interval_seconds
         ):
+            phash = engine.perceptual_hash(image)
+            if kept_hash is not None and hamming_distance(phash, kept_hash) <= DUPLICATE_HAMMING:
+                skipped += 1
+                continue
+            kept_hash = phash
+
             frame_id = new_id()
             full_key = session_key(
                 session.project_id, session.floor_id, session.id, "frames", f"{frame_id}.jpg"
@@ -501,7 +535,7 @@ def _extract_video_frames(
                 db.flush()
 
     db.flush()
-    return count
+    return count, skipped
 
 
 def _count_frames(db: Session, session_id: str) -> int:

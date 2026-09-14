@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import time
 from pathlib import Path
 
@@ -384,3 +385,66 @@ def test_admin_job_dashboard_reflects_the_pipeline(
     assert "mean_duration_seconds" in summary
     assert summary["queue"]["backend"] == "thread"
     assert summary["queue"]["durable"] is False
+
+
+@pytest.fixture
+def paused_video_bytes(tmp_path: Path) -> bytes:
+    """A walk that stops dead in the middle — 3 s walking, 4 s still, 3 s walking."""
+    from app.processing.synthetic import Room, render_panorama
+
+    path = tmp_path / "paused.mp4"
+    width, height, fps, seconds = 1024, 512, 10, 10
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    if not writer.isOpened():
+        pytest.skip("This OpenCV build cannot write MP4")
+
+    room = Room()
+    for index in range(fps * seconds):
+        t = index / fps
+        if t < 3.0:
+            x = -7.0 + 2.0 * t
+        elif t < 7.0:
+            x = -1.0  # standing still, e.g. opening a door
+        else:
+            x = -1.0 + 2.0 * (t - 7.0)
+        writer.write(render_panorama(room, (x, 0.0, 0.0), width=width, height=height))
+    writer.release()
+    return path.read_bytes()
+
+
+def test_frames_from_a_stationary_stretch_are_not_stored(
+    client: TestClient, admin_headers: dict[str, str], floor: str, paused_video_bytes: bytes
+) -> None:
+    """§9: standing still must not produce a pile of identical panoramas.
+
+    Ten seconds at a one-second interval would be ten frames, four of them from the stretch where
+    the operator did not move. Those four are near-identical: the mapper already discards them as
+    duplicates, so storing them costs three objects and a quality assessment each and buys
+    nothing. They are dropped at extraction instead, which is safe here and only here — the
+    source video is kept, so re-processing reconstructs whatever was skipped.
+    """
+    session_id = new_session(client, admin_headers, floor, frame_interval_seconds=1.0)
+    client.post(
+        f"/api/captures/{session_id}/upload",
+        headers=admin_headers,
+        files={"files": ("paused.mp4", paused_video_bytes, "video/mp4")},
+    )
+    client.post(f"/api/captures/{session_id}/process", headers=admin_headers)
+    status = wait(client, admin_headers, session_id)
+    assert status["status"] == CaptureSessionStatus.READY, status
+
+    frames = client.get(
+        f"/api/captures/{session_id}/frames", headers=admin_headers, params={"limit": 100}
+    ).json()
+
+    # Ten one-second slots, four of which the camera did not move through.
+    assert 5 <= frames["total"] <= 8, (
+        f"expected the still stretch to be dropped, got {frames['total']} frames at "
+        f"{[f['source_time_seconds'] for f in frames['items']]}"
+    )
+
+    # And the gap is where the pause was, not spread evenly: the frames either side of the still
+    # stretch must be further apart in time than a single interval.
+    offsets = sorted(item["source_time_seconds"] for item in frames["items"])
+    widest_gap = max(b - a for a, b in itertools.pairwise(offsets))
+    assert widest_gap >= 2.0, f"no gap where the pause was: {offsets}"

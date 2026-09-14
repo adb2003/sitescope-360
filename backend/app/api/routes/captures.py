@@ -41,6 +41,8 @@ from app.models import (
 )
 from app.processing.pipeline import enqueue_pipeline, pipeline_progress
 from app.schemas.capture import (
+    AlignTrackRequest,
+    AlignTrackResult,
     CaptureFileDetail,
     CaptureFileOut,
     CaptureFrameDetail,
@@ -59,6 +61,7 @@ from app.schemas.capture import (
     ViewerManifest,
 )
 from app.schemas.common import Message, Page
+from app.services import alignment as alignment_service
 from app.services import captures as capture_service
 from app.services import viewer as viewer_service
 from app.services.assets import sign
@@ -526,6 +529,43 @@ def unassign_frame_location(
 
 
 # ---- capture path ------------------------------------------------------------
+@router.post("/captures/{session_id}/align", response_model=AlignTrackResult)
+def align_capture_to_plan(
+    session_id: str,
+    payload: AlignTrackRequest,
+    db: DbSession,
+    user: RequireLocationEdit,
+) -> AlignTrackResult:
+    """Pin an estimated track to the floor plan from two or more manual anchors (§15).
+
+    The mapping stage recovers the *shape* of the walk and nothing else: monocular estimation
+    has no scale, no compass bearing and no origin. The operator supplies all three at once by
+    naming two frames and saying where on the plan each was taken; a similarity transform is
+    fitted to those and applied to every other frame, so the rest place themselves.
+
+    Refused rather than half-applied when the fit does not hold — too few anchors, anchors that
+    are collinear in the estimated track, or a residual too large to believe. A placed track that
+    is wrong is worse than an unplaced one, because it looks measured.
+    """
+    session = get_session_or_404(db, session_id)
+    result = alignment_service.align_session_to_plan(
+        db,
+        session,
+        [
+            alignment_service.Anchor(frame_id=item.frame_id, plan_x=item.x, plan_y=item.y)
+            for item in payload.anchors
+        ],
+        user_id=user.id,
+    )
+    return AlignTrackResult(
+        placed_frames=result.placed_frames,
+        scale=result.scale,
+        rotation_deg=result.rotation_deg,
+        rms_error_px=result.rms_error_px,
+        note=result.note,
+    )
+
+
 @router.get("/captures/{session_id}/path", response_model=CapturePathOut)
 def get_capture_path(session_id: str, db: DbSession, _: RequireCaptureRead) -> CapturePathOut:
     get_session_or_404(db, session_id)

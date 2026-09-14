@@ -43,6 +43,16 @@ interface PlanMinimapProps {
   activeFrameId: string | null
   orientation?: MinimapOrientation
   onSelectFrame: (frameId: string) => void
+  /**
+   * Every click, in plan pixels — whether or not it landed near a walked point.
+   *
+   * Separate from `onSelectFrame` because the two answer different questions. Jumping to the
+   * nearest frame of *this* walkthrough has to be instant, so it is resolved here from points
+   * already in memory. Asking what else was captured near that spot, on other dates, is a
+   * question only the server can answer, and it is asked about the coordinate the operator
+   * pointed at rather than about whichever frame happened to be closest.
+   */
+  onProbe?: (point: { x: number; y: number }) => void
   className?: string
 }
 
@@ -62,6 +72,7 @@ export function PlanMinimap({
   activeFrameId,
   orientation,
   onSelectFrame,
+  onProbe,
   className,
 }: PlanMinimapProps) {
   const [expanded, setExpanded] = useState(false)
@@ -112,14 +123,18 @@ export function PlanMinimap({
   const active = walked.find((point) => point.frameId === activeFrameId) ?? null
 
   /** Nearest walked point to a click, in plan pixels. See `minimapGeometry` for the maths. */
-  const jumpToNearest = (event: React.MouseEvent<SVGSVGElement>) => {
-    if (!svgRef.current || walked.length === 0) return
+  const handleClick = (event: React.MouseEvent<SVGSVGElement>) => {
+    if (!svgRef.current) return
     const { x, y } = planCoordsFromClick(
       event.clientX,
       event.clientY,
       svgRef.current.getBoundingClientRect(),
       { width: plan.width_px, height: plan.height_px },
     )
+    // The probe fires for every click, including ones nowhere near this walkthrough — "nothing
+    // was captured here" is a real answer and the operator only gets it if the click is reported.
+    onProbe?.({ x, y })
+
     const best = nearestPoint(walked, x, y)
     if (best && best.frameId !== activeFrameId) onSelectFrame(best.frameId)
   }
@@ -180,7 +195,7 @@ export function PlanMinimap({
               walked.length > 0 ? 'cursor-crosshair' : 'cursor-default',
               expanded ? 'max-h-[70vh]' : 'max-h-[240px]',
             )}
-            onClick={jumpToNearest}
+            onClick={handleClick}
             role={walked.length > 0 ? 'button' : undefined}
             aria-label={
               walked.length > 0 ? 'Floor plan — click to move to the nearest capture point' : undefined

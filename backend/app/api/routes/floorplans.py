@@ -35,6 +35,8 @@ from app.schemas.project import (
     CaptureLocationCreate,
     CaptureLocationOut,
     CaptureLocationUpdate,
+    CapturesNearPoint,
+    CaptureVisit,
     FloorPlanCalibration,
     FloorPlanOut,
     NearestCaptureLocation,
@@ -42,7 +44,7 @@ from app.schemas.project import (
 from app.services import captures as capture_service
 from app.services.assets import sign
 from app.services.captures import EMPTY_LOCATION_STATS, LocationStats
-from app.services.spatial import MAX_RESULTS, nearest_locations
+from app.services.spatial import MAX_RESULTS, captures_near, nearest_locations
 from app.storage import extension_of, floorplan_key, get_storage
 
 router = APIRouter(tags=["floor plans"])
@@ -333,6 +335,55 @@ def find_nearest_capture_locations(
             distance_px=round(distance, 3),
         )
         for location, distance in found
+    ]
+
+
+@router.get(
+    "/floors/{floor_id}/captures-near",
+    response_model=list[CapturesNearPoint],
+)
+def find_captures_near_point(
+    floor_id: str,
+    db: DbSession,
+    _: RequireCaptureRead,
+    x: Annotated[float, Query(description="Floor-plan x in plan pixels")],
+    y: Annotated[float, Query(description="Floor-plan y in plan pixels")],
+    within_px: Annotated[float, Query(gt=0, description="Search radius in plan pixels")] = 60.0,
+    max_points: Annotated[int, Query(ge=1, le=10)] = 3,
+) -> list[CapturesNearPoint]:
+    """What has been captured near a point on the plan, across every date (§17).
+
+    The time-travel question, asked by coordinate rather than by location id — because the click
+    that asks it lands on the drawing, not on a capture point. The radius is what turns one into
+    the other, and an empty list is a real answer: nobody walked there.
+
+    Distinct from `/locations/nearest`, which answers "which point is this" and says nothing
+    about when it was visited. Both exist because the viewer needs each separately: the minimap
+    resolves a click instantly from points it has already loaded, and this fills the history
+    panel beside it.
+    """
+    get_floor_or_404(db, floor_id)
+    found = captures_near(db, floor_id, x, y, within_px=within_px, max_points=max_points)
+    if not found:
+        return []
+
+    stats = capture_service.location_stats(db, floor_id)
+    return [
+        CapturesNearPoint(
+            location=_location_out(location, stats.get(location.id, EMPTY_LOCATION_STATS)),
+            distance_px=round(distance, 3),
+            visits=[
+                CaptureVisit(
+                    frame_id=frame.id,
+                    session_id=frame.session_id,
+                    captured_at=frame.captured_at,
+                    thumbnail=sign(frame.thumbnail_key),
+                    full=sign(frame.storage_key),
+                )
+                for frame in frames
+            ],
+        )
+        for location, distance, frames in found
     ]
 
 

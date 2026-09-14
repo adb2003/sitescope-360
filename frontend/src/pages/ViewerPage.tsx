@@ -8,6 +8,7 @@ import { PageBody, PageHeader } from '@/components/layout/AppShell'
 import { FloorPlanCanvas } from '@/components/floorplan/FloorPlanCanvas'
 import { MappingConfidenceNote } from '@/components/status'
 import { PlanMinimap, type MinimapOrientation } from '@/components/viewer/PlanMinimap'
+import { TimeTravelPanel } from '@/components/viewer/TimeTravelPanel'
 import { FrameFilmstrip, QualityPanel, Viewer360 } from '@/components/viewer/Viewer360'
 import {
   Badge,
@@ -30,6 +31,7 @@ import {
   useCapture,
   useCaptureFrames,
   useCaptures,
+  useCapturesNear,
   useCreateAnnotation,
   useFloorPaths,
   useFloorPlan,
@@ -45,6 +47,16 @@ import {
   ANNOTATION_PRIORITY_VALUES,
 } from '../../../shared/contracts'
 
+/**
+ * How far from a click to look for capture points, in plan pixels.
+ *
+ * A radius rather than an exact hit, because nobody clicks a capture point dead on. This is
+ * roughly the spacing between adjacent points on the demo floors, so it reaches the one the
+ * operator meant without sweeping in its neighbours — the number to revisit first if a click
+ * starts returning three points where it should return one.
+ */
+const PROBE_RADIUS_PX = 60
+
 export function ViewerPage() {
   const params = useParams<{ frameId: string }>()
   const navigate = useNavigate()
@@ -54,7 +66,10 @@ export function ViewerPage() {
   const [frameId, setFrameId] = useState<string | null>(params.frameId ?? null)
   // Mirrored from the viewer so the minimap's cone follows where the operator is looking.
   const [viewerOrientation, setViewerOrientation] = useState<MinimapOrientation | undefined>()
-  const [panel, setPanel] = useState<'quality' | 'plan' | 'issues'>('quality')
+  const [panel, setPanel] = useState<'quality' | 'plan' | 'history' | 'issues'>('quality')
+
+  /** Where the operator last clicked on the plan. Null until they have. */
+  const [probe, setProbe] = useState<{ x: number; y: number } | null>(null)
   const [pendingAnnotation, setPendingAnnotation] = useState<{ yaw: number; pitch: number } | null>(
     null,
   )
@@ -85,6 +100,9 @@ export function ViewerPage() {
   const plan = useFloorPlan(frame?.floor_id ?? undefined)
   const locations = useLocations(frame?.floor_id ?? undefined)
   const paths = useFloorPaths(frame?.floor_id ?? undefined)
+  // Declared here rather than beside the `probe` state because it needs the floor, and the floor
+  // is only known once the frame has loaded.
+  const nearby = useCapturesNear(frame?.floor_id ?? undefined, probe, PROBE_RADIUS_PX)
   const assign = useAssignFrameLocation(frame?.floor_id ?? undefined)
 
   const canAnnotate = can(Capability.Annotate)
@@ -243,6 +261,10 @@ export function ViewerPage() {
                       activeFrameId={frameId}
                       orientation={viewerOrientation}
                       onSelectFrame={select}
+                      onProbe={(point) => {
+                        setProbe(point)
+                        setPanel('history')
+                      }}
                     />
                   </div>
                 ) : null}
@@ -267,6 +289,11 @@ export function ViewerPage() {
                   options={[
                     { value: 'quality', label: 'Quality' },
                     { value: 'plan', label: 'Plan' },
+                    {
+                      value: 'history',
+                      label: 'History',
+                      count: nearby.data?.[0]?.visits.length,
+                    },
                     { value: 'issues', label: 'Issues', count: annotations.data?.length },
                   ]}
                 />
@@ -274,6 +301,18 @@ export function ViewerPage() {
 
               <div className="p-4">
                 {panel === 'quality' && frame ? <QualityPanel frame={frame} /> : null}
+
+                {panel === 'history' ? (
+                  <TimeTravelPanel
+                    point={probe}
+                    results={nearby.data}
+                    loading={nearby.isFetching}
+                    radiusPx={PROBE_RADIUS_PX}
+                    activeFrameId={frameId}
+                    onSelectFrame={select}
+                    onCompare={(a, b) => navigate(`/compare?frame_a=${a}&frame_b=${b}`)}
+                  />
+                ) : null}
 
                 {panel === 'plan' ? (
                   plan.data ? (

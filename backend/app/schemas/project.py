@@ -219,6 +219,28 @@ class NearestCaptureLocation(BaseModel):
     distance_px: float
 
 
+class CaptureVisit(BaseModel):
+    """One dated visit to a capture point."""
+
+    frame_id: str
+    session_id: str
+    captured_at: datetime
+    thumbnail: SignedAsset | None = None
+    full: SignedAsset | None = None
+
+
+class CapturesNearPoint(BaseModel):
+    """What a click on blank floor plan resolves to: nearby points and their histories.
+
+    The distance is returned for the same reason it is on a nearest search — the operator cannot
+    otherwise tell a point they hit from one they merely came closest to.
+    """
+
+    location: CaptureLocationOut
+    distance_px: float
+    visits: list[CaptureVisit]
+
+
 class CaptureScheduleIn(BaseModel):
     floor_id: str | None = None
     expected_per_week: Annotated[int, Field(ge=0, le=50)]

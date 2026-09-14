@@ -323,6 +323,22 @@ export interface NearestCaptureLocation {
   distance_px: number
 }
 
+/** One dated visit to a capture point. */
+export interface CaptureVisit {
+  frame_id: string
+  session_id: string
+  captured_at: string
+  thumbnail: SignedAsset | null
+  full: SignedAsset | null
+}
+
+/** What a click on blank floor plan resolves to: a nearby point and everything shot there. */
+export interface CapturesNearPoint {
+  location: CaptureLocation
+  distance_px: number
+  visits: CaptureVisit[]
+}
+
 export interface Quality {
   quality_score: number
   blur_score: number

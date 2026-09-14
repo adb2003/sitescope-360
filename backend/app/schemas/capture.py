@@ -118,6 +118,35 @@ class DirectUploadRegistration(BaseModel):
     filename: Annotated[str, Field(min_length=1, max_length=400)]
 
 
+class TrackAnchor(BaseModel):
+    """One frame the operator has identified on the floor plan."""
+
+    frame_id: str
+    x: float
+    y: float
+
+
+class AlignTrackRequest(BaseModel):
+    """Two or more anchors. Fewer leaves rotation and scale undetermined, not merely imprecise."""
+
+    anchors: Annotated[list[TrackAnchor], Field(min_length=2, max_length=50)]
+
+
+class AlignTrackResult(BaseModel):
+    """What the fit did, in terms the operator can check.
+
+    ``rms_error_px`` is the number that matters: it is how far the anchors ended up from where
+    they were dropped, and a large one means the estimated track does not describe the same walk
+    the anchors do — so the positions should not be trusted even though they exist.
+    """
+
+    placed_frames: int
+    scale: float
+    rotation_deg: float
+    rms_error_px: float
+    note: str
+
+
 class CaptureFileOut(ORMModel):
     id: str
     session_id: str

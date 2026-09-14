@@ -216,6 +216,7 @@ it destroys an entire site's capture history, and a mistyped id should not be en
 | POST | `/floors/{id}/locations` | Create a capture point (`P01`, `P02`, …). |
 | GET | `/floors/{id}/locations` | Points with visit counts and latest frame. |
 | GET | `/floors/{id}/locations/nearest` | Points closest to `x`/`y`, with distances. `within_px` bounds it. |
+| GET | `/floors/{id}/captures-near` | Time travel: nearby points and every dated visit, newest first. |
 | PATCH | `/locations/{id}` | Move or relabel; rebuilds affected capture paths. |
 | DELETE | `/locations/{id}` | Deletes the point; frames become unplaced, not deleted. |
 
@@ -245,6 +246,7 @@ explains that it cannot be used for pixel placement until rasterised.
 | GET | `/captures/{id}/frames` | Paginated frames; filter by `verdict` or `located`. |
 | GET | `/captures/{id}/path` | The ordered capture path for this visit. |
 | POST | `/captures/{id}/import` | Import from a registered camera device. |
+| POST | `/captures/{id}/align` | Pin the estimated track to the plan from ≥2 manual anchors. |
 
 **Which upload route.** `/upload` streams the body through the API and validates it *before*
 anything is stored, and de-duplicates identical bytes by checksum — the right default, and what

@@ -295,6 +295,35 @@ fails in production having worked locally:
    "MaxAgeSeconds": 3000 }]
 ```
 
+#### Trajectory and alignment: what the estimate does and does not know
+
+The MAPPING stage recovers where the operator walked *relative to where they started* — frame to
+frame ORB matching, an essential-matrix motion estimate, then a pose graph that re-optimises the
+dead-reckoned track against detected loop closures.
+
+What comes out has a shape and nothing else. It is **not measured in metres**, and no amount of
+better estimation will make it so: a single moving camera recovers translation only up to an
+unknown scale factor, which is why monocular SLAM is scale-free and why a phone that *does*
+report metres is fusing an IMU or a depth sensor to get them. Calling the output "1.2 m" would
+be inventing the unit (§46). The track is stored as `rel_x`/`rel_y` and described as relative and
+scale-free everywhere it is surfaced.
+
+Anchoring (`POST /captures/{id}/align`, `services/alignment.py`) is where scale, rotation and
+origin all arrive at once. The operator names two or more frames and says where on the plan each
+was taken; a transform is fitted to those correspondences and applied to every other frame.
+
+That transform is a **similarity** — rotation, uniform scale, translation — and deliberately not
+an affine or projective one. "Stretching" the path to meet its anchors sounds accommodating and
+is the failure mode: independent axis scaling or shear lets the fit absorb a badly-placed anchor
+by quietly distorting the building, and report a small residual while doing it. A similarity
+transform has no freedom to hide that error, so a bad anchor surfaces as a large `rms_error_px`
+and the fit is refused rather than applied with a caveat — nothing downstream distinguishes a
+position that was trusted from one that was merely tolerated.
+
+Intermediate frames are *transformed*, not interpolated between the anchors. Interpolating would
+throw away the measured shape of the walk — the reason for estimating a track in the first place
+— and replace it with a straight line through points nobody visited.
+
 #### Spatial data: PostGIS, on PostgreSQL only
 
 `capture_locations.geom` is a `geometry(Point, 0)` column, `GENERATED ALWAYS AS
@@ -316,9 +345,21 @@ same order, same distances — only the query plan differs, which is what lets t
 behaviour on SQLite while `tests/integration/test_postgis_spatial.py` (run by the migrations job,
 which has a PostGIS server) proves PostgreSQL agrees.
 
-The viewer's minimap still answers a click in the browser from points it has already loaded; a
-round trip would be the wrong trade for a click. `GET /floors/{id}/locations/nearest` is for
-callers that hold a coordinate and no loaded plan.
+A click on the minimap does two things, because it asks two questions with different answers.
+"Which frame of *this* walkthrough is nearest" is resolved in the browser from points already in
+memory — a round trip would be the wrong trade for a click. "What else was captured near here,
+on the other dates" is one only the server can answer, and
+`GET /floors/{id}/captures-near?x=&y=&within_px=` answers it: the nearby capture points and every
+visit to each, newest first. That is the time-travel query, asked by coordinate rather than by
+location id, because the click lands on the drawing rather than on a point.
+
+The radius is part of the SQL, not a filter over its results. It has to run before `LIMIT` or
+"everything within this radius" silently becomes "whichever of the nearest N fell inside it", and
+on PostgreSQL it is what lets the GiST index prune — `ST_DWithin` is index-assisted, a distance
+computed per row and compared afterwards is not.
+
+`GET /floors/{id}/locations/nearest` remains the plain "which point is this" lookup for callers
+that hold a coordinate and no loaded plan.
 
 Status is surfaced to the client exactly as §34 specifies:
 `uploading → uploaded → processing → extracting_frames → analyzing → mapping → ready`, or

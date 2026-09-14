@@ -27,6 +27,7 @@ import type {
   CameraDevice,
   CameraProviderInfo,
   CaptureFileDetail,
+  CapturesNearPoint,
   CaptureFrameDetail,
   CapturePath,
   CaptureSchedule,
@@ -77,6 +78,8 @@ export const keys = {
   floorPlan: (floorId: string) => ['floor', floorId, 'floorplan'] as const,
   floorPlans: (floorId: string) => ['floor', floorId, 'floorplans'] as const,
   locations: (floorId: string) => ['floor', floorId, 'locations'] as const,
+  capturesNear: (floorId: string, x: number, y: number, radius: number) =>
+    ['floor', floorId, 'captures-near', x, y, radius] as const,
   floorPaths: (floorId: string) => ['floor', floorId, 'paths'] as const,
   captures: (filters?: Record<string, QueryValue>) => ['captures', filters ?? {}] as const,
   capture: (id: string) => ['capture', id] as const,
@@ -228,6 +231,33 @@ export function useLocations(floorId: string | null | undefined) {
     queryKey: keys.locations(floorId ?? ''),
     queryFn: () => api.get<CaptureLocation[]>(`/floors/${floorId}/locations`),
     enabled: Boolean(floorId),
+  })
+}
+
+/**
+ * What was captured near a point on the plan, across every date.
+ *
+ * Keyed on the coordinate, so clicking back to a spot already probed is served from cache rather
+ * than re-asked — which is what makes stepping between two points to compare them feel immediate.
+ */
+export function useCapturesNear(
+  floorId: string | null | undefined,
+  point: { x: number; y: number } | null,
+  radiusPx: number,
+) {
+  // Rounded to whole pixels: a click is never that precise, and an unrounded float would make
+  // every pixel of mouse jitter a distinct cache key and a fresh request.
+  const x = point ? Math.round(point.x) : 0
+  const y = point ? Math.round(point.y) : 0
+  return useQuery({
+    queryKey: keys.capturesNear(floorId ?? '', x, y, radiusPx),
+    queryFn: () =>
+      api.get<CapturesNearPoint[]>(`/floors/${floorId}/captures-near`, {
+        x,
+        y,
+        within_px: radiusPx,
+      }),
+    enabled: Boolean(floorId && point),
   })
 }
 

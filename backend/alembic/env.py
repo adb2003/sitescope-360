@@ -90,6 +90,38 @@ def include_object(
     return True
 
 
+def _narrow_search_path(connection: object) -> None:
+    """Reflect only the schemas this project actually uses.
+
+    The ``postgis/postgis`` image installs the TIGER geocoder and topology extensions alongside
+    PostGIS and appends their schemas to the *database's* ``search_path``. Alembic reflects the
+    search path, so autogenerate found ~40 census tables it had never heard of and proposed
+    dropping every one of them — which is exactly how this failed the first time it ran against
+    PostGIS instead of a stock image.
+
+    Excluding them by name would be a list to maintain against extensions we do not use, so this
+    narrows the path instead: PostgreSQL's own documented default, plus wherever PostGIS itself
+    was installed. That last part is not decoration — the migration declares a ``geometry``
+    column, and dropping the extension's schema off the path would make the type stop resolving
+    and turn a reflection problem into a broken migration.
+
+    A deployment that keeps its tables in some other schema sets ``search_path`` per-connection
+    through ``DATABASE_URL``; SQLAlchemy applies that after this runs, so it still wins.
+    """
+    if not settings.database_url.startswith("postgresql"):
+        return
+
+    postgis_schema = connection.exec_driver_sql(  # type: ignore[attr-defined]
+        "SELECT n.nspname FROM pg_extension e "
+        "JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'postgis'"
+    ).scalar()
+
+    schemas = ['"$user"', "public"]
+    if postgis_schema and postgis_schema not in ("public",):
+        schemas.append(f'"{postgis_schema}"')
+    connection.exec_driver_sql(f"SET search_path TO {', '.join(schemas)}")  # type: ignore[attr-defined]
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=settings.database_url,
@@ -114,6 +146,7 @@ def run_migrations_online() -> None:
     connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
 
     with connectable.connect() as connection:
+        _narrow_search_path(connection)
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

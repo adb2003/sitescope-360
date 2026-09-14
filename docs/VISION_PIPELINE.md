@@ -286,8 +286,49 @@ UI reads that endpoint rather than hard-coding assumptions.
 | Defect detection | Not implemented — Phase 3. Defects are recorded manually as annotations. |
 | Progress detection | Not implemented — Phase 3. Needs a trained model *and* capture history. |
 | BIM comparison | Not implemented — Phase 3. Interfaces in `app/bim/`. |
-| Loop closure / global optimisation | Not implemented. This is not SLAM. |
-| Metric positioning | Not possible monocularly. Direction only. |
+| Loop closure / global optimisation | Implemented — `vision/slam.py`. SE(2) pose graph, Levenberg-Marquardt, Huber kernel. See below. |
+| Bundle adjustment over 3D landmarks | Not implemented. The graph optimises poses; there is no landmark map. |
+| Metric positioning | Not possible monocularly. Direction only — see *Scale*, below. |
+
+### Loop closure and short-range constraints
+
+The graph carries three kinds of edge:
+
+- **Odometry**, between consecutive frames, taken from the initial dead-reckoned track — so they
+  are satisfied exactly and contribute no disagreement for the solver to distribute.
+- **Loop closures**, between frames at least `MIN_LOOP_SEPARATION` apart that a perceptual-hash
+  shortlist and then geometric verification agree show the same place.
+- **Short-range constraints**, between frames 2 and 3 apart. Not revisits — just the same
+  bearing-and-heading observation over a short baseline. They exist because everything between
+  "consecutive" and "eight apart" used to constrain nothing at all, while those images still
+  overlap heavily.
+
+Measured over six rendered walkthroughs against ground truth, the full pipeline lands a median
+33% closer than raw odometry and is better on four of six. The short-range edges are worth about
+half of that (median 11% against the closure-only pipeline), and they are the *entire* gain on
+walks that never double back, which loop closure alone cannot help at all.
+
+One of the six came out **worse** than plain odometry — a false closure that the Huber kernel and
+residual rejection reduced without removing. That is reported rather than averaged away: the
+technique is not uniformly better, and `loop_closure.limitations` in `describe_capabilities()`
+says so.
+
+### Scale
+
+What none of this recovers is *distance*. A single moving camera gives translation only up to an
+unknown factor, so step length is modelled as `pace × Δt` with one assumed pace. Three things
+were measured and rejected as ways around it:
+
+| Attempt | Result |
+| --- | --- |
+| Higher resolution / more ORB features | No effect. 87 → 476 inliers changed mean error by nothing; 4096×2048 was *worse* and 16× slower. |
+| Step length from each pair's median triangulated depth | Worse on two of three walks (+528%, +74%, −30%). Scene depth is not constant enough. |
+| Three-view scale propagation over shared points | Not viable: at realistic 1–2 m steps only 3–4 keypoints survive matching in both pairs. |
+
+The honest consequence is that a walk at varying speed is less accurate than one at constant
+speed — measured at 0.13 m vs 0.48 m mean error on the same route — and no amount of image
+processing fixes it. Metric scale needs a second sensor: an IMU on the capture device, which is
+what makes "VIO" visual-*inertial* rather than merely visual.
 
 `HistoricalProgressDetector.compare()` returns an `UnavailableAnalysis` naming exactly what is
 missing, rather than a percentage.

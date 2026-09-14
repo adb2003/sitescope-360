@@ -26,6 +26,8 @@ from app.vision.slam import (
     LOOP_INFORMATION_SCALE,
     MIN_LOOP_INLIERS,
     MIN_LOOP_SEPARATION,
+    SKIP_INFORMATION_SCALE,
+    SKIP_SPANS,
     GraphSlamPositionEstimator,
     LoopClosure,
     LoopClosureDetector,
@@ -266,7 +268,7 @@ def test_an_open_walk_is_left_exactly_as_it_was() -> None:
     assert report.loop_closures_used == 0
     assert report.max_correction == 0.0
     assert np.allclose(graph.poses, before)
-    assert any("no loop closures" in note for note in report.notes), report.notes
+    assert any("no bearing constraints" in note for note in report.notes), report.notes
 
 
 def test_a_perfect_track_is_not_disturbed() -> None:
@@ -781,3 +783,76 @@ def test_a_co_located_edge_constrains_position_not_bearing() -> None:
     # And the derivative shapes must agree with the residuals they belong to.
     assert graph._jacobians(colocated)[0].shape == (3, 3)
     assert graph._jacobians(bearing)[0].shape == (2, 3)
+
+
+# ---- short-range constraints ---------------------------------------------------------------
+def test_sequential_constraints_are_not_reported_as_loop_closures() -> None:
+    """They shape the solve; they are not evidence the operator went back anywhere.
+
+    Counting them as closures would put "31 loop closures" on a walk down a single corridor, and
+    -- worse -- `_closed_loop_confidence` lifts the confidence of every pose a closure spans. A
+    constraint between frames two apart spans almost the whole track in aggregate while saying
+    nothing about drift over it, so treating the two alike would raise confidence across a track
+    that nothing had actually tied down (§46).
+    """
+    sequential = LoopClosure(
+        from_index=4,
+        to_index=6,
+        dx=1.0,
+        dy=0.0,
+        dtheta_deg=0.0,
+        inlier_count=40,
+        hash_distance=-1,
+        confidence=0.8 * SKIP_INFORMATION_SCALE,
+        is_sequential=True,
+    )
+
+    assert sequential.to_dict()["kind"] == "sequential"
+    # -1 rather than 0: no hash was consulted, and 0 would read as "identical images".
+    assert sequential.to_dict()["hash_distance"] == -1
+
+
+def test_a_track_that_never_revisits_is_still_optimised() -> None:
+    """The case these constraints were added for.
+
+    A walk straight down a corridor has no revisit, so loop closure finds nothing and the track
+    used to be returned exactly as dead reckoning produced it. Its frames still constrain each
+    other two and three steps apart, and across six measured walks the median improvement was
+    -11.5%, with the largest gains on precisely these tracks.
+    """
+
+    class _NoRevisitsButOverlapping:
+        """Finds no loop closures; the frames still overlap two apart, as real ones do."""
+
+        def detect(self, features, hashes, *, max_closures=12):
+            return []
+
+        def sequential_constraints(self, features, spans=SKIP_SPANS):
+            return [
+                LoopClosure(
+                    from_index=i,
+                    to_index=i + 2,
+                    dx=1.0,
+                    dy=0.0,
+                    dtheta_deg=0.0,
+                    inlier_count=40,
+                    hash_distance=-1,
+                    confidence=0.4,
+                    is_sequential=True,
+                )
+                for i in range(len(features) - 2)
+            ]
+
+    estimator = GraphSlamPositionEstimator(
+        DeadReckoningPositionEstimator(), _NoRevisitsButOverlapping()
+    )
+    truth = square_loop()
+    poses, motions = dead_reckoned(truth, yaw_bias_deg=1.5)
+
+    outcome = estimator.refine(poses, motions, [_stub_features()] * len(poses), ["00"] * len(poses))
+
+    assert outcome.report.skip_constraints_used > 0
+    # No revisit was found, so nothing may be reported as one — and nothing may raise the
+    # confidence of poses that no closure spans.
+    assert outcome.closures == []
+    assert outcome.report.loop_closures_used == 0

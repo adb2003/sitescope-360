@@ -84,6 +84,21 @@ CONVERGENCE_DELTA = 1e-6
 #: step -- but not so much more that one bad closure can overwhelm the odometry that disagrees.
 LOOP_INFORMATION_SCALE = 4.0
 
+#: Frame separations used for short-range constraints, in addition to loop closures.
+#:
+#: Odometry edges are built *from the initial track*, so they are satisfied exactly and contribute
+#: no disagreement for the optimiser to distribute; loop closures need a separation of at least
+#: `MIN_LOOP_SEPARATION`. Everything between — frames two or three apart, where the images still
+#: overlap heavily — constrained nothing at all. These edges fill that gap: they are the same
+#: bearing-plus-heading observation a closure makes, just over a short baseline.
+SKIP_SPANS: tuple[int, ...] = (2, 3)
+#: Weight relative to a loop closure. Lower because there are an order of magnitude more of them
+#: and each spans far less of the track, so at closure strength they drown out the real revisits.
+SKIP_INFORMATION_SCALE = 0.5
+#: Inliers before a short-range pair is worth believing. Higher than the two-view minimum: these
+#: constraints are numerous, so a wrong one is not rare enough to be absorbed.
+MIN_SKIP_INLIERS = 25
+
 #: Extra inliers a co-located closure needs, as a multiple of the bearing-closure bar. It
 #: asserts position outright rather than a direction, so it must be better evidenced.
 COLOCATED_INLIER_MULTIPLIER = 1.5
@@ -131,6 +146,9 @@ class LoopClosure:
     inlier_count: int
     hash_distance: int
     confidence: float
+    #: True for a short-range constraint between frames a few apart, rather than a revisit.
+    #: Only affects how it is *reported*: the graph weights and solves it identically.
+    is_sequential: bool = False
     #: True when the operator returned to the *same spot* rather than merely nearby.
     #:
     #: Such a pair has no parallax, so the essential matrix is degenerate and the motion
@@ -151,7 +169,13 @@ class LoopClosure:
             "inlier_count": self.inlier_count,
             "hash_distance": self.hash_distance,
             "confidence": round(self.confidence, 3),
-            "kind": "colocated" if self.is_colocated else "bearing",
+            "kind": (
+                "sequential"
+                if self.is_sequential
+                else "colocated"
+                if self.is_colocated
+                else "bearing"
+            ),
         }
 
 
@@ -167,8 +191,13 @@ class PoseGraphEdge:
     #: Diagonal information (inverse variance) for x, y and theta. Higher means "trust this more".
     info_xy: float
     info_theta: float
-    #: True for any closure edge: subject to the Huber kernel and to outlier rejection.
+    #: True for any bearing edge -- closure or short-range: subject to the Huber kernel and to
+    #: outlier rejection. Says how the edge is *solved*, not what it claims.
     is_loop: bool = False
+    #: True for a short-range constraint between nearby frames rather than a verified revisit.
+    #: Solved identically; counted and described separately, because a report saying "16 loop
+    #: closures" on a walk that never doubled back is a false statement about the site.
+    is_sequential: bool = False
     #: True when the closure asserts *position* (same place) rather than a bearing. Its residual
     #: is a full relative pose like odometry's; only its weighting is that of a closure.
     is_colocated: bool = False
@@ -200,6 +229,10 @@ class OptimisationReport:
     loop_closures_used: int
     #: Closures dropped as outliers after the robust solve. Reported, never silently discarded.
     loop_closures_rejected: int = 0
+    #: Short-range constraints added between frames `SKIP_SPANS` apart. Counted separately from
+    #: closures because they are a different claim: "these two frames are two steps apart and
+    #: this is the bearing between them", not "the operator came back to this spot".
+    skip_constraints_used: int = 0
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -220,6 +253,7 @@ class OptimisationReport:
             "max_correction_steps": round(self.max_correction_steps, 2),
             "loop_closures_used": self.loop_closures_used,
             "loop_closures_rejected": self.loop_closures_rejected,
+            "skip_constraints_used": self.skip_constraints_used,
             "notes": list(self.notes),
         }
 
@@ -346,6 +380,49 @@ class LoopClosureDetector:
             if colocated is not None:
                 closures.append(colocated)
         return closures
+
+    def sequential_constraints(
+        self, features: list[FeatureSet], spans: tuple[int, ...] = SKIP_SPANS
+    ) -> list[LoopClosure]:
+        """Bearing constraints between frames a few apart — not revisits, but still evidence.
+
+        Structurally a ``LoopClosure`` because the graph treats it identically: a bearing and a
+        heading change, weighted, with no distance claimed. The name is the only thing that
+        differs, and the report counts them separately so nobody reads "12 loop closures" off a
+        walk that never doubled back.
+
+        No hash shortlist here. Frames this close are *known* to overlap — that is what makes
+        them worth matching — so the only question is whether the geometry verifies, and the
+        shortlist would just be a filter that always passes.
+        """
+        constraints: list[LoopClosure] = []
+        for span in spans:
+            for i in range(len(features) - span):
+                j = i + span
+                matches = self.matcher.match(features[i], features[j])
+                if matches.inlier_count < MIN_SKIP_INLIERS:
+                    continue
+                width, height = features[i].image_width, features[i].image_height
+                motion = self.motion_estimator.estimate(matches, width, height)
+                if not (motion.is_reliable and motion.confidence > 0.0):
+                    continue
+                constraints.append(
+                    LoopClosure(
+                        from_index=i,
+                        to_index=j,
+                        dx=float(motion.translation[0]),
+                        dy=float(motion.translation[2]),
+                        dtheta_deg=motion.yaw_deg,
+                        inlier_count=matches.inlier_count,
+                        # No hash was consulted, and reporting 0 would read as "identical
+                        # images". -1 is outside the metric's range, so it cannot be mistaken
+                        # for a measurement.
+                        hash_distance=-1,
+                        confidence=motion.confidence * SKIP_INFORMATION_SCALE,
+                        is_sequential=True,
+                    )
+                )
+        return constraints
 
     def _as_colocated(
         self,
@@ -569,6 +646,7 @@ class PoseGraph:
 
         kept = [edge for edge in self.edges if edge not in outliers]
         if not any(edge.is_loop for edge in kept):
+            # No bearing constraint of either kind survived.
             # Every closure was an outlier, so there is nothing to reconcile. Returning the
             # odometry untouched is the honest answer, not a track bent by constraints that were
             # all wrong.
@@ -587,9 +665,18 @@ class PoseGraph:
         self.poses = self._initial.copy()
         self.edges = kept
         second = self._solve_once(max_iterations=max_iterations, tolerance=tolerance)
-        second.loop_closures_rejected = len(outliers)
+        # Counted apart, because "rejected 6 closures" on a walk whose six rejects were all
+        # short-range constraints describes a site that never existed.
+        rejected_closures = sum(1 for edge in outliers if not edge.is_sequential)
+        rejected_skips = len(outliers) - rejected_closures
+        second.loop_closures_rejected = rejected_closures
+        kinds = []
+        if rejected_closures:
+            kinds.append(f"{rejected_closures} closure(s)")
+        if rejected_skips:
+            kinds.append(f"{rejected_skips} short-range constraint(s)")
         second.notes.append(
-            f"rejected {len(outliers)} closure(s) that still disagreed by more than "
+            f"rejected {' and '.join(kinds)} that still disagreed by more than "
             f"{np.degrees(RESIDUAL_OUTLIER_RADIANS):.0f}deg after the robust solve"
         )
         return second
@@ -607,7 +694,8 @@ class PoseGraph:
         notes: list[str] = []
         initial_error = self.total_error()
 
-        loops = sum(1 for edge in self.edges if edge.is_loop)
+        loops = sum(1 for edge in self.edges if edge.is_loop and not edge.is_sequential)
+        skips = sum(1 for edge in self.edges if edge.is_sequential)
         if not self.edges:
             notes.append("no constraints - nothing to optimise")
             return OptimisationReport(
@@ -619,10 +707,15 @@ class PoseGraph:
                 loop_closures_used=0,
                 notes=notes,
             )
-        if loops == 0:
+        if loops == 0 and skips == 0:
             # Optimising an open chain is a no-op: the odometry already satisfies every edge
             # exactly. Saying so is more useful than reporting a converged solve that did nothing.
-            notes.append("no loop closures - the odometry chain is already the optimum")
+            #
+            # `skips` has to be in this condition. Once short-range constraints existed, counting
+            # only closures here meant a walk with thirteen of them and no revisit took this exit
+            # and was returned untouched — which is exactly the track they were added to improve,
+            # so the feature silently did nothing on its main case.
+            notes.append("no bearing constraints - the odometry chain is already the optimum")
             return OptimisationReport(
                 converged=True,
                 iterations=0,
@@ -697,6 +790,7 @@ class PoseGraph:
                 final_error=initial_error,
                 max_correction=0.0,
                 loop_closures_used=loops,
+                skip_constraints_used=skips,
                 notes=notes,
             )
 
@@ -716,6 +810,7 @@ class PoseGraph:
                 float(corrections.max() / median_step) if median_step > 1e-9 else 0.0
             ),
             loop_closures_used=loops,
+            skip_constraints_used=skips,
             notes=notes,
         )
 
@@ -861,6 +956,7 @@ def build_graph(
                 dy=closure.dy,
                 dtheta=math.radians(closure.dtheta_deg),
                 is_colocated=closure.is_colocated,
+                is_sequential=closure.is_sequential,
                 # For a loop edge `info_xy` weights the *bearing* residual (see `_residual`).
                 # Bearing and heading are both angles observed by the same estimate, so they
                 # carry the same weight; there is no fabricated distance left to discount.
@@ -942,7 +1038,10 @@ class GraphSlamPositionEstimator:
             )
 
         closures = self.detector.detect(features, hashes)
-        if not closures:
+        sequential = self.detector.sequential_constraints(features)
+        constraints = closures + sequential
+
+        if not constraints:
             return SlamOutcome(
                 poses,
                 [],
@@ -953,15 +1052,20 @@ class GraphSlamPositionEstimator:
                     final_error=0.0,
                     max_correction=0.0,
                     loop_closures_used=0,
-                    notes=["no verified revisits - the path did not close"],
+                    notes=["no verified revisits and no usable short-range constraints"],
                 ),
                 base_confidence,
                 unchanged=True,
             )
 
-        graph = build_graph(poses, motions, closures)
+        # Deliberately *not* gated on `closures`. A walk that never doubles back has no revisit
+        # to find, and used to be left as raw dead reckoning for that reason -- but its frames
+        # still constrain each other over two and three steps, and measurement says using them
+        # helps most precisely on those tracks.
+        graph = build_graph(poses, motions, constraints)
         report = graph.optimise()
 
+        report.skip_constraints_used = len(sequential)
         if not report.converged or report.max_correction <= 0.0:
             return SlamOutcome(poses, closures, report, base_confidence, unchanged=True)
 
@@ -975,6 +1079,9 @@ class GraphSlamPositionEstimator:
                 # A closed loop bounds drift instead of compounding it, so the late-frame penalty
                 # that dead reckoning applies no longer describes this track. Raised, never to
                 # certainty, and only for frames the closures actually constrain.
+                # `closures`, never `constraints`: a constraint between frames two apart says
+                # nothing about drift over the whole track, and letting it lift confidence would
+                # raise every pose on a walk that never revisited anything (§46).
                 cumulative_confidence=_closed_loop_confidence(poses, index, closures),
             )
             for index in range(len(poses))

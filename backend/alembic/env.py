@@ -71,6 +71,14 @@ _POSTGIS_OWNED_TABLES = frozenset({"spatial_ref_sys", "geometry_columns", "geogr
 #: the column on every run.
 _DATABASE_OWNED_COLUMNS = {"capture_locations": frozenset({"geom"})}
 
+#: Indexes on those columns, which have to be named separately.
+#:
+#: An index is its own autogenerate object: excluding the column it covers does not exclude it,
+#: and the GiST index over ``geom`` was reported as drift even after the column stopped being.
+#: An index over a column the models cannot see is one the models can never declare, so it
+#: belongs to the migration for the same reason the column does.
+_DATABASE_OWNED_INDEXES = frozenset({"ix_capture_locations_geom"})
+
 
 def include_object(
     obj: object, name: str | None, type_: str, reflected: bool, compare_to: object
@@ -81,6 +89,8 @@ def include_object(
     own still drifts loudly, which is what the CI drift check depends on.
     """
     if type_ == "table" and name in _POSTGIS_OWNED_TABLES:
+        return False
+    if type_ == "index" and name in _DATABASE_OWNED_INDEXES:
         return False
     if type_ == "column":
         table = getattr(obj, "table", None)

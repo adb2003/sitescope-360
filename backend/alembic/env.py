@@ -117,9 +117,19 @@ def _narrow_search_path(connection: object) -> None:
     ).scalar()
 
     schemas = ['"$user"', "public"]
-    if postgis_schema and postgis_schema not in ("public",):
+    if postgis_schema and postgis_schema != "public":
         schemas.append(f'"{postgis_schema}"')
     connection.exec_driver_sql(f"SET search_path TO {', '.join(schemas)}")  # type: ignore[attr-defined]
+
+    # Not redundant, and not safe to delete. Reading the catalogue above opened a transaction on
+    # this connection, and SQLAlchemy 2.0 rolls back a connection that is closed without one --
+    # so Alembic, which only commits the transaction *it* opened, would find one already in
+    # progress and every migration would be discarded at close. The first time this ran, all
+    # three migrations logged success and the database came out empty.
+    #
+    # Committing here hands the connection back with no transaction open, which is the state
+    # Alembic expects. `SET` is session state and survives the commit.
+    connection.commit()  # type: ignore[attr-defined]
 
 
 def run_migrations_offline() -> None:

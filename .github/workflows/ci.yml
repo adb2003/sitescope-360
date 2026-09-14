@@ -100,6 +100,26 @@ jobs:
       - name: Apply migrations
         run: uv run alembic upgrade head
 
+      - name: The schema actually persisted
+        # `alembic upgrade` reporting success is not the same as the tables existing. A helper in
+        # env.py that opens a transaction before Alembic does takes ownership of it, and a
+        # connection closed without a commit is rolled back -- so all three migrations log
+        # success and the database comes out empty. That happened, and it surfaced two steps
+        # later as "Target database is not up to date", which names neither the cause nor the
+        # step that caused it.
+        run: |
+          uv run python - <<'PY'
+          from sqlalchemy import create_engine, inspect
+
+          from app.core.config import settings
+
+          present = set(inspect(create_engine(settings.database_url)).get_table_names())
+          expected = {"alembic_version", "users", "projects", "capture_locations", "capture_frames"}
+          missing = expected - present
+          assert not missing, f"upgrade reported success but these tables are absent: {missing}"
+          print(f"{len(present)} tables present, including {sorted(expected)}")
+          PY
+
       - name: Migrations match the models
         # Autogenerate must produce an empty migration. If it does not, a model changed without a
         # migration and the next deploy would run against a stale schema.

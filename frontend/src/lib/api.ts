@@ -250,6 +250,64 @@ async function readError(response: Response): Promise<ErrorEnvelope> {
   }
 }
 
+// ---- direct-to-storage upload ----------------------------------------------
+
+/**
+ * PUT a file to a signed storage URL, reporting progress as it goes.
+ *
+ * `XMLHttpRequest` rather than `fetch`, and that is the whole reason this function exists:
+ * `fetch` exposes no upload progress, and the files that take this route are the ones large
+ * enough that a spinner with no number is indistinguishable from a hang.
+ *
+ * The request deliberately carries **no Authorization header**. The signature in the URL is the
+ * entire credential, and sending both is not merely redundant — S3 rejects a request that
+ * presents query-string authentication and an `Authorization` header together, so adding one
+ * would break every production upload while working perfectly against local storage.
+ */
+export function putSignedUpload(
+  url: string,
+  file: Blob,
+  headers: Record<string, string> = {},
+  onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('PUT', url, true)
+    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value)
+
+    xhr.upload.onprogress = (event) => {
+      // `lengthComputable` is false for a stream of unknown size; reporting 0 of 0 would render
+      // as a completed bar, so leave the caller showing what it had.
+      if (event.lengthComputable) onProgress?.(event.loaded, event.total)
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve()
+        return
+      }
+      reject(
+        new ApiError(xhr.status, {
+          code: `http_${xhr.status}`,
+          message:
+            xhr.status === 403
+              ? 'The upload link expired before the transfer finished'
+              : `Storage rejected the upload (HTTP ${xhr.status})`,
+        }),
+      )
+    }
+    // A cross-origin failure reaches the browser with no status and no body, so there is nothing
+    // more specific to say than that it did not arrive.
+    xhr.onerror = () =>
+      reject(new ApiError(0, { code: 'network_error', message: 'Cannot reach storage' }))
+    xhr.onabort = () =>
+      reject(new ApiError(0, { code: 'aborted', message: 'Upload cancelled' }))
+
+    signal?.addEventListener('abort', () => xhr.abort(), { once: true })
+    xhr.send(file)
+  })
+}
+
 // ---- convenience verbs ------------------------------------------------------
 export const api = {
   get: <T>(path: string, query?: Record<string, QueryValue>, signal?: AbortSignal) =>

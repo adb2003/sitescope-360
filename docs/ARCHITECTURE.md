@@ -276,6 +276,25 @@ With `local` storage the PUT target is `PUT /api/files/{key}`, signed the same w
 except the HMAC covers the verb. Without that domain separation every asset URL ever handed to a
 browser would also authorise overwriting the object it points at.
 
+The web app chooses per file, in `frontend/src/lib/uploadStrategy.ts`: over 32 MiB goes direct,
+at or under it stays proxied. The threshold sits above any panorama this app produces and below
+any walkthrough video, so the common upload keeps content de-duplication and only the transfers
+that would tie up a worker for minutes give it up. The offline retry queue routes by the same
+rule — when it did not, a failed large upload was re-queued and then retried *through* the API,
+which is the one transfer the route exists to keep off it.
+
+**Deploying the direct route on S3 needs a bucket CORS policy.** The PUT is issued by the
+browser, cross-origin, with a `Content-Type` header, so it is preflighted. In development
+FastAPI's own CORS middleware answers that; a bucket answers nothing by default, and the upload
+fails in production having worked locally:
+
+```json
+[{ "AllowedMethods": ["PUT"],
+   "AllowedOrigins": ["https://app.example.com"],
+   "AllowedHeaders": ["Content-Type"],
+   "MaxAgeSeconds": 3000 }]
+```
+
 #### Spatial data: PostGIS, on PostgreSQL only
 
 `capture_locations.geom` is a `geometry(Point, 0)` column, `GENERATED ALWAYS AS

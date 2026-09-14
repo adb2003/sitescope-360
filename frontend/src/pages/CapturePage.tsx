@@ -49,10 +49,12 @@ import {
   useProjectFloors,
   useUploadCaptureFiles,
   useZones,
+  type UploadProgress,
 } from '@/hooks/queries'
 import { Capability, useAuth } from '@/hooks/useAuth'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { ApiError } from '@/lib/api'
+import { DIRECT_UPLOAD_MIN_BYTES, routeFor } from '@/lib/uploadStrategy'
 import { useUploadQueue } from '@/hooks/useUploadQueue'
 import { cn, formatBytes, formatDateTime, formatRelative } from '@/lib/utils'
 
@@ -201,7 +203,8 @@ function CaptureWizard({ projectId }: { projectId: string }) {
 
   const createSession = useCreateCaptureSession()
   const [sessionId, setSessionId] = useState<string | null>(null)
-  const upload = useUploadCaptureFiles(sessionId ?? '')
+  const [progress, setProgress] = useState<UploadProgress | null>(null)
+  const upload = useUploadCaptureFiles(sessionId ?? '', setProgress)
   const process = useProcessCapture(sessionId ?? '')
 
   const [step, setStep] = useState<Step>('select')
@@ -214,6 +217,11 @@ function CaptureWizard({ projectId }: { projectId: string }) {
 
   const totalBytes = useMemo(
     () => selectedFiles.reduce((sum, file) => sum + file.size, 0),
+    [selectedFiles],
+  )
+
+  const directCount = useMemo(
+    () => selectedFiles.filter((file) => routeFor(file.size) === 'direct').length,
     [selectedFiles],
   )
 
@@ -468,12 +476,51 @@ function CaptureWizard({ projectId }: { projectId: string }) {
                         <Images className="size-3.5 shrink-0 text-brand" aria-hidden />
                       )}
                       <span className="min-w-0 flex-1 truncate text-ink">{file.name}</span>
+                      {routeFor(file.size) === 'direct' ? (
+                        <span
+                          className="shrink-0 rounded bg-info/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-info"
+                          title={`Over ${formatBytes(DIRECT_UPLOAD_MIN_BYTES)} — uploads straight to storage instead of through the API`}
+                        >
+                          direct
+                        </span>
+                      ) : null}
                       <span className="tnum shrink-0 text-ink-subtle">
                         {formatBytes(file.size)}
                       </span>
                     </li>
                   ))}
                 </ul>
+              </div>
+            ) : null}
+
+            {directCount && !upload.isPending ? (
+              <p className="text-xs text-ink-subtle">
+                {directCount} of {selectedFiles.length} file(s) are over{' '}
+                {formatBytes(DIRECT_UPLOAD_MIN_BYTES)} and will upload straight to storage. The
+                server still checks the type and size afterwards and discards anything that fails.
+              </p>
+            ) : null}
+
+            {progress ? (
+              <div className="rounded border border-line px-3 py-2">
+                <div className="flex items-baseline justify-between gap-2 text-xs">
+                  <span className="min-w-0 truncate text-ink">
+                    {progress.route === 'direct' ? 'Uploading to storage' : 'Uploading'} ·{' '}
+                    {progress.filename}
+                  </span>
+                  <span className="tnum shrink-0 text-ink-subtle">
+                    {progress.count > 1 ? `${progress.index} of ${progress.count} · ` : ''}
+                    {formatBytes(progress.transferred)} / {formatBytes(progress.total)}
+                  </span>
+                </div>
+                <div className="mt-1.5 h-1 overflow-hidden rounded bg-line">
+                  <div
+                    className="h-full rounded bg-brand transition-[width] duration-150"
+                    style={{
+                      width: `${progress.total ? Math.min(100, (progress.transferred / progress.total) * 100) : 0}%`,
+                    }}
+                  />
+                </div>
               </div>
             ) : null}
 

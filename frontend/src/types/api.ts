@@ -308,6 +308,21 @@ export interface CaptureFileDetail extends CaptureFile {
   asset: SignedAsset | null
 }
 
+/** Where to PUT one file, and what the server insists on receiving with it. */
+export interface DirectUploadTicket {
+  storage_key: string
+  upload_url: string
+  method: string
+  headers: Record<string, string>
+  expires_in: number
+}
+
+/** A capture point near a plan coordinate, with how far away it actually was. */
+export interface NearestCaptureLocation {
+  location: CaptureLocation
+  distance_px: number
+}
+
 export interface Quality {
   quality_score: number
   blur_score: number

@@ -18,6 +18,8 @@ import {
 } from '@tanstack/react-query'
 
 import { api, type QueryValue } from '@/lib/api'
+import { planUploads, type UploadRoute } from '@/lib/uploadStrategy'
+import { uploadDirect, uploadProxied } from '@/lib/uploads'
 import { isSessionInFlight } from '@/components/status'
 import type {
   Annotation,
@@ -513,15 +515,73 @@ export function useCreateCaptureSession() {
   })
 }
 
-export function useUploadCaptureFiles(sessionId: string) {
+/** What the capture page shows while an upload is in flight. */
+export interface UploadProgress {
+  filename: string
+  route: UploadRoute
+  /** 1-based, over the whole selection. */
+  index: number
+  count: number
+  transferred: number
+  total: number
+}
+
+/**
+ * Upload a selection, sending each file by whichever route suits its size.
+ *
+ * Small files keep the proxied route, which validates before storing and de-duplicates by
+ * checksum. Anything over `DIRECT_UPLOAD_MIN_BYTES` goes straight to object storage instead of
+ * occupying an API worker for the length of the transfer — see `lib/uploadStrategy.ts`.
+ *
+ * Direct files are sent one at a time rather than concurrently. Two 500 MB uploads racing over a
+ * site connection finish no sooner together than in sequence, and in sequence the operator can be
+ * told which file is moving and how far along it is.
+ */
+export function useUploadCaptureFiles(
+  sessionId: string,
+  onProgress?: (progress: UploadProgress | null) => void,
+) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (files: File[]) => {
-      const form = new FormData()
-      for (const file of files) form.append('files', file)
-      return api.upload<CaptureFileDetail[]>(`/captures/${sessionId}/upload`, form)
+    mutationFn: async (files: File[]): Promise<CaptureFileDetail[]> => {
+      const { proxied, direct } = planUploads(files)
+      const uploaded: CaptureFileDetail[] = []
+      let done = 0
+
+      // Small files first and in one request, so the common case stays a single round trip.
+      if (proxied.length) {
+        const [only] = proxied
+        onProgress?.({
+          filename: only && proxied.length === 1 ? only.name : `${proxied.length} files`,
+          route: 'proxied',
+          index: 1,
+          count: files.length,
+          transferred: 0,
+          total: proxied.reduce((sum, file) => sum + file.size, 0),
+        })
+        uploaded.push(...(await uploadProxied(sessionId, proxied)))
+        done = proxied.length
+      }
+
+      for (const file of direct) {
+        done += 1
+        const report = (transferred: number, total: number) =>
+          onProgress?.({
+            filename: file.name,
+            route: 'direct',
+            index: done,
+            count: files.length,
+            transferred,
+            total,
+          })
+        report(0, file.size)
+        uploaded.push(await uploadDirect(sessionId, file, report))
+      }
+
+      return uploaded
     },
-    onSuccess: () => {
+    onSettled: () => {
+      onProgress?.(null)
       void queryClient.invalidateQueries({ queryKey: keys.capture(sessionId) })
       void queryClient.invalidateQueries({ queryKey: keys.captureFiles(sessionId) })
     },

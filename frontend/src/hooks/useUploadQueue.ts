@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 
-import { api } from '@/lib/api'
+import { uploadOne } from '@/lib/uploads'
 
 const DB_NAME = 'sitescope-uploads'
 const DB_VERSION = 1
@@ -118,10 +118,13 @@ export function useUploadQueue(sessionId: string | null): UploadQueueState {
       for (const item of pending) {
         // Upload one at a time: a site connection that just came back will not survive six
         // concurrent multi-hundred-megabyte uploads, and a serial queue makes progress visible.
-        const form = new FormData()
-        form.append('files', new File([item.blob], item.name, { type: item.type }))
+        //
+        // Routed by size exactly as the capture page routes it. Retrying through the API instead
+        // would put the largest transfers — the ones most likely to be here, because they are the
+        // ones most likely to have failed — back on a worker for minutes each.
+        const file = new File([item.blob], item.name, { type: item.type })
         try {
-          await api.upload(`/captures/${item.sessionId}/upload`, form)
+          await uploadOne(item.sessionId, file)
           await remove(item.id)
         } catch {
           // Leave it queued and stop: if this one failed, the next will too. Recording the

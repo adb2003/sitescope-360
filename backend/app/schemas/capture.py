@@ -89,6 +89,35 @@ class CaptureSessionDetail(CaptureSessionOut):
 
 
 # ---- file --------------------------------------------------------------------
+class DirectUploadRequest(BaseModel):
+    """Ask for somewhere to put one file."""
+
+    filename: Annotated[str, Field(min_length=1, max_length=400)]
+    content_type: str | None = None
+
+
+class DirectUploadTicketOut(BaseModel):
+    """Where to PUT the bytes, and what to send with them.
+
+    ``headers`` is not advisory. S3 signs the content type into the presigned URL, so a client
+    that drops the header gets a 403 rather than an object with a guessed type — returning the
+    headers alongside the URL is what saves every client from having to know that.
+    """
+
+    storage_key: str
+    upload_url: str
+    method: str = "PUT"
+    headers: dict[str, str] = Field(default_factory=dict)
+    expires_in: int
+
+
+class DirectUploadRegistration(BaseModel):
+    """Tell the server the bytes have landed, so it can check them and take ownership."""
+
+    storage_key: str
+    filename: Annotated[str, Field(min_length=1, max_length=400)]
+
+
 class CaptureFileOut(ORMModel):
     id: str
     session_id: str

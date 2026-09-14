@@ -206,6 +206,19 @@ class CaptureLocationOut(ORMModel):
     latest_captured_at: datetime | None = None
 
 
+class NearestCaptureLocation(BaseModel):
+    """One result of a nearest-location search, with how far away it actually was.
+
+    The distance is returned rather than left implicit because "nearest" on an empty part of a
+    floor plan is still *some* point, potentially the length of the building away. A caller that
+    cannot see the distance has no way to tell a click on a capture point from a click on blank
+    paper, and would silently jump the operator somewhere they did not ask to go.
+    """
+
+    location: CaptureLocationOut
+    distance_px: float
+
+
 class CaptureScheduleIn(BaseModel):
     floor_id: str | None = None
     expected_per_week: Annotated[int, Field(ge=0, le=50)]

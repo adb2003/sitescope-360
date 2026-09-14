@@ -106,6 +106,19 @@ REDIS_URL=redis://localhost:6379/0
 
 Then run a worker in a third terminal: `python -m app.workers.run`.
 
+**The PostgreSQL image must include PostGIS.** Migration `b41d7c05e9aa` adds a generated geometry
+column and a GiST index to `capture_locations`, and the stock `postgres` image has no such
+extension — `alembic upgrade` stops with a message naming the image to use instead. The compose
+file already runs `postgis/postgis:17-3.5-alpine`, so this only bites when pointing at a server
+you started yourself:
+
+```bash
+docker run --rm -e POSTGRES_PASSWORD=sitescope -e POSTGRES_USER=sitescope   -e POSTGRES_DB=sitescope -p 5432:5432 postgis/postgis:17-3.5-alpine
+```
+
+SQLite needs nothing: the migration is a no-op there, and the nearest-location query falls back
+to an exact (unindexed) ordering, so the whole test suite still runs with no server at all.
+
 ---
 
 ## Testing

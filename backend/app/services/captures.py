@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import BinaryIO, cast
+from typing import BinaryIO, NoReturn, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -39,9 +40,10 @@ from app.models import (
     User,
     Zone,
 )
-from app.processing.media import sniff
+from app.processing.media import SniffResult, sniff
 from app.schemas.capture import CaptureSessionCreate
-from app.storage import extension_of, get_storage, session_key
+from app.storage import extension_of, get_storage, session_key, session_prefix
+from app.storage.base import validate_key
 
 
 def create_session(db: Session, payload: CaptureSessionCreate, operator: User) -> CaptureSession:
@@ -176,13 +178,228 @@ def store_upload(
             storage.delete(key)
         return duplicate
 
+    return _record_file(
+        db,
+        session,
+        file_id=file_id,
+        safe_name=safe_name,
+        key=key,
+        sniffed=sniffed,
+        size_bytes=total,
+        checksum=checksum,
+        via="multipart",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DirectUploadTicket:
+    """Everything a client needs to put one object into storage without the API in the middle."""
+
+    storage_key: str
+    upload_url: str
+    headers: dict[str, str]
+    expires_in: int
+
+
+#: Enough bytes for every container signature `sniff` knows about.
+_SNIFF_BYTES = 64
+
+#: The shape of a key `new_id` mints: a uuid4 hex, lower case, no separators.
+_MINTED_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def _source_key(session: CaptureSession, file_id: str, extension: str) -> str:
+    return session_key(
+        session.project_id, session.floor_id, session.id, "source", f"{file_id}{extension}"
+    )
+
+
+def _checked_filename(filename: str) -> tuple[str, str]:
+    """The shared front half of both upload paths: a safe name and an allowed extension."""
+    safe_name = PurePosixPath(filename).name
+    if not safe_name:
+        raise ValidationError("Upload is missing a filename")
+    extension = extension_of(safe_name)
+    if extension not in settings.allowed_capture_extensions:
+        raise UnsupportedMediaError(
+            f"{extension or 'This file type'} is not supported. Allowed: "
+            + ", ".join(settings.allowed_capture_extensions)
+        )
+    return safe_name, extension
+
+
+def prepare_direct_upload(
+    db: Session,
+    session: CaptureSession,
+    *,
+    filename: str,
+    content_type: str | None = None,
+) -> DirectUploadTicket:
+    """Issue a signed URL the client PUTs bytes to, bypassing the API (§7, §24).
+
+    The alternative to :func:`store_upload`, not a replacement for it. A 4 GB walkthrough video
+    streamed through the API occupies a worker for the whole transfer; this hands the bytes
+    straight to object storage instead. Small panorama uploads are better off on the proxied
+    path, which validates before anything is stored.
+
+    The key is generated here, never accepted from the client. A client-named key is a
+    client-chosen write target, and no signature makes that safe.
+    """
+    if session.status is CaptureSessionStatus.CANCELLED:
+        raise ConflictError("This capture session was cancelled")
+
+    safe_name, extension = _checked_filename(filename)
+    file_id = new_id()
+    key = _source_key(session, file_id, extension)
+
+    storage = get_storage()
+    issue = getattr(storage, "signed_upload_url", None)
+    if issue is None:
+        raise ValidationError(
+            f"The {storage.name} storage backend does not support direct uploads; "
+            "POST the file to /captures/{id}/upload instead."
+        )
+    url, headers = issue(key, content_type or "application/octet-stream")
+
+    log_event("upload.url_issued", session_id=session.id, storage_key=key, filename=safe_name)
+    return DirectUploadTicket(
+        storage_key=key,
+        upload_url=url,
+        headers=headers,
+        expires_in=settings.storage_url_ttl_seconds,
+    )
+
+
+def register_direct_upload(
+    db: Session,
+    session: CaptureSession,
+    *,
+    storage_key: str,
+    filename: str,
+) -> CaptureFile:
+    """Take ownership of an object the client uploaded directly, or delete it.
+
+    This is where the guarantee that :func:`store_upload` gets for free has to be re-established
+    by hand. There the extension check, the magic-byte sniff and the size cap all run *before*
+    the bytes are stored, so a rejected upload never becomes an object. Here the bytes are
+    already there, so the same three checks run against the stored object and anything that
+    fails is deleted — which leaves the same end state, just later and at the cost of the
+    storage the attempt used.
+
+    Note what is *not* re-established: a direct upload has no content checksum, because
+    computing one means reading the whole object back through the API and that is the cost the
+    caller chose this path to avoid. Retries are idempotent by key instead — a client that PUTs
+    again writes the same key — so the same file registered twice is one row, but two uploads of
+    identical bytes under different keys are two rows, where the proxied path would collapse
+    them. `checksum_sha256` is left null rather than filled with something unverified.
+    """
+    if session.status is CaptureSessionStatus.CANCELLED:
+        raise ConflictError("This capture session was cancelled")
+
+    safe_name, extension = _checked_filename(filename)
+    validate_key(storage_key)
+
+    # The key must be one this session could have been issued. Without this a client could
+    # register another session's object -- or one of its own *frames* -- as a source file.
+    prefix = session_prefix(session.project_id, session.floor_id, session.id, "source")
+    if not storage_key.startswith(prefix + "/"):
+        raise ValidationError("That storage key does not belong to this capture session")
+
+    # The key was minted from this filename's extension, so a mismatch means the client is
+    # registering a different file than it asked for. Pipeline stages stage temp files by the
+    # key's suffix, so letting the two disagree hands a .mp4 to an image decoder.
+    if PurePosixPath(storage_key).suffix.lower() != extension:
+        raise ValidationError(
+            f"{safe_name} does not match the uploaded object's type ({storage_key})"
+        )
+
+    existing = db.scalar(
+        select(CaptureFile).where(
+            CaptureFile.session_id == session.id,
+            CaptureFile.storage_key == storage_key,
+        )
+    )
+    if existing is not None:
+        # A retried registration, which is the normal case on a flaky site connection.
+        return existing
+
+    storage = get_storage()
+    if not storage.exists(storage_key):
+        raise NotFoundError(
+            "No object was uploaded to that key. PUT the file to the signed URL first."
+        )
+
+    def _reject(error: Exception) -> NoReturn:
+        """Delete first, then raise: a rejected upload must not stay billable or reachable."""
+        with contextlib.suppress(Exception):
+            storage.delete(storage_key)
+        raise error
+
+    size = storage.size(storage_key)
+    if size <= 0:
+        _reject(ValidationError("The uploaded object is empty"))
+    if size > settings.max_upload_bytes:
+        _reject(
+            PayloadTooLargeError(
+                f"Upload exceeds the {settings.max_upload_bytes / (1024**3):.1f} GiB limit"
+            )
+        )
+
+    # `sniff` signals a mismatch by raising, not by returning UNKNOWN, so it has to be caught:
+    # letting the exception travel straight out returns a correct 415 to the client and leaves
+    # the rejected object sitting in storage. Both outcomes are checked in the tests.
+    try:
+        sniffed = sniff(storage.read_range(storage_key, _SNIFF_BYTES), safe_name)
+    except (UnsupportedMediaError, ValidationError) as exc:
+        _reject(exc)
+    if sniffed.kind is FileKind.UNKNOWN:
+        _reject(UnsupportedMediaError(f"{safe_name} is not a supported image or video"))
+
+    # The row's primary key is the key's stem, as on the proxied path. That is only safe while
+    # the stem is something the server minted, so require the shape `new_id` produces rather
+    # than trusting that a client could not have reached this line with a key of its own choosing.
+    file_id = PurePosixPath(storage_key).stem
+    if not _MINTED_ID.fullmatch(file_id):
+        _reject(ValidationError("That storage key was not issued by this server"))
+
+    return _record_file(
+        db,
+        session,
+        file_id=file_id,
+        safe_name=safe_name,
+        key=storage_key,
+        sniffed=sniffed,
+        size_bytes=size,
+        checksum=None,
+        via="direct",
+    )
+
+
+def _record_file(
+    db: Session,
+    session: CaptureSession,
+    *,
+    file_id: str,
+    safe_name: str,
+    key: str,
+    sniffed: SniffResult,
+    size_bytes: int,
+    checksum: str | None,
+    via: str,
+) -> CaptureFile:
+    """Create the ``CaptureFile`` row and move the session to UPLOADED.
+
+    Shared by both upload paths deliberately. The two differ in how the bytes arrive and in
+    nothing else, and the moment they differ in what gets *recorded* is the moment a capture
+    behaves differently downstream depending on how it was sent.
+    """
     capture_file = CaptureFile(
         id=file_id,
         session_id=session.id,
         original_filename=safe_name,
         storage_key=key,
         content_type=sniffed.content_type,
-        file_size_bytes=total,
+        file_size_bytes=size_bytes,
         checksum_sha256=checksum,
         kind=sniffed.kind,
         # The VALIDATE stage decides the projection by inspecting pixels; at upload time all we
@@ -203,8 +420,9 @@ def store_upload(
         session_id=session.id,
         file_id=capture_file.id,
         filename=safe_name,
-        size_bytes=total,
-        content_type=sniffed.content_type,
+        size_bytes=size_bytes,
+        content_type=capture_file.content_type,
+        via=via,
     )
     return capture_file
 

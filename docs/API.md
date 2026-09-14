@@ -215,6 +215,7 @@ it destroys an entire site's capture history, and a mistyped id should not be en
 | DELETE | `/floorplans/{id}` | Refused while capture points reference it. |
 | POST | `/floors/{id}/locations` | Create a capture point (`P01`, `P02`, …). |
 | GET | `/floors/{id}/locations` | Points with visit counts and latest frame. |
+| GET | `/floors/{id}/locations/nearest` | Points closest to `x`/`y`, with distances. `within_px` bounds it. |
 | PATCH | `/locations/{id}` | Move or relabel; rebuilds affected capture paths. |
 | DELETE | `/locations/{id}` | Deletes the point; frames become unplaced, not deleted. |
 
@@ -233,7 +234,9 @@ explains that it cannot be used for pixel placement until rasterised.
 | POST | `/captures/{id}/finish` | Close the recording window (does not start processing). |
 | POST | `/captures/{id}/cancel` | Cancel; refused once `ready`. |
 | DELETE | `/captures/{id}` | Delete the session and its stored objects. |
-| POST | `/captures/{id}/upload` | Multipart upload of one or more files. |
+| POST | `/captures/{id}/upload` | Multipart upload of one or more files, validated as they stream. |
+| POST | `/captures/{id}/upload-url` | Signed URL to PUT one file straight to storage (large videos). |
+| POST | `/captures/{id}/files` | Register a directly-uploaded object, after the server inspects it. |
 | GET | `/captures/{id}/files` | File metadata: EXIF, GPS, camera, dimensions, validation. |
 | DELETE | `/captures/{id}/files/{file_id}` | Remove one uploaded file. |
 | POST | `/captures/{id}/process` | Queue the pipeline. Returns immediately. |
@@ -242,6 +245,14 @@ explains that it cannot be used for pixel placement until rasterised.
 | GET | `/captures/{id}/frames` | Paginated frames; filter by `verdict` or `located`. |
 | GET | `/captures/{id}/path` | The ordered capture path for this visit. |
 | POST | `/captures/{id}/import` | Import from a registered camera device. |
+
+**Which upload route.** `/upload` streams the body through the API and validates it *before*
+anything is stored, and de-duplicates identical bytes by checksum — the right default, and what
+the mobile app uses. `/upload-url` hands the client a signed PUT so a multi-gigabyte video does
+not occupy an API worker for the length of the transfer; the server then checks size and type on
+the stored object at `/files` and **deletes anything that fails**. The direct route has no
+content checksum (computing one would mean reading the object back), so retries are idempotent by
+key and `checksum_sha256` is null rather than unverified.
 
 `POST /captures` accepts `client_session_id`, making creation **idempotent** — an offline mobile
 client keeps the id it generated, so a retried request returns the existing session rather than a

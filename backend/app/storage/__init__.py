@@ -35,6 +35,16 @@ def session_key(project_id: str, floor_id: str, session_id: str, kind: str, file
     )
 
 
+def session_prefix(project_id: str, floor_id: str, session_id: str, kind: str) -> str:
+    """The directory every ``kind`` object for one session lives under.
+
+    Built through :func:`build_key` like any other key, so the same validation applies. It exists
+    because asking for the prefix by passing an empty filename would be rejected -- correctly,
+    since an empty segment is exactly the kind of key that resolves to a parent directory.
+    """
+    return build_key("projects", project_id, "floors", floor_id, "sessions", session_id, kind)
+
+
 def floorplan_key(project_id: str, floor_id: str, filename: str) -> str:
     return build_key("projects", project_id, "floors", floor_id, "floorplans", filename)
 

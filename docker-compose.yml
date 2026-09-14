@@ -34,7 +34,9 @@ x-backend-env: &backend-env
 
 services:
   db:
-    image: postgres:17-alpine
+    # PostGIS, not stock postgres: migration b41d7c05e9aa adds a generated geometry column
+    # and a GiST index to capture_locations, and fails on an image without the extension.
+    image: postgis/postgis:17-3.5-alpine
     environment:
       POSTGRES_DB: sitescope
       POSTGRES_USER: sitescope

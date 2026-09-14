@@ -69,7 +69,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgis/postgis:17-3.5-alpine
         env:
           POSTGRES_DB: sitescope
           POSTGRES_USER: sitescope
@@ -112,6 +112,22 @@ jobs:
           fi
           rm alembic/versions/drift_check_*.py
           echo "Schema matches the models."
+
+      - name: PostGIS spatial queries behave as the code assumes
+        # The rest of the suite runs on SQLite, so this is the only place the PostGIS branch of
+        # app/services/spatial.py and the migration's generated-column expression are executed
+        # at all. Without this step they are asserted, not tested.
+        env:
+          POSTGIS_TEST_URL: postgresql+psycopg://sitescope:sitescope@localhost:5432/sitescope
+        run: |
+          set -euo pipefail
+          uv run pytest tests/integration/test_postgis_spatial.py -q -rs | tee spatial.log
+          # These tests skip themselves when no PostGIS is reachable, which is right locally and
+          # worthless here: a green step that ran nothing is the failure mode this guards.
+          if grep -q 'skipped' spatial.log; then
+            echo "::error::The PostGIS tests skipped instead of running — they proved nothing."
+            exit 1
+          fi
 
       - name: Downgrade cleanly
         run: uv run alembic downgrade base

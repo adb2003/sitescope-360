@@ -37,10 +37,12 @@ from app.schemas.project import (
     CaptureLocationUpdate,
     FloorPlanCalibration,
     FloorPlanOut,
+    NearestCaptureLocation,
 )
 from app.services import captures as capture_service
 from app.services.assets import sign
 from app.services.captures import EMPTY_LOCATION_STATS, LocationStats
+from app.services.spatial import MAX_RESULTS, nearest_locations
 from app.storage import extension_of, floorplan_key, get_storage
 
 router = APIRouter(tags=["floor plans"])
@@ -296,6 +298,42 @@ def list_capture_locations(
     rows = list(db.scalars(query.order_by(CaptureLocation.code)))
     stats = capture_service.location_stats(db, floor_id)
     return [_location_out(row, stats.get(row.id, EMPTY_LOCATION_STATS)) for row in rows]
+
+
+@router.get(
+    "/floors/{floor_id}/locations/nearest",
+    response_model=list[NearestCaptureLocation],
+)
+def find_nearest_capture_locations(
+    floor_id: str,
+    db: DbSession,
+    _: RequireCaptureRead,
+    x: Annotated[float, Query(description="Floor-plan x in plan pixels")],
+    y: Annotated[float, Query(description="Floor-plan y in plan pixels")],
+    limit: Annotated[int, Query(ge=1, le=MAX_RESULTS)] = 1,
+    within_px: Annotated[float | None, Query(gt=0)] = None,
+) -> list[NearestCaptureLocation]:
+    """Which capture points are closest to a point on the plan (§13).
+
+    The viewer's minimap answers this in the browser from points it has already loaded, which is
+    the right call for a click: no round trip. This endpoint is for the callers that have a
+    coordinate and no loaded plan — a deep link into a floor, the compare view resolving one
+    date's click against another date's points, or any client that should not have to download
+    every location to find one.
+    """
+    get_floor_or_404(db, floor_id)
+    found = nearest_locations(db, floor_id, x, y, limit=limit, within_px=within_px)
+    if not found:
+        return []
+
+    stats = capture_service.location_stats(db, floor_id)
+    return [
+        NearestCaptureLocation(
+            location=_location_out(location, stats.get(location.id, EMPTY_LOCATION_STATS)),
+            distance_px=round(distance, 3),
+        )
+        for location, distance in found
+    ]
 
 
 @router.patch("/locations/{location_id}", response_model=CaptureLocationOut)

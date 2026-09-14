@@ -86,6 +86,15 @@ class StorageProvider(Protocol):
 
     def read_bytes(self, key: str) -> bytes: ...
 
+    def read_range(self, key: str, length: int, start: int = 0) -> bytes:
+        """Up to ``length`` bytes from ``start``, without fetching the whole object.
+
+        Exists for one reason: a direct upload has to be sniffed *after* it lands, and reading a
+        two-gigabyte video back through the API to look at its first 64 bytes would undo the
+        point of uploading it directly.
+        """
+        ...
+
     def exists(self, key: str) -> bool: ...
 
     def size(self, key: str) -> int: ...
@@ -95,6 +104,16 @@ class StorageProvider(Protocol):
     def delete_prefix(self, prefix: str) -> int: ...
 
     def signed_url(self, key: str, ttl_seconds: int | None = None) -> str: ...
+
+    def signed_upload_url(
+        self, key: str, content_type: str, ttl_seconds: int | None = None
+    ) -> tuple[str, dict[str, str]]:
+        """A URL the client may PUT one object to, and the headers it must send with it.
+
+        The key is always chosen by the server, never by the client: a client-named key is a
+        client-chosen write target, and no signature can make that safe.
+        """
+        ...
 
     def local_path(self, key: str) -> str | None:
         """A real filesystem path if the backend has one, else ``None``.

@@ -70,6 +70,20 @@ class S3Storage:
         body: bytes = response["Body"].read()
         return body
 
+    def read_range(self, key: str, length: int, start: int = 0) -> bytes:
+        validate_key(key)
+        # HTTP ranges are inclusive at both ends, so the last byte is start + length - 1. Off by
+        # one here would silently return one byte too many or too few to the magic-byte sniff.
+        end = start + max(1, length) - 1
+        try:
+            response = self._client.get_object(
+                Bucket=self.bucket, Key=key, Range=f"bytes={start}-{end}"
+            )
+        except Exception as exc:
+            raise NotFoundError(f"Object not found: {key}") from exc
+        body: bytes = response["Body"].read()
+        return body
+
     def exists(self, key: str) -> bool:
         validate_key(key)
         try:
@@ -104,6 +118,27 @@ class S3Storage:
                 self._client.delete_objects(Bucket=self.bucket, Delete={"Objects": objects})
                 deleted += len(objects)
         return deleted
+
+    def signed_upload_url(
+        self, key: str, content_type: str, ttl_seconds: int | None = None
+    ) -> tuple[str, dict[str, str]]:
+        """A presigned PUT, plus the headers the client is then *obliged* to send.
+
+        ``ContentType`` is part of the signature, so a client that omits the header -- or sends a
+        different one -- gets a 403 from S3 rather than an object with the wrong type. Returning
+        the headers alongside the URL is what keeps that from being a trap: the caller does not
+        have to know which parameters were signed.
+
+        S3 cannot enforce a maximum size on a presigned PUT (only a POST policy can), so the cap
+        is applied when the upload is registered, and an oversized object is deleted there.
+        """
+        validate_key(key)
+        url: str = self._client.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": self.bucket, "Key": key, "ContentType": content_type},
+            ExpiresIn=int(ttl_seconds or settings.storage_url_ttl_seconds),
+        )
+        return url, {"Content-Type": content_type}
 
     def signed_url(self, key: str, ttl_seconds: int | None = None) -> str:
         validate_key(key)

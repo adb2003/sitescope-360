@@ -56,6 +56,40 @@ def render_item(type_: str, obj: object, autogen_context: object) -> str | bool:
     return False
 
 
+#: Objects PostGIS creates and owns. ``CREATE EXTENSION postgis`` installs ``spatial_ref_sys``
+#: (a table of 8000-odd coordinate systems) plus the ``geometry_columns``/``geography_columns``
+#: views. None of them appear in ``Base.metadata``, so autogenerate sees them as rows the models
+#: no longer want and writes ``op.drop_table("spatial_ref_sys")`` into the next migration.
+_POSTGIS_OWNED_TABLES = frozenset({"spatial_ref_sys", "geometry_columns", "geography_columns"})
+
+#: Columns the database computes and the models deliberately do not map, keyed by table.
+#:
+#: ``capture_locations.geom`` is ``GENERATED ALWAYS AS`` the ``x``/``y`` floats beside it, so it
+#: cannot drift from them and no application code writes it. Mapping it would mean a
+#: PostgreSQL-only column type on a model that also has to compile against SQLite, which is the
+#: reason it is not mapped -- and the reason autogenerate has to be told, or it proposes dropping
+#: the column on every run.
+_DATABASE_OWNED_COLUMNS = {"capture_locations": frozenset({"geom"})}
+
+
+def include_object(
+    obj: object, name: str | None, type_: str, reflected: bool, compare_to: object
+) -> bool:
+    """Hide database-owned objects from autogenerate.
+
+    Only ever *excludes*, and only things the migrations themselves created. Anything the models
+    own still drifts loudly, which is what the CI drift check depends on.
+    """
+    if type_ == "table" and name in _POSTGIS_OWNED_TABLES:
+        return False
+    if type_ == "column":
+        table = getattr(obj, "table", None)
+        owned = _DATABASE_OWNED_COLUMNS.get(getattr(table, "name", ""), frozenset())
+        if name in owned:
+            return False
+    return True
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=settings.database_url,
@@ -65,6 +99,7 @@ def run_migrations_offline() -> None:
         compare_type=True,
         compare_server_default=True,
         render_item=render_item,
+        include_object=include_object,
         # SQLite cannot ALTER most columns; batch mode rewrites the table instead, which keeps
         # the same migration scripts working on both backends.
         render_as_batch=settings.is_sqlite,
@@ -85,6 +120,7 @@ def run_migrations_online() -> None:
             compare_type=True,
             compare_server_default=True,
             render_item=render_item,
+            include_object=include_object,
             render_as_batch=settings.is_sqlite,
         )
         with context.begin_transaction():

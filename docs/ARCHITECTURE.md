@@ -210,11 +210,13 @@ Stages are independent, idempotent, and individually retryable. Each stage run i
 ### Deployment shape
 
 The same pipeline at the coarser grain a deployment diagram uses, naming the module behind each
-box:
+box. Two of them have more than one answer, covered underneath:
 
 ```
 [Web app / Mobile] ──(upload)──> [Object storage]
   frontend/, mobile/              storage/{local,s3}.py
+  proxied:  POST /captures/{id}/upload      (validated before the bytes land)
+  direct:   POST /captures/{id}/upload-url  → client PUT → POST /captures/{id}/files
                                         │
                                 POST /captures/{id}/process
                                    services/captures.py
@@ -243,31 +245,61 @@ box:
                                         │
                                         ▼
                           [Database insertion & storage]
-                       PostgreSQL rows + object storage, served
-                       as expiring signed URLs, optionally through
-                       CDN_BASE_URL
+                       PostgreSQL rows + object storage, served as
+                       expiring signed URLs, optionally through
+                       CDN_BASE_URL. Capture locations carry a
+                       PostGIS point (SRID 0, generated from x/y)
+                       with a GiST index; services/spatial.py falls
+                       back to exact squared distance off PostgreSQL
 ```
 
-Two boxes are deliberately *not* implemented as drawn, and the reasons are worth stating rather
-than leaving to be rediscovered:
+#### Uploads: two routes, and why both exist
 
-**Upload goes through the API, not straight to the bucket.** `store_upload` streams the body to
-the provider while hashing it, enforcing the extension allow-list, the magic-byte sniff and the
-size cap *before* the bytes land — so a disguised or oversized upload never becomes an object.
-Handing the client a presigned PUT would remove that, and move the size cap to a bucket policy
-and the type check to the VALIDATE stage, after storage has already been paid for. The cost of
-the current choice is that a multi-gigabyte video occupies an API worker for the duration of the
-transfer; the trade is deliberate and is the first thing to revisit if video sizes grow.
+`POST /captures/{id}/upload` streams the body through the API to the provider while hashing it,
+enforcing the extension allow-list, the magic-byte sniff and the size cap *before* the bytes
+land. A rejected upload never becomes an object, and identical bytes are de-duplicated by
+checksum. It holds an API worker for the length of the transfer, which is right for a panorama
+and wasteful for a multi-gigabyte video.
 
-**Positions are float columns, not PostGIS geometry.** The coordinates are floor-plan pixels and
-a relative metric track — a local Cartesian frame with no datum, so the spherical maths PostGIS
-exists for does not apply. Its remaining benefit would be a spatial index, and the one proximity
-query in the product ("which frame is nearest this click") is answered in the browser from points
-it has already loaded, in `frontend/src/components/viewer/minimapGeometry.ts`. Adding the
-extension would mean a PostGIS-only image, `geoalchemy2`, and a migration that no longer runs on
-the SQLite path the test suite and the laptop setup both use — a real cost against an index that
-would be scanning a few hundred rows per floor. Worth revisiting if frames per floor reach the
-scale where a sequential scan is measurable, not before.
+`POST /captures/{id}/upload-url` → client PUTs to storage → `POST /captures/{id}/files` is the
+direct route. The key is minted by the server (a client-named key is a client-chosen write
+target), and registration re-establishes by hand what the proxied route got for free: size from
+a HEAD, type from a ranged read of the first 64 bytes, and **deletion of anything that fails**,
+so a rejected upload does not stay billable or reachable.
+
+One guarantee genuinely does not survive the move: there is no content checksum, because
+computing one means reading the whole object back through the API, which is the cost the caller
+chose this route to avoid. Retries are idempotent *by key* instead, and `checksum_sha256` is
+left null rather than filled with something unverified.
+
+With `local` storage the PUT target is `PUT /api/files/{key}`, signed the same way reads are —
+except the HMAC covers the verb. Without that domain separation every asset URL ever handed to a
+browser would also authorise overwriting the object it points at.
+
+#### Spatial data: PostGIS, on PostgreSQL only
+
+`capture_locations.geom` is a `geometry(Point, 0)` column, `GENERATED ALWAYS AS
+ST_SetSRID(ST_MakePoint(x, y), 0) STORED`, with a GiST index. Three consequences worth knowing:
+
+- **SRID 0, not 4326.** These are floor-plan pixels in a local Cartesian frame with no datum.
+  Labelling them lat/lon would make every distance PostGIS returns meaningless.
+- **Generated, so it cannot drift.** No application code writes a geometry, nothing needed
+  backfilling, and the `x`/`y` floats remain the source of truth. It is not mapped in the ORM —
+  a PostgreSQL-only type on a model that also compiles against SQLite — so `alembic/env.py`
+  tells autogenerate to ignore it, along with PostGIS's own `spatial_ref_sys`.
+- **PostgreSQL deployments need the extension.** `docker-compose.yml` and CI both use
+  `postgis/postgis:17-3.5-alpine`; the migration fails with an actionable message on an image
+  without it.
+
+`app/services/spatial.py` has two implementations of one contract: KNN over the index via `<->`
+on PostgreSQL, and an exact ordering by squared distance over `x`/`y` everywhere else. Same rows,
+same order, same distances — only the query plan differs, which is what lets the suite prove the
+behaviour on SQLite while `tests/integration/test_postgis_spatial.py` (run by the migrations job,
+which has a PostGIS server) proves PostgreSQL agrees.
+
+The viewer's minimap still answers a click in the browser from points it has already loaded; a
+round trip would be the wrong trade for a click. `GET /floors/{id}/locations/nearest` is for
+callers that hold a coordinate and no loaded plan.
 
 Status is surfaced to the client exactly as §34 specifies:
 `uploading → uploaded → processing → extracting_frames → analyzing → mapping → ready`, or

@@ -49,6 +49,9 @@ from app.schemas.capture import (
     CaptureSessionDetail,
     CaptureSessionOut,
     CaptureSessionUpdate,
+    DirectUploadRegistration,
+    DirectUploadRequest,
+    DirectUploadTicketOut,
     FrameAssignLocation,
     ProcessingJobOut,
     ProcessingStatus,
@@ -252,6 +255,71 @@ def upload_capture_files(
         )
         stored.append(CaptureFileOut.model_validate(record))
     return stored
+
+
+@router.post(
+    "/captures/{session_id}/upload-url",
+    response_model=DirectUploadTicketOut,
+)
+def create_direct_upload_url(
+    session_id: str,
+    payload: DirectUploadRequest,
+    db: DbSession,
+    _: RequireUpload,
+) -> DirectUploadTicketOut:
+    """Get a signed URL to PUT one file straight to storage (§7, §24).
+
+    The alternative to `/upload` for large files. That route streams the body through the API,
+    which holds a worker for the length of the transfer — fine for a panorama, wasteful for a
+    multi-gigabyte walkthrough video. Here the bytes go to object storage directly and the API
+    sees only two small requests: this one, and `/files` afterwards.
+
+    Two steps, not one, because the server cannot check bytes it has not seen. Nothing is
+    recorded until the upload is registered and the object has been inspected.
+    """
+    session = get_session_or_404(db, session_id)
+    ticket = capture_service.prepare_direct_upload(
+        db,
+        session,
+        filename=payload.filename,
+        content_type=payload.content_type,
+    )
+    return DirectUploadTicketOut(
+        storage_key=ticket.storage_key,
+        upload_url=ticket.upload_url,
+        headers=ticket.headers,
+        expires_in=ticket.expires_in,
+    )
+
+
+@router.post(
+    "/captures/{session_id}/files",
+    response_model=CaptureFileOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def register_direct_upload(
+    session_id: str,
+    payload: DirectUploadRegistration,
+    db: DbSession,
+    _: RequireUpload,
+) -> CaptureFileOut:
+    """Register a file uploaded through a signed URL, after checking what actually landed.
+
+    The size cap and the magic-byte sniff run here rather than before storage, because that is
+    the only order available once the client wrote the bytes itself. An object that fails either
+    is deleted before this returns, so a rejected upload does not stay billable or reachable.
+
+    Safe to call twice: a key already registered returns the existing record rather than a
+    second row, which is what a client retrying over a site connection will do.
+    """
+    session = get_session_or_404(db, session_id)
+    record = capture_service.register_direct_upload(
+        db,
+        session,
+        storage_key=payload.storage_key,
+        filename=payload.filename,
+    )
+    return CaptureFileOut.model_validate(record)
 
 
 @router.get("/captures/{session_id}/files", response_model=list[CaptureFileDetail])

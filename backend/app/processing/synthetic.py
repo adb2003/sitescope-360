@@ -119,6 +119,58 @@ def render_panorama(
     return image
 
 
+def render_dual_fisheye(
+    room: Room,
+    camera: tuple[float, float, float],
+    *,
+    width: int = 2048,
+    height: int = 1024,
+    fov_deg: float = 190.0,
+    seed: int = 20260910,
+) -> np.ndarray:
+    """Render what a back-to-back dual-fisheye camera records: two circles, black around them.
+
+    Ray-traced from the room directly, exactly as :func:`render_panorama` is, rather than by
+    re-projecting a panorama. That independence is the point — it makes a round trip through
+    ``vision.fisheye`` a real test of the stitcher instead of a test that two copies of the same
+    assumption agree with each other.
+
+    Equidistant projection (``r = R·θ/θ_max``), left circle looking forward along +Z, right
+    circle turned to look backward, which is the arrangement :func:`default_layout` assumes.
+    """
+    origin = np.array(camera, dtype=np.float64)
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+
+    half = width // 2
+    radius = min(half, height) / 2.0
+    max_theta = np.deg2rad(fov_deg) / 2.0
+
+    for index, centre_x in enumerate((half / 2.0, half + half / 2.0)):
+        ys, xs = np.mgrid[0:height, 0:half]
+        px = xs + 0.5 + (0.0 if index == 0 else half)
+        py = ys + 0.5
+        dx = px - centre_x
+        # Rows increase downward, +Y is up.
+        dy = (height / 2.0) - py
+        r = np.hypot(dx, dy)
+        inside = r <= radius
+
+        theta = np.clip(r / radius, 0.0, 1.0) * max_theta
+        phi = np.arctan2(dy, dx)
+        sin_t = np.sin(theta)
+        local = np.stack([sin_t * np.cos(phi), sin_t * np.sin(phi), np.cos(theta)], axis=-1)
+
+        if index == 1:
+            # The back lens is the front one rotated 180 degrees about the vertical axis.
+            local = np.stack([-local[..., 0], local[..., 1], -local[..., 2]], axis=-1)
+
+        shaded = _shade(room, origin, local, seed=seed, brightness=1.0)
+        target = image[:, :half] if index == 0 else image[:, half:]
+        target[...] = np.where(inside[..., None], shaded, 0)
+
+    return image
+
+
 def _shade(
     room: Room,
     origin: np.ndarray,

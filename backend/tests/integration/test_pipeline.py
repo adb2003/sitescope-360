@@ -448,3 +448,51 @@ def test_frames_from_a_stationary_stretch_are_not_stored(
     offsets = sorted(item["source_time_seconds"] for item in frames["items"])
     widest_gap = max(b - a for a, b in itertools.pairwise(offsets))
     assert widest_gap >= 2.0, f"no gap where the pause was: {offsets}"
+
+
+# ---- dual fisheye ------------------------------------------------------------
+@pytest.fixture
+def dual_fisheye_bytes() -> bytes:
+    """A raw two-circle recording, as a back-to-back 360 camera actually writes it."""
+    from app.processing.media import encode_jpeg
+    from app.processing.synthetic import Room, render_dual_fisheye
+
+    return encode_jpeg(render_dual_fisheye(Room(), (0.0, 0.0, 0.0), width=2048, height=1024))
+
+
+def test_a_dual_fisheye_upload_becomes_an_equirectangular_frame(
+    client: TestClient, admin_headers: dict[str, str], floor: str, dual_fisheye_bytes: bytes
+) -> None:
+    """§7: the raw camera format is recognised and converted, not silently misread.
+
+    Both formats are 2:1, so nothing about the shape distinguishes them — and treating a fisheye
+    pair as equirectangular does not degrade the capture, it makes it meaningless. Every stage
+    after this reads those pixels as longitude and latitude.
+
+    The file keeps its own projection and the frame gets the one it actually has, so the record
+    says what the camera recorded *and* what the platform derived from it.
+    """
+    session_id = new_session(client, admin_headers, floor)
+    upload = client.post(
+        f"/api/captures/{session_id}/upload",
+        headers=admin_headers,
+        files={"files": ("raw_fisheye.jpg", dual_fisheye_bytes, "image/jpeg")},
+    )
+    assert upload.status_code == 201, upload.text
+
+    client.post(f"/api/captures/{session_id}/process", headers=admin_headers)
+    status = wait(client, admin_headers, session_id)
+    assert status["status"] == CaptureSessionStatus.READY, status
+
+    files = client.get(f"/api/captures/{session_id}/files", headers=admin_headers).json()
+    assert files[0]["projection"] == "dual_fisheye", files[0]["projection"]
+    # And the operator is told, because the stitch uses assumed lens geometry.
+    assert any(
+        "fisheye" in warning.lower() for warning in files[0].get("validation_warnings") or []
+    )
+
+    frames = client.get(f"/api/captures/{session_id}/frames", headers=admin_headers).json()
+    assert frames["total"] == 1
+    assert frames["items"][0]["projection"] == "equirectangular", (
+        "the stitched frame must not still claim to be raw camera data"
+    )

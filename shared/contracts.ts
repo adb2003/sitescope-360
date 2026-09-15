@@ -22,9 +22,9 @@ export type FileKind = 'panorama' | 'perspective_image' | 'video_360' | 'video_f
 
 export const FILE_KIND_VALUES: readonly FileKind[] = ['panorama', 'perspective_image', 'video_360', 'video_flat', 'unknown'] as const
 
-export type ProjectionType = 'equirectangular' | 'perspective' | 'unknown'
+export type ProjectionType = 'equirectangular' | 'perspective' | 'dual_fisheye' | 'unknown'
 
-export const PROJECTION_TYPE_VALUES: readonly ProjectionType[] = ['equirectangular', 'perspective', 'unknown'] as const
+export const PROJECTION_TYPE_VALUES: readonly ProjectionType[] = ['equirectangular', 'perspective', 'dual_fisheye', 'unknown'] as const
 
 export type JobType = 'validate' | 'metadata' | 'frame_extraction' | 'quality' | 'features' | 'mapping' | 'viewer_data' | 'thumbnails'
 

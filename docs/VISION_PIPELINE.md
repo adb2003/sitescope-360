@@ -313,6 +313,34 @@ residual rejection reduced without removing. That is reported rather than averag
 technique is not uniformly better, and `loop_closure.limitations` in `describe_capabilities()`
 says so.
 
+### Dual-fisheye input
+
+Consumer 360 cameras have two back-to-back lenses and many record the raw pair rather than a
+stitched panorama: two circles side by side, black in the corners. Everything downstream here
+assumes equirectangular input, so a dual-fisheye file is not merely lower quality — its pixels do
+not mean what the feature detector, the motion estimator and the viewer read them as.
+
+`vision/fisheye.py` resamples it: for each output pixel take the direction it represents, rotate
+into each lens's frame, project through the equidistant model `r = R·θ/θ_max`, and cross-fade
+across the overlap band that back-to-back lenses are built to have. Detection is deliberately
+conservative and needs two signals to agree — 2:1 aspect *and* dark corners — because both
+mistakes are costly: stitching an already-equirectangular panorama destroys it, and failing to
+stitch a real pair feeds the mapper meaningless pixels.
+
+Measured against ground truth the stitcher had no hand in — the same room and camera rendered
+straight to equirectangular — correlation is **0.96** and mean absolute pixel error 5.5/255. The
+three orientations it could plausibly have got wrong score far lower (vertical flip −0.45,
+horizontal flip 0.66, 180° yaw 0.66), which is what makes that 0.96 meaningful rather than a
+round trip agreeing with itself.
+
+What it does **not** do is calibrate. Real cameras have lens centres a few pixels off, unequal
+radii, a little roll, and a field of view that is not exactly the datasheet figure. Those are
+per-model constants that must be measured against that model. The defaults are derived from the
+frame's own geometry, every one is overridable, and the file is recorded as `dual_fisheye` while
+its frames are recorded as `equirectangular` — so the record distinguishes what the camera
+recorded from what the platform derived (§46). The operator is warned that the seam is worth
+checking before trusting positions from it.
+
 ### Frame sampling
 
 One frame per second of video, and it is a measured figure rather than a convention. A person

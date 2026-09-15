@@ -147,10 +147,56 @@ def resize_to_width(image: np.ndarray, target_width: int) -> np.ndarray:
     )
 
 
+# ---- WebP --------------------------------------------------------------------
+#: Every image this pipeline *generates* is WebP. Measured against the JPEG settings it replaced,
+#: at matched PSNR on a rendered 4096x2048 panorama: thumbnails 41% smaller, previews 38%,
+#: full frames 48%. A five-minute walk at one frame per second is ~300 frames, so the full-frame
+#: saving alone is about 110 MB per walkthrough.
+#:
+#: Files the *operator* uploaded are never re-encoded. A still upload's frame deliberately points
+#: at the source object (see ``_is_derived`` in the stages module), and converting it would mean
+#: lossily re-encoding somebody's master to save space on a copy we did not have to make.
+WEBP_EXTENSION = ".webp"
+WEBP_CONTENT_TYPE = "image/webp"
+
+#: Chosen per size to match or beat the PSNR of the JPEG quality each one replaced, rather than
+#: to a round number: 78 -> 80 (38.8 dB -> 39.1), 82 -> 85 (42.1 -> 42.0), 90 -> 90 (45.3 -> 45.5).
+WEBP_QUALITY_THUMB = 80
+WEBP_QUALITY_PREVIEW = 85
+WEBP_QUALITY_FULL = 90
+
+
+def encode_webp(image: np.ndarray, quality: int = WEBP_QUALITY_FULL) -> bytes:
+    """Encode BGR pixels as WebP.
+
+    OpenCV first because it is about six times faster than Pillow on a full panorama, and that
+    difference is multiplied by every frame of every walkthrough. Its WebP support depends on how
+    the wheel was built, though, so Pillow -- which bundles libwebp and always has it -- stands
+    behind it rather than letting a differently-built OpenCV turn frame extraction into a crash.
+    """
+    ok, buffer = cv2.imencode(WEBP_EXTENSION, image, [int(cv2.IMWRITE_WEBP_QUALITY), quality])
+    if ok:
+        return bytes(buffer)
+    return _encode_webp_pillow(image, quality)
+
+
+def _encode_webp_pillow(image: np.ndarray, quality: int) -> bytes:
+    """Fallback encoder. Separate so a test can exercise it without breaking OpenCV."""
+    try:
+        # OpenCV arrays are BGR and Pillow expects RGB; getting this backwards produces a
+        # perfectly valid file with the red and blue channels swapped, which no size or status
+        # check would catch.
+        buffer = io.BytesIO()
+        Image.fromarray(image[:, :, ::-1]).save(buffer, format="WEBP", quality=quality, method=4)
+        return buffer.getvalue()
+    except Exception as exc:
+        raise ProcessingError(f"WebP encoding failed: {exc}") from exc
+
+
 def make_derivatives(image: np.ndarray) -> tuple[bytes, bytes]:
-    """``(thumbnail_jpeg, preview_jpeg)`` — three sizes per frame keeps the UI cheap (§35)."""
-    thumb = encode_jpeg(resize_to_width(image, settings.thumbnail_width), quality=78)
-    preview = encode_jpeg(resize_to_width(image, settings.preview_width), quality=82)
+    """``(thumbnail_webp, preview_webp)`` — three sizes per frame keeps the UI cheap (§35)."""
+    thumb = encode_webp(resize_to_width(image, settings.thumbnail_width), WEBP_QUALITY_THUMB)
+    preview = encode_webp(resize_to_width(image, settings.preview_width), WEBP_QUALITY_PREVIEW)
     return thumb, preview
 
 

@@ -49,6 +49,7 @@ from app.storage import get_storage, session_key
 from app.storage.base import StorageProvider
 from app.vision.engine import get_vision_engine
 from app.vision.features import deserialize_features, serialize_features
+from app.vision.fisheye import looks_like_dual_fisheye, stitch_to_equirectangular
 from app.vision.panorama import hamming_distance
 from app.vision.types import FeatureSet
 
@@ -177,7 +178,19 @@ def _validate_image(
     capture_file.height_px = info.height
     capture_file.projection = info.projection
 
-    if info.projection is ProjectionType.EQUIRECTANGULAR:
+    # Checked before the equirectangular branch, because a dual-fisheye frame is also 2:1 and the
+    # describe() heuristic has every reason to call it equirectangular. Treating it as one does
+    # not degrade the capture, it makes it meaningless: the pixels do not mean what the feature
+    # detector, the motion estimator and the viewer all read them as.
+    if looks_like_dual_fisheye(image):
+        capture_file.projection = ProjectionType.DUAL_FISHEYE
+        capture_file.kind = FileKind.PANORAMA
+        warnings.append(
+            "This looks like a raw dual-fisheye recording. Frames will be stitched to "
+            "equirectangular during processing; the stitch uses assumed lens geometry, so "
+            "check the seam before relying on positions from it."
+        )
+    elif info.projection is ProjectionType.EQUIRECTANGULAR:
         capture_file.kind = FileKind.PANORAMA
     elif info.projection is ProjectionType.PERSPECTIVE:
         capture_file.kind = FileKind.PERSPECTIVE_IMAGE
@@ -405,6 +418,31 @@ def _delete_frames_for_file(db: Session, capture_file: CaptureFile) -> None:
         db.flush()
 
 
+def _to_equirectangular(image: np.ndarray, capture_file: CaptureFile) -> np.ndarray:
+    """Stitch a dual-fisheye frame; leave anything else exactly as it is.
+
+    Keyed on the *file's* recorded projection rather than re-detecting per frame. Detection is a
+    heuristic, and running it on every frame of a video would let it flicker — some frames
+    stitched, some not, inside one walkthrough — which is far worse than being consistently wrong
+    about the file.
+    """
+    if capture_file.projection is not ProjectionType.DUAL_FISHEYE:
+        return image
+    return stitch_to_equirectangular(image)
+
+
+def _frame_projection(capture_file: CaptureFile) -> ProjectionType:
+    """What the *frame* is, which is not always what the file is.
+
+    A dual-fisheye file yields equirectangular frames, because stitching is what the extraction
+    stage does to it. Recording the file's own projection here would label the output as raw
+    camera data and send every later stage back to reading it as two circles.
+    """
+    if capture_file.projection is ProjectionType.DUAL_FISHEYE:
+        return ProjectionType.EQUIRECTANGULAR
+    return capture_file.projection
+
+
 def _create_still_frame(
     db: Session,
     storage: StorageProvider,
@@ -413,18 +451,19 @@ def _create_still_frame(
     sequence: int,
 ) -> bool:
     data = storage.read_bytes(capture_file.storage_key)
-    image = media.decode_image(data)
+    image = _to_equirectangular(media.decode_image(data), capture_file)
     frame_id = new_id()
 
     thumb, preview = media.make_derivatives(image)
+    ext = media.WEBP_EXTENSION
     thumb_key = session_key(
-        session.project_id, session.floor_id, session.id, "thumbs", f"{frame_id}.jpg"
+        session.project_id, session.floor_id, session.id, "thumbs", f"{frame_id}{ext}"
     )
     preview_key = session_key(
-        session.project_id, session.floor_id, session.id, "frames", f"{frame_id}_preview.jpg"
+        session.project_id, session.floor_id, session.id, "frames", f"{frame_id}_preview{ext}"
     )
-    storage.put_bytes(thumb_key, thumb, "image/jpeg")
-    storage.put_bytes(preview_key, preview, "image/jpeg")
+    storage.put_bytes(thumb_key, thumb, media.WEBP_CONTENT_TYPE)
+    storage.put_bytes(preview_key, preview, media.WEBP_CONTENT_TYPE)
 
     height, width = image.shape[:2]
     db.add(
@@ -441,7 +480,7 @@ def _create_still_frame(
             preview_key=preview_key,
             width_px=width,
             height_px=height,
-            projection=capture_file.projection,
+            projection=_frame_projection(capture_file),
             captured_at=capture_file.captured_at or session.started_at,
         )
     )
@@ -487,6 +526,7 @@ def _extract_video_frames(
         for offset_seconds, image in media.iter_video_frames(
             path, interval_seconds=interval_seconds
         ):
+            image = _to_equirectangular(image, capture_file)
             phash = engine.perceptual_hash(image)
             if kept_hash is not None and hamming_distance(phash, kept_hash) <= DUPLICATE_HAMMING:
                 skipped += 1
@@ -494,24 +534,31 @@ def _extract_video_frames(
             kept_hash = phash
 
             frame_id = new_id()
+            ext = media.WEBP_EXTENSION
             full_key = session_key(
-                session.project_id, session.floor_id, session.id, "frames", f"{frame_id}.jpg"
+                session.project_id, session.floor_id, session.id, "frames", f"{frame_id}{ext}"
             )
             thumb_key = session_key(
-                session.project_id, session.floor_id, session.id, "thumbs", f"{frame_id}.jpg"
+                session.project_id, session.floor_id, session.id, "thumbs", f"{frame_id}{ext}"
             )
             preview_key = session_key(
                 session.project_id,
                 session.floor_id,
                 session.id,
                 "frames",
-                f"{frame_id}_preview.jpg",
+                f"{frame_id}_preview{ext}",
             )
 
             thumb, preview = media.make_derivatives(image)
-            storage.put_bytes(full_key, media.encode_jpeg(image, quality=90), "image/jpeg")
-            storage.put_bytes(thumb_key, thumb, "image/jpeg")
-            storage.put_bytes(preview_key, preview, "image/jpeg")
+            # Unlike a still, a video frame is an image *we* produced, so encoding it as WebP
+            # re-encodes nothing the operator gave us -- it is the first and only encode.
+            storage.put_bytes(
+                full_key,
+                media.encode_webp(image, media.WEBP_QUALITY_FULL),
+                media.WEBP_CONTENT_TYPE,
+            )
+            storage.put_bytes(thumb_key, thumb, media.WEBP_CONTENT_TYPE)
+            storage.put_bytes(preview_key, preview, media.WEBP_CONTENT_TYPE)
 
             height, width = image.shape[:2]
             db.add(
@@ -526,7 +573,7 @@ def _extract_video_frames(
                     preview_key=preview_key,
                     width_px=width,
                     height_px=height,
-                    projection=capture_file.projection,
+                    projection=_frame_projection(capture_file),
                     captured_at=base_time + timedelta(seconds=offset_seconds),
                 )
             )

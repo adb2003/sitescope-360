@@ -289,3 +289,65 @@ def test_extraction_keeps_every_frame_of_a_moving_walk(video_file: Path) -> None
     frames = list(media.iter_video_frames(video_file, interval_seconds=1.0))
 
     assert len(frames) >= 5, f"a 6-second moving walk yielded only {len(frames)} frames"
+
+
+# ---- WebP --------------------------------------------------------------------
+def test_webp_is_materially_smaller_than_the_jpeg_it_replaced() -> None:
+    """The whole justification for the format change, asserted rather than assumed.
+
+    Compared at the quality each size actually uses, not at a matched quality number: the point
+    is that the bytes we now store are smaller than the bytes we used to store.
+    """
+    image = render_panorama(Room(), (0.0, 0.0, 0.0), width=2048, height=1024)
+
+    jpeg = media.encode_jpeg(image, quality=90)
+    webp = media.encode_webp(image, media.WEBP_QUALITY_FULL)
+
+    assert len(webp) < len(jpeg) * 0.75, (
+        f"webp {len(webp)} vs jpeg {len(jpeg)} — the format change is not paying for itself"
+    )
+
+
+def test_webp_survives_a_round_trip_with_its_colours_intact() -> None:
+    """A channel swap produces a valid file of the right size that is simply wrong.
+
+    Pillow works in RGB and OpenCV in BGR, so the fallback encoder has to convert. Nothing about
+    the output length or the encoder's return value would reveal getting that backwards, which is
+    why this compares pixels against a deliberately asymmetric colour.
+    """
+    image = np.zeros((64, 128, 3), dtype=np.uint8)
+    image[:, :, 0] = 200  # blue channel, in OpenCV's ordering
+    image[:, :, 2] = 20  # red channel
+
+    decoded = media.decode_image(media.encode_webp(image, quality=100))
+
+    assert decoded.shape == image.shape
+    # Lossless enough at quality 100 to compare channel means without a tolerance argument.
+    assert decoded[:, :, 0].mean() > decoded[:, :, 2].mean(), "blue and red were swapped"
+
+
+def test_the_pillow_fallback_encoder_agrees_with_opencv() -> None:
+    """The fallback exists for builds without WebP, so it must not be the untested path.
+
+    It is exercised directly here, because on a wheel that *does* have WebP it would otherwise
+    never run — and a fallback that has never run is not a fallback.
+    """
+    image = render_panorama(Room(), (0.0, 0.0, 0.0), width=512, height=256)
+
+    primary = media.decode_image(media.encode_webp(image, quality=90))
+    fallback = media.decode_image(media._encode_webp_pillow(image, quality=90))
+
+    assert primary.shape == fallback.shape == image.shape
+    # Two encoders, same format, same quality: not byte-identical, but visually equivalent.
+    assert float(np.abs(primary.astype(float) - fallback.astype(float)).mean()) < 3.0
+
+
+def test_derivatives_are_webp() -> None:
+    image = render_panorama(Room(), (0.0, 0.0, 0.0), width=2048, height=1024)
+
+    thumb, preview = media.make_derivatives(image)
+
+    # RIFF....WEBP is the container signature; checking it proves the format rather than trusting
+    # that the encoder was handed the extension we think it was.
+    for data in (thumb, preview):
+        assert data[:4] == b"RIFF" and data[8:12] == b"WEBP", data[:16]

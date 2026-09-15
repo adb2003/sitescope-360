@@ -44,6 +44,7 @@
     "ProjectionType": [
       "equirectangular",
       "perspective",
+      "dual_fisheye",
       "unknown"
     ],
     "JobType": [

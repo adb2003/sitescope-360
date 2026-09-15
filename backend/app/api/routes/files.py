@@ -40,6 +40,9 @@ CACHE_CONTROL = "private, max-age=3600, immutable"
 _CONTENT_TYPES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
+    # Every frame and derivative this pipeline generates. `.jpg` stays because captures processed
+    # before the switch are still stored and still served.
+    ".webp": "image/webp",
     ".png": "image/png",
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",

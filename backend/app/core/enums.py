@@ -77,6 +77,11 @@ class FileKind(StrEnum):
 class ProjectionType(StrEnum):
     EQUIRECTANGULAR = "equirectangular"
     PERSPECTIVE = "perspective"
+    #: The raw two-circle recording a back-to-back 360 camera makes. Only ever a *file's*
+    #: projection: the frames extracted from it are stitched, so they are equirectangular. The
+    #: distinction is worth keeping, because it is the difference between what the camera
+    #: recorded and what the platform derived from it (§46).
+    DUAL_FISHEYE = "dual_fisheye"
     UNKNOWN = "unknown"
 
 

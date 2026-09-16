@@ -30,6 +30,8 @@ import type * as SQLiteTypes from 'expo-sqlite'
 
 import { api } from './api'
 import { isAlreadyProcessing, sessionsReadyForProcessing } from './syncPolicy'
+import { clearOrphanedParts, expoUploadIO } from './uploadIO'
+import { ResumableUploadInterrupted, uploadFile, type ResumeHandle } from './uploads'
 
 const DB_NAME = 'sitescope.db'
 const UPLOAD_DIR = `${FileSystem.documentDirectory}captures/`
@@ -62,6 +64,15 @@ export interface PendingFile {
   attempts: number
   lastError: string | null
   queuedAt: string
+  /**
+   * A chunked upload this file already has parts in storage for.
+   *
+   * Durable for the same reason the file itself is: the queue exists because a capture that only
+   * lives on one device must survive the app being killed, and most of a transfer is worth
+   * surviving too. Without it the parts of an interrupted upload stay in storage — unreachable,
+   * still billable — and the next attempt re-sends everything.
+   */
+  resume: ResumeHandle | null
 }
 
 let database: SQLiteTypes.SQLiteDatabase | null = null
@@ -85,6 +96,25 @@ export class QueueUnavailableError extends Error {
     )
     this.name = 'QueueUnavailableError'
   }
+}
+
+/**
+ * Add a column to an existing table, and do nothing if it is already there.
+ *
+ * SQLite has no `ADD COLUMN IF NOT EXISTS`, and the schema above is created with
+ * `CREATE TABLE IF NOT EXISTS` — so an app that has been installed since before a column existed
+ * never gets it from that statement. Reading `table_info` first is the difference between an
+ * upgrade and a crash on launch for exactly the devices that have captures queued.
+ */
+async function addColumnIfMissing(
+  db: SQLiteTypes.SQLiteDatabase,
+  table: string,
+  column: string,
+  definition: string,
+): Promise<void> {
+  const columns = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(${table})`)
+  if (columns.some((existing) => existing.name === column)) return
+  await db.execAsync(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
 }
 
 export async function openQueue(): Promise<SQLiteTypes.SQLiteDatabase> {
@@ -132,6 +162,9 @@ export async function openQueue(): Promise<SQLiteTypes.SQLiteDatabase> {
     CREATE INDEX IF NOT EXISTS idx_files_status ON files(status, queued_at);
     CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id);
   `)
+
+  await addColumnIfMissing(database, 'files', 'resume_key', 'TEXT')
+  await addColumnIfMissing(database, 'files', 'resume_upload_id', 'TEXT')
 
   await FileSystem.makeDirectoryAsync(UPLOAD_DIR, { intermediates: true }).catch(() => undefined)
   return database
@@ -231,6 +264,7 @@ export async function enqueueFile(
     attempts: 0,
     lastError: null,
     queuedAt: new Date().toISOString(),
+    resume: null,
   }
 
   await db.runAsync(
@@ -341,22 +375,40 @@ export async function sync(): Promise<SyncResult> {
 
     await db.runAsync("UPDATE files SET status = 'uploading' WHERE id = ?", [file.id])
     try {
-      await api.uploadFile(`/captures/${file.sessionId}/upload`, {
-        uri: file.localUri,
-        name: file.name,
-        type: file.mimeType,
-      })
-      await db.runAsync("UPDATE files SET status = 'uploaded', last_error = NULL WHERE id = ?", [
-        file.id,
-      ])
+      // Routed by size, exactly as the web app routes it. A walkthrough video goes up in parts,
+      // so an upload that drops re-sends one part rather than the gigabytes before it -- and
+      // continues from whatever a previous attempt already got there.
+      await uploadFile(
+        expoUploadIO,
+        file.sessionId,
+        {
+          uri: file.localUri,
+          name: file.name,
+          mimeType: file.mimeType,
+          sizeBytes: file.sizeBytes,
+        },
+        undefined,
+        file.resume ?? undefined,
+      )
+      await db.runAsync(
+        "UPDATE files SET status = 'uploaded', last_error = NULL, resume_key = NULL, " +
+          'resume_upload_id = NULL WHERE id = ?',
+        [file.id],
+      )
       // The server has the bytes; reclaim the device storage.
       await FileSystem.deleteAsync(file.localUri, { idempotent: true }).catch(() => undefined)
       result.filesUploaded += 1
     } catch (error) {
       const message = describe(error)
+      // A chunked upload leaves its handle behind, so the next drain continues from the last
+      // part that landed. Dropping it is the failure the route was built to remove: the retry
+      // would succeed, slowly, having re-sent everything.
+      const resume =
+        error instanceof ResumableUploadInterrupted ? error.resume : (file.resume ?? null)
       await db.runAsync(
-        "UPDATE files SET status = 'failed', attempts = attempts + 1, last_error = ? WHERE id = ?",
-        [message, file.id],
+        "UPDATE files SET status = 'failed', attempts = attempts + 1, last_error = ?, " +
+          'resume_key = ?, resume_upload_id = ? WHERE id = ?',
+        [message, resume?.storageKey ?? null, resume?.uploadId ?? null, file.id],
       )
       result.filesFailed += 1
       result.errors.push(`${file.name}: ${message}`)
@@ -433,6 +485,10 @@ export async function discardUploaded(): Promise<number> {
     await FileSystem.deleteAsync(file.localUri, { idempotent: true }).catch(() => undefined)
   }
   await db.runAsync("DELETE FROM files WHERE status = 'uploaded'")
+  // Chunked uploads write each part to its own temporary file and delete it once sent, so the
+  // only ones left are from a run the OS killed part way -- which is the event this route exists
+  // for. This is the one place the operator asks for device space back, so sweep them here.
+  await clearOrphanedParts().catch(() => undefined)
   return uploaded.length
 }
 
@@ -466,6 +522,12 @@ function rowToFile(row: Record<string, unknown>): PendingFile {
     attempts: Number(row.attempts ?? 0),
     lastError: (row.last_error as string | null) ?? null,
     queuedAt: String(row.queued_at),
+    // Both or neither: half a handle cannot resume anything, and treating one as present would
+    // send a resume request the server can only reject.
+    resume:
+      row.resume_key && row.resume_upload_id
+        ? { storageKey: String(row.resume_key), uploadId: String(row.resume_upload_id) }
+        : null,
   }
 }
 

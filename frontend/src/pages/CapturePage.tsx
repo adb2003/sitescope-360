@@ -54,7 +54,11 @@ import {
 import { Capability, useAuth } from '@/hooks/useAuth'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { ApiError } from '@/lib/api'
-import { DIRECT_UPLOAD_MIN_BYTES, routeFor } from '@/lib/uploadStrategy'
+import {
+  DIRECT_UPLOAD_MIN_BYTES,
+  RESUMABLE_UPLOAD_MIN_BYTES,
+  routeFor,
+} from '@/lib/uploadStrategy'
 import { useUploadQueue } from '@/hooks/useUploadQueue'
 import { cn, formatBytes, formatDateTime, formatRelative } from '@/lib/utils'
 
@@ -220,8 +224,15 @@ function CaptureWizard({ projectId }: { projectId: string }) {
     [selectedFiles],
   )
 
+  // Both non-proxied routes send the bytes straight to storage, which is the part worth saying
+  // about the selection as a whole; which of the two a given file takes is a per-file detail.
   const directCount = useMemo(
-    () => selectedFiles.filter((file) => routeFor(file.size) === 'direct').length,
+    () => selectedFiles.filter((file) => routeFor(file.size) !== 'proxied').length,
+    [selectedFiles],
+  )
+
+  const resumableCount = useMemo(
+    () => selectedFiles.filter((file) => routeFor(file.size) === 'resumable').length,
     [selectedFiles],
   )
 
@@ -476,7 +487,14 @@ function CaptureWizard({ projectId }: { projectId: string }) {
                         <Images className="size-3.5 shrink-0 text-brand" aria-hidden />
                       )}
                       <span className="min-w-0 flex-1 truncate text-ink">{file.name}</span>
-                      {routeFor(file.size) === 'direct' ? (
+                      {routeFor(file.size) === 'resumable' ? (
+                        <span
+                          className="shrink-0 rounded bg-info/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-info"
+                          title={`Over ${formatBytes(RESUMABLE_UPLOAD_MIN_BYTES)} — uploads in parts, so a dropped connection re-sends one part instead of the whole file`}
+                        >
+                          resumable
+                        </span>
+                      ) : routeFor(file.size) === 'direct' ? (
                         <span
                           className="shrink-0 rounded bg-info/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-info"
                           title={`Over ${formatBytes(DIRECT_UPLOAD_MIN_BYTES)} — uploads straight to storage instead of through the API`}
@@ -498,6 +516,15 @@ function CaptureWizard({ projectId }: { projectId: string }) {
                 {directCount} of {selectedFiles.length} file(s) are over{' '}
                 {formatBytes(DIRECT_UPLOAD_MIN_BYTES)} and will upload straight to storage. The
                 server still checks the type and size afterwards and discards anything that fails.
+                {resumableCount ? (
+                  <>
+                    {' '}
+                    {resumableCount} of those {resumableCount === 1 ? 'is' : 'are'} over{' '}
+                    {formatBytes(RESUMABLE_UPLOAD_MIN_BYTES)} and{' '}
+                    {resumableCount === 1 ? 'goes' : 'go'} up in parts, so losing the connection
+                    costs one part rather than the whole transfer.
+                  </>
+                ) : null}
               </p>
             ) : null}
 
@@ -505,7 +532,12 @@ function CaptureWizard({ projectId }: { projectId: string }) {
               <div className="rounded border border-line px-3 py-2">
                 <div className="flex items-baseline justify-between gap-2 text-xs">
                   <span className="min-w-0 truncate text-ink">
-                    {progress.route === 'direct' ? 'Uploading to storage' : 'Uploading'} ·{' '}
+                    {progress.route === 'resumable'
+                      ? 'Uploading in parts'
+                      : progress.route === 'direct'
+                        ? 'Uploading to storage'
+                        : 'Uploading'}{' '}
+                    ·{' '}
                     {progress.filename}
                   </span>
                   <span className="tnum shrink-0 text-ink-subtle">

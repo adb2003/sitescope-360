@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO
 from app.core.config import settings
 from app.core.errors import NotFoundError, SiteScopeError
 from app.storage.base import StoredObject, validate_key
+from app.storage.multipart import ReceivedPart
 
 if TYPE_CHECKING:  # pragma: no cover
     pass
@@ -148,3 +149,85 @@ class S3Storage:
             ExpiresIn=int(ttl_seconds or settings.storage_url_ttl_seconds),
         )
         return url
+
+    # ---- chunked uploads -------------------------------------------------
+    def begin_multipart(self, key: str, content_type: str) -> str:
+        validate_key(key)
+        response = self._client.create_multipart_upload(
+            Bucket=self.bucket, Key=key, ContentType=content_type
+        )
+        upload_id: str = response["UploadId"]
+        return upload_id
+
+    def signed_part_url(
+        self, key: str, upload_id: str, part_number: int, ttl_seconds: int | None = None
+    ) -> tuple[str, dict[str, str]]:
+        """A presigned ``UploadPart``.
+
+        No headers come back with it, and that is the point: a part has no content type of its
+        own — the object's was fixed when the upload was created — so nothing beyond the key,
+        the upload id and the part number is signed. A client that adds headers is not fighting
+        the signature, which is one fewer way for a long transfer to fail at part 200.
+        """
+        validate_key(key)
+        url: str = self._client.generate_presigned_url(
+            "upload_part",
+            Params={
+                "Bucket": self.bucket,
+                "Key": key,
+                "UploadId": upload_id,
+                "PartNumber": int(part_number),
+            },
+            ExpiresIn=int(ttl_seconds or settings.storage_url_ttl_seconds),
+        )
+        return url, {}
+
+    def _parts(self, key: str, upload_id: str) -> list[dict[str, Any]]:
+        """Every part S3 is holding, paginated — `list_parts` returns 1000 at a time."""
+        paginator = self._client.get_paginator("list_parts")
+        found: list[dict[str, Any]] = []
+        for page in paginator.paginate(Bucket=self.bucket, Key=key, UploadId=upload_id):
+            found.extend(page.get("Parts", []))
+        found.sort(key=lambda part: int(part["PartNumber"]))
+        return found
+
+    def list_multipart_parts(self, key: str, upload_id: str) -> list[ReceivedPart]:
+        validate_key(key)
+        try:
+            parts = self._parts(key, upload_id)
+        except Exception as exc:
+            raise NotFoundError("That upload has expired or was never started") from exc
+        return [
+            ReceivedPart(part_number=int(part["PartNumber"]), size_bytes=int(part["Size"]))
+            for part in parts
+        ]
+
+    def complete_multipart(self, key: str, upload_id: str, content_type: str) -> StoredObject:
+        validate_key(key)
+        parts = self._parts(key, upload_id)
+        if not parts:
+            raise NotFoundError("No parts were uploaded for that upload id")
+        # The ETags are S3's own, read back rather than taken from the client. A client-supplied
+        # ETag is a claim about bytes the server has not seen; this is the bytes it is holding.
+        self._client.complete_multipart_upload(
+            Bucket=self.bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={
+                "Parts": [
+                    {"ETag": part["ETag"], "PartNumber": int(part["PartNumber"])} for part in parts
+                ]
+            },
+        )
+        return StoredObject(key=key, size_bytes=self.size(key), content_type=content_type)
+
+    def abort_multipart(self, key: str, upload_id: str) -> None:
+        validate_key(key)
+        # Suppressed because this runs on the failure path. S3 keeps charging for the parts of an
+        # upload that is neither completed nor aborted, so a bucket lifecycle rule
+        # (`AbortIncompleteMultipartUpload`) is the backstop for the cases this cannot reach --
+        # a client that simply stops calling.
+        try:
+            self._client.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)
+        except Exception:
+            return

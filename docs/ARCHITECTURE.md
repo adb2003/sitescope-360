@@ -219,6 +219,8 @@ box. Two of them have more than one answer, covered underneath:
   frontend/, mobile/              storage/{local,s3}.py
   proxied:  POST /captures/{id}/upload      (validated before the bytes land)
   direct:   POST /captures/{id}/upload-url  → client PUT → POST /captures/{id}/files
+  chunked:  POST /captures/{id}/multipart   → a PUT per part → .../multipart/complete
+                                              (resumable; .../multipart/resume)
                                         │
                                 POST /captures/{id}/process
                                    services/captures.py
@@ -290,12 +292,68 @@ With `local` storage the PUT target is `PUT /api/files/{key}`, signed the same w
 except the HMAC covers the verb. Without that domain separation every asset URL ever handed to a
 browser would also authorise overwriting the object it points at.
 
-The web app chooses per file, in `frontend/src/lib/uploadStrategy.ts`: over 32 MiB goes direct,
-at or under it stays proxied. The threshold sits above any panorama this app produces and below
-any walkthrough video, so the common upload keeps content de-duplication and only the transfers
-that would tie up a worker for minutes give it up. The offline retry queue routes by the same
-rule — when it did not, a failed large upload was re-queued and then retried *through* the API,
-which is the one transfer the route exists to keep off it.
+#### The third route: chunked and resumable
+
+`POST /captures/{id}/multipart` → a signed PUT per part → `/multipart/complete` exists for the
+failure the other two share: they are all-or-nothing. A two-gigabyte walkthrough that drops at
+ninety percent has to be sent again from zero, over the connection that has just proved it
+cannot hold — and the operator who walked the floor is the one who waits.
+
+The part numbers, sizes and limits are S3's, stated once in `storage/multipart.py`: every part
+but the last at least 5 MiB, at most 10,000 parts, the object being their concatenation in
+order. The default part size is 8 MiB and grows when a file would otherwise exceed the part
+limit, because a plan with 12,000 parts is rejected by S3 at part 10,001 — after hours of
+transfer.
+
+Two decisions carry the design:
+
+**The server enumerates the parts.** `list_parts` on S3, a directory listing under
+`staging/{upload_id}/` locally. A client that crashed mid-upload has no record of what
+succeeded, and the only component that does is the storage backend — so "resumable" is a
+behaviour rather than a word. It also removes a class of mistake, since a part the client
+*believes* it sent cannot become part of the object unless the bytes are really there.
+
+**A gap is refused, not assembled.** S3 completes an upload out of exactly the parts it is
+given, so parts 1, 2 and 4 produce a real object: shorter than the original, decodable for the
+first two thirds, and wrong in a way no size cap or magic-byte sniff downstream can detect. The
+client therefore declares `size_bytes`, the server derives the part plan from it, and completion
+checks the landed parts against that plan. The same declaration is what lets an oversized upload
+be refused *before* any bytes move, which the presigned single PUT cannot do at all.
+
+Locally, parts are ordinary objects under a staging prefix, which is what lets them reuse the
+signed `PUT /api/files/{key}` route unchanged. The prefix deliberately sits outside the project
+tree, so a part can never satisfy the "does this key belong to that session" check applied to a
+finished object. `LocalStorage.purge_stale_uploads` is the filesystem's substitute for a bucket
+lifecycle rule; on S3, `AbortIncompleteMultipartUpload` is the backstop for a client that simply
+stops calling.
+
+#### Which route a file takes
+
+Both clients choose per file, by size alone, and by the same rule
+(`frontend/src/lib/uploadStrategy.ts`, `mobile/src/lib/uploadPlan.ts`):
+
+| Size | Route | What it buys, and what it gives up |
+| --- | --- | --- |
+| ≤ 32 MiB | proxied | Validation before storage and checksum de-duplication; holds a worker. |
+| ≤ 64 MiB | direct | Frees the worker; a failed attempt re-sends up to 64 MiB. |
+| > 64 MiB | chunked | A failed attempt re-sends one part; costs two extra round trips. |
+
+32 MiB sits above any panorama this app produces and below any walkthrough video. 64 MiB is
+roughly four minutes on a couple of megabits, which is about the longest single attempt worth
+re-sending from the start.
+
+Both offline queues route by the same rule — when the web one did not, a failed large upload was
+re-queued and then retried *through* the API, which is the one transfer the route exists to keep
+off it. Both also **persist the upload id next to the file** (IndexedDB in the browser, a column
+on the SQLite queue on the phone), so an interrupted chunked upload continues from the last part
+that landed rather than starting over. Losing that handle would leave the parts in storage
+unreachable and still billable, and make the route two round trips more expensive than the one
+it replaced.
+
+React Native has no `Blob.slice` for a file on disk, so `mobile/src/lib/uploadIO.ts` reads each
+part's byte range out and writes it to a temporary file before streaming it. One part exists
+briefly as a base64 string; the cost is bounded by the part size rather than the file size,
+which is the trade being made.
 
 **Deploying the direct route on S3 needs a bucket CORS policy.** The PUT is issued by the
 browser, cross-origin, with a `Content-Type` header, so it is preflighted. In development

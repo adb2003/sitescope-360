@@ -111,6 +111,66 @@ class DirectUploadTicketOut(BaseModel):
     expires_in: int
 
 
+class MultipartUploadRequest(BaseModel):
+    """Ask to upload one file in pieces.
+
+    ``size_bytes`` is mandatory, unlike on the single-PUT route. The part boundaries are derived
+    from it and both ends must derive the same ones — a client that sends the byte ranges of a
+    different plan than the server assembles produces a corrupt object out of two sets of
+    perfectly valid parts.
+    """
+
+    filename: Annotated[str, Field(min_length=1, max_length=400)]
+    size_bytes: Annotated[int, Field(gt=0)]
+    content_type: str | None = None
+
+
+class MultipartResumeRequest(BaseModel):
+    """Come back to an upload already in flight, after a crash or an expired link."""
+
+    storage_key: str
+    upload_id: Annotated[str, Field(min_length=1, max_length=400)]
+    filename: Annotated[str, Field(min_length=1, max_length=400)]
+    size_bytes: Annotated[int, Field(gt=0)]
+
+
+class MultipartCompleteRequest(MultipartResumeRequest):
+    """Every part has been sent; assemble and adopt the object."""
+
+
+class UploadPartOut(BaseModel):
+    """Where one part goes, and how big it must be.
+
+    ``size_bytes`` is not advice. It is the length of the byte range the server will treat as
+    this part, so a client that sends a different amount has silently changed where every later
+    part begins.
+    """
+
+    part_number: int
+    upload_url: str
+    method: str = "PUT"
+    headers: dict[str, str] = Field(default_factory=dict)
+    size_bytes: int
+
+
+class MultipartTicketOut(BaseModel):
+    """The plan for a chunked upload, and what is left of it.
+
+    ``received`` and ``parts`` are complements: the part numbers storage is already holding, and
+    a URL for each one that still has to be sent. On a fresh upload the first is empty; on a
+    resume it is the answer to the only question a recovering client cannot answer for itself.
+    """
+
+    storage_key: str
+    upload_id: str
+    part_size: int
+    part_count: int
+    total_bytes: int
+    received: list[int] = Field(default_factory=list)
+    parts: list[UploadPartOut] = Field(default_factory=list)
+    expires_in: int
+
+
 class DirectUploadRegistration(BaseModel):
     """Tell the server the bytes have landed, so it can check them and take ownership."""
 

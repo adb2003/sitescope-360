@@ -16,7 +16,12 @@
 
 import { useCallback, useEffect, useState } from 'react'
 
-import { uploadOne } from '@/lib/uploads'
+import {
+  ResumableUploadInterrupted,
+  abandonUpload,
+  uploadOne,
+  type ResumeHandle,
+} from '@/lib/uploads'
 
 const DB_NAME = 'sitescope-uploads'
 const DB_VERSION = 1
@@ -31,6 +36,15 @@ export interface QueuedUpload {
   queuedAt: number
   attempts: number
   blob: Blob
+  /**
+   * A chunked upload this file already has parts uploaded for.
+   *
+   * Stored alongside the blob, and for the same reason: the queue exists because a capture that
+   * only lives on one device must survive a reload, and half a transfer is worth surviving too.
+   * Without this the parts of an interrupted 2 GiB upload would still be in storage — billable,
+   * unreachable, and re-sent from the beginning on the next attempt.
+   */
+  resume?: ResumeHandle
 }
 
 export interface UploadQueueState {
@@ -124,12 +138,17 @@ export function useUploadQueue(sessionId: string | null): UploadQueueState {
         // ones most likely to have failed — back on a worker for minutes each.
         const file = new File([item.blob], item.name, { type: item.type })
         try {
-          await uploadOne(item.sessionId, file)
+          await uploadOne(item.sessionId, file, undefined, item.resume)
           await remove(item.id)
-        } catch {
+        } catch (error) {
           // Leave it queued and stop: if this one failed, the next will too. Recording the
           // attempt lets the UI show that it is being retried rather than ignored.
-          await put({ ...item, attempts: item.attempts + 1 })
+          //
+          // A chunked upload also leaves behind its handle, so the next drain continues from the
+          // last part that landed. Dropping it here is the failure this whole route was built to
+          // remove: the retry would succeed, slowly, having re-sent everything.
+          const resume = error instanceof ResumableUploadInterrupted ? error.resume : item.resume
+          await put({ ...item, attempts: item.attempts + 1, resume })
           break
         }
       }
@@ -164,7 +183,19 @@ export function useUploadQueue(sessionId: string | null): UploadQueueState {
   const clear = useCallback(() => {
     void (async () => {
       const pending = await readAll(sessionId)
-      for (const item of pending) await remove(item.id)
+      for (const item of pending) {
+        // A chunked upload has parts sitting in storage. They are not objects — nothing lists
+        // them and nothing else in the app will ever look for them again — so if the local
+        // record goes without telling the server, those bytes are stranded and, on S3, billed
+        // for indefinitely. Best effort: the queue entry is discarded either way, because the
+        // operator asked for it.
+        if (item.resume) {
+          await abandonUpload(item.sessionId, item.name, item.size, item.resume).catch(
+            () => undefined,
+          )
+        }
+        await remove(item.id)
+      }
       await refresh()
     })()
   }, [sessionId, refresh])

@@ -317,6 +317,33 @@ export interface DirectUploadTicket {
   expires_in: number
 }
 
+/** Where one chunk of a resumable upload goes. `size_bytes` is the exact slice to send. */
+export interface UploadPart {
+  part_number: number
+  upload_url: string
+  method: string
+  headers: Record<string, string>
+  size_bytes: number
+}
+
+/**
+ * The plan for a chunked upload, and how much of it is left.
+ *
+ * `received` and `parts` are complements — the part numbers storage already holds, and a URL for
+ * each one still to send. On a resume the first is the answer to the question a client that
+ * crashed mid-upload cannot answer for itself.
+ */
+export interface MultipartTicket {
+  storage_key: string
+  upload_id: string
+  part_size: number
+  part_count: number
+  total_bytes: number
+  received: number[]
+  parts: UploadPart[]
+  expires_in: number
+}
+
 /** A capture point near a plan coordinate, with how far away it actually was. */
 export interface NearestCaptureLocation {
   location: CaptureLocation

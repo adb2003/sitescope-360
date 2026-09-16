@@ -55,9 +55,14 @@ from app.schemas.capture import (
     DirectUploadRequest,
     DirectUploadTicketOut,
     FrameAssignLocation,
+    MultipartCompleteRequest,
+    MultipartResumeRequest,
+    MultipartTicketOut,
+    MultipartUploadRequest,
     ProcessingJobOut,
     ProcessingStatus,
     ProcessRequest,
+    UploadPartOut,
     ViewerManifest,
 )
 from app.schemas.common import Message, Page
@@ -293,6 +298,128 @@ def create_direct_upload_url(
         headers=ticket.headers,
         expires_in=ticket.expires_in,
     )
+
+
+def _ticket_out(ticket: capture_service.MultipartTicket) -> MultipartTicketOut:
+    return MultipartTicketOut(
+        storage_key=ticket.storage_key,
+        upload_id=ticket.upload_id,
+        part_size=ticket.part_size,
+        part_count=ticket.part_count,
+        total_bytes=ticket.total_bytes,
+        received=ticket.received,
+        parts=[
+            UploadPartOut(
+                part_number=part.part_number,
+                upload_url=part.upload_url,
+                headers=part.headers,
+                size_bytes=part.size_bytes,
+            )
+            for part in ticket.parts
+        ],
+        expires_in=ticket.expires_in,
+    )
+
+
+@router.post("/captures/{session_id}/multipart", response_model=MultipartTicketOut)
+def start_multipart_upload(
+    session_id: str,
+    payload: MultipartUploadRequest,
+    db: DbSession,
+    _: RequireUpload,
+) -> MultipartTicketOut:
+    """Begin a chunked upload and get a signed URL for every part (§7, §32).
+
+    The third of three upload routes. `/upload` streams through the API and validates before
+    anything is stored; `/upload-url` hands over one presigned PUT; this cuts the file into
+    parts so that a connection that drops costs one part rather than the whole transfer — which
+    on a site uplink is the difference between a walkthrough that eventually arrives and one
+    that never does.
+    """
+    session = get_session_or_404(db, session_id)
+    return _ticket_out(
+        capture_service.prepare_multipart_upload(
+            db,
+            session,
+            filename=payload.filename,
+            size_bytes=payload.size_bytes,
+            content_type=payload.content_type,
+        )
+    )
+
+
+@router.post("/captures/{session_id}/multipart/resume", response_model=MultipartTicketOut)
+def resume_multipart_upload(
+    session_id: str,
+    payload: MultipartResumeRequest,
+    db: DbSession,
+    _: RequireUpload,
+) -> MultipartTicketOut:
+    """Which parts landed, and fresh URLs for the ones that did not.
+
+    A POST rather than a GET despite reading nothing, because the identifiers it needs — a
+    storage key and an upload id — are long, and putting them in a query string writes them into
+    every access log and proxy cache between here and the client.
+    """
+    session = get_session_or_404(db, session_id)
+    return _ticket_out(
+        capture_service.resume_multipart_upload(
+            session,
+            storage_key=payload.storage_key,
+            upload_id=payload.upload_id,
+            filename=payload.filename,
+            size_bytes=payload.size_bytes,
+        )
+    )
+
+
+@router.post(
+    "/captures/{session_id}/multipart/complete",
+    response_model=CaptureFileOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def finish_multipart_upload(
+    session_id: str,
+    payload: MultipartCompleteRequest,
+    db: DbSession,
+    _: RequireUpload,
+) -> CaptureFileOut:
+    """Assemble the parts and take ownership, or refuse and leave them where they are.
+
+    The object does not exist until this returns. An upload missing a part is rejected without
+    assembling anything, so the client can resume rather than having to start over — which would
+    make the resumable route no better than the one it replaces at the only moment it matters.
+    """
+    session = get_session_or_404(db, session_id)
+    record = capture_service.complete_multipart_upload(
+        db,
+        session,
+        storage_key=payload.storage_key,
+        upload_id=payload.upload_id,
+        filename=payload.filename,
+        size_bytes=payload.size_bytes,
+    )
+    return CaptureFileOut.model_validate(record)
+
+
+@router.post("/captures/{session_id}/multipart/abort", response_model=Message)
+def abort_multipart_upload(
+    session_id: str,
+    payload: MultipartResumeRequest,
+    db: DbSession,
+    _: RequireUpload,
+) -> Message:
+    """Discard an abandoned chunked upload.
+
+    Parts are not objects: they do not show up in a listing, nothing else in this application
+    looks for them, and on S3 they are billed until something says otherwise. So giving up needs
+    to be an action a client can take, not just something it does by going quiet.
+    """
+    session = get_session_or_404(db, session_id)
+    capture_service.abort_multipart_upload(
+        session, storage_key=payload.storage_key, upload_id=payload.upload_id
+    )
+    return Message(message="Upload discarded")
 
 
 @router.post(

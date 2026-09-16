@@ -238,6 +238,10 @@ explains that it cannot be used for pixel placement until rasterised.
 | POST | `/captures/{id}/upload` | Multipart upload of one or more files, validated as they stream. |
 | POST | `/captures/{id}/upload-url` | Signed URL to PUT one file straight to storage (large videos). |
 | POST | `/captures/{id}/files` | Register a directly-uploaded object, after the server inspects it. |
+| POST | `/captures/{id}/multipart` | Start a chunked upload; returns a signed URL per part. |
+| POST | `/captures/{id}/multipart/resume` | Which parts landed, plus fresh URLs for the rest. |
+| POST | `/captures/{id}/multipart/complete` | Assemble the parts and register the object. |
+| POST | `/captures/{id}/multipart/abort` | Discard an abandoned chunked upload. |
 | GET | `/captures/{id}/files` | File metadata: EXIF, GPS, camera, dimensions, validation. |
 | DELETE | `/captures/{id}/files/{file_id}` | Remove one uploaded file. |
 | POST | `/captures/{id}/process` | Queue the pipeline. Returns immediately. |
@@ -255,6 +259,25 @@ not occupy an API worker for the length of the transfer; the server then checks 
 the stored object at `/files` and **deletes anything that fails**. The direct route has no
 content checksum (computing one would mean reading the object back), so retries are idempotent by
 key and `checksum_sha256` is null rather than unverified.
+
+`/multipart` is the direct route cut into pieces, and it exists for one failure: a walkthrough
+video that drops at ninety percent. A single PUT is one unit of retry, so that drop costs the
+whole transfer, over the connection that has just proved it cannot hold. Here each part is its
+own PUT (8 MiB by default, larger when the file would otherwise need more than S3's 10,000
+parts), and a client that comes back asks `/multipart/resume` which parts survived.
+
+Two details are load-bearing. **The server enumerates the parts** — `list_parts` on S3, a
+directory listing locally — rather than trusting a client's list of ETags, which is what makes a
+resume possible for a client that crashed and remembers nothing. And **a gap is refused**: S3
+completes an upload out of whatever parts it is given, so parts 1, 2 and 4 would assemble into a
+real object that is shorter than the original and passes every check downstream. `size_bytes` is
+therefore required at both ends — it is where the part boundaries come from, and a client that
+declares a different size slices the file somewhere the server will not reassemble it.
+
+Both clients route by size: proxied up to 32 MiB, one direct PUT up to 64 MiB, chunked above
+that (`frontend/src/lib/uploadStrategy.ts`, `mobile/src/lib/uploadPlan.ts`). The offline queues
+on both sides persist the upload id alongside the file, so an interrupted upload continues on
+the next drain instead of starting over.
 
 `POST /captures` accepts `client_session_id`, making creation **idempotent** — an offline mobile
 client keeps the id it generated, so a retried request returns the existing session rather than a

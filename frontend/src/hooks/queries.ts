@@ -18,8 +18,8 @@ import {
 } from '@tanstack/react-query'
 
 import { api, type QueryValue } from '@/lib/api'
-import { planUploads, type UploadRoute } from '@/lib/uploadStrategy'
-import { uploadDirect, uploadProxied } from '@/lib/uploads'
+import { planUploads, routeFor, type UploadRoute } from '@/lib/uploadStrategy'
+import { uploadOne, uploadProxied } from '@/lib/uploads'
 import { isSessionInFlight } from '@/components/status'
 import type {
   Annotation,
@@ -562,10 +562,11 @@ export interface UploadProgress {
  * Upload a selection, sending each file by whichever route suits its size.
  *
  * Small files keep the proxied route, which validates before storing and de-duplicates by
- * checksum. Anything over `DIRECT_UPLOAD_MIN_BYTES` goes straight to object storage instead of
- * occupying an API worker for the length of the transfer — see `lib/uploadStrategy.ts`.
+ * checksum. Larger ones go to object storage directly rather than occupying an API worker for the
+ * length of the transfer, and the largest go in parts so a dropped connection costs one part —
+ * see `lib/uploadStrategy.ts` for where the boundaries fall and why.
  *
- * Direct files are sent one at a time rather than concurrently. Two 500 MB uploads racing over a
+ * Large files are sent one at a time rather than concurrently. Two 500 MB uploads racing over a
  * site connection finish no sooner together than in sequence, and in sequence the operator can be
  * told which file is moving and how far along it is.
  */
@@ -576,7 +577,7 @@ export function useUploadCaptureFiles(
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (files: File[]): Promise<CaptureFileDetail[]> => {
-      const { proxied, direct } = planUploads(files)
+      const { proxied, streamed } = planUploads(files)
       const uploaded: CaptureFileDetail[] = []
       let done = 0
 
@@ -595,19 +596,22 @@ export function useUploadCaptureFiles(
         done = proxied.length
       }
 
-      for (const file of direct) {
+      for (const file of streamed) {
         done += 1
+        const route = routeFor(file.size)
         const report = (transferred: number, total: number) =>
           onProgress?.({
             filename: file.name,
-            route: 'direct',
+            route,
             index: done,
             count: files.length,
             transferred,
             total,
           })
         report(0, file.size)
-        uploaded.push(await uploadDirect(sessionId, file, report))
+        // `uploadOne` picks direct or resumable from the same rule `route` was read from, so the
+        // label the operator sees cannot drift from the route actually taken.
+        uploaded.push(await uploadOne(sessionId, file, report))
       }
 
       return uploaded

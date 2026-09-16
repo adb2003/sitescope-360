@@ -12,7 +12,7 @@
 
 import { ApiError, api, putSignedUpload } from '@/lib/api'
 import { routeFor } from '@/lib/uploadStrategy'
-import type { CaptureFileDetail, DirectUploadTicket } from '@/types/api'
+import type { CaptureFileDetail, DirectUploadTicket, MultipartTicket } from '@/types/api'
 
 /** Called repeatedly during a transfer. `total` is the file size, not the selection's. */
 export type TransferProgress = (transferred: number, total: number) => void
@@ -54,13 +54,144 @@ export async function uploadDirect(
   })
 }
 
-/** One file, by whichever route its size calls for. */
+/** Enough to pick a chunked upload back up: the object it is for, and which upload it is. */
+export interface ResumeHandle {
+  storage_key: string
+  upload_id: string
+}
+
+/**
+ * A chunked upload that stopped part way, carrying what is needed to continue it.
+ *
+ * Thrown instead of the underlying error because the error alone is not enough. The parts that
+ * did land are sitting in storage under an id that only this attempt knows, and if that id is
+ * lost the bytes are unreachable *and* still billable — the caller has to start over, which is
+ * exactly the cost the route exists to avoid. So the handle travels with the failure.
+ */
+export class ResumableUploadInterrupted extends Error {
+  readonly resume: ResumeHandle
+
+  constructor(resume: ResumeHandle, cause: unknown) {
+    super(cause instanceof Error ? cause.message : 'The upload was interrupted')
+    this.name = 'ResumableUploadInterrupted'
+    this.resume = resume
+    this.cause = cause
+  }
+}
+
+/**
+ * Send one file in parts, so that a dropped connection costs one part rather than the transfer.
+ *
+ * The server decides where the cuts fall and hands back a URL per part; this slices the `File`
+ * to match. `File.slice` is a view, not a copy — the bytes are read from disk as the request
+ * streams — so a two-gigabyte upload never becomes two gigabytes of JavaScript heap.
+ *
+ * Parts go up one at a time. Browsers cap concurrent connections per origin anyway, and serially
+ * the byte counter only ever moves forwards, which is what the operator is watching.
+ *
+ * Failures are the interesting case. Nothing is retried here; instead the identifiers leave with
+ * the error, as a {@link ResumableUploadInterrupted}, so the caller — the offline queue, normally
+ * — can come back later, ask which parts survived, and send only the rest. Swallowing them would
+ * quietly turn this back into an all-or-nothing upload that merely costs more round trips.
+ */
+export async function uploadResumable(
+  sessionId: string,
+  file: File,
+  onProgress?: TransferProgress,
+  resume?: ResumeHandle,
+): Promise<CaptureFileDetail> {
+  const body = { filename: file.name, size_bytes: file.size }
+
+  let ticket: MultipartTicket
+  if (resume) {
+    try {
+      ticket = await api.post<MultipartTicket>(`/captures/${sessionId}/multipart/resume`, {
+        ...body,
+        ...resume,
+      })
+    } catch (error) {
+      // The upload is gone: aborted, expired, or completed into an object the server then
+      // rejected and deleted. Retrying the resume would fail identically for ever, so the only
+      // way forward is a fresh upload — the file is still here, which is the whole point of the
+      // queue holding it.
+      if (!(error instanceof ApiError) || error.status !== 404) throw error
+      return uploadResumable(sessionId, file, onProgress)
+    }
+  } else {
+    ticket = await api.post<MultipartTicket>(`/captures/${sessionId}/multipart`, {
+      ...body,
+      content_type: file.type || undefined,
+    })
+  }
+
+  const handle: ResumeHandle = { storage_key: ticket.storage_key, upload_id: ticket.upload_id }
+
+  // Parts already in storage are progress the operator has earned; counting from zero on a resume
+  // would show the bar going backwards for an upload that is in fact nearly done.
+  let sent = Math.min((ticket.part_count - ticket.parts.length) * ticket.part_size, file.size)
+  onProgress?.(sent, file.size)
+
+  try {
+    for (const part of ticket.parts) {
+      const start = (part.part_number - 1) * ticket.part_size
+      // A view, not a copy: the bytes are read from disk as the request streams, so a
+      // two-gigabyte upload never becomes two gigabytes of JavaScript heap.
+      const slice = file.slice(start, start + part.size_bytes)
+      const before = sent
+      await putSignedUpload(part.upload_url, slice, part.headers, (transferred) =>
+        onProgress?.(Math.min(before + transferred, file.size), file.size),
+      )
+      sent = Math.min(before + part.size_bytes, file.size)
+      onProgress?.(sent, file.size)
+    }
+
+    return await api.post<CaptureFileDetail>(`/captures/${sessionId}/multipart/complete`, {
+      ...body,
+      ...handle,
+    })
+  } catch (error) {
+    throw new ResumableUploadInterrupted(handle, error)
+  }
+}
+
+/**
+ * Tell the server to throw away a chunked upload nobody is going to finish.
+ *
+ * Worth a call of its own because the parts are invisible: they are not objects, so they appear
+ * in no listing, nothing else in this application looks for them, and on S3 they are billed
+ * until something says otherwise. Giving up has to be something a client *does*, not just
+ * something it stops doing.
+ */
+export async function abandonUpload(
+  sessionId: string,
+  filename: string,
+  sizeBytes: number,
+  resume: ResumeHandle,
+): Promise<void> {
+  await api.post(`/captures/${sessionId}/multipart/abort`, {
+    ...resume,
+    filename,
+    size_bytes: sizeBytes,
+  })
+}
+
+/**
+ * One file, by whichever route its size calls for.
+ *
+ * `resume` is only meaningful for the chunked route, and is only ever something a previous
+ * attempt handed back. It is accepted here rather than only on `uploadResumable` so a caller
+ * retrying a queued file does not have to re-derive which route that file takes — getting that
+ * wrong would silently abandon the parts already uploaded.
+ */
 export async function uploadOne(
   sessionId: string,
   file: File,
   onProgress?: TransferProgress,
+  resume?: ResumeHandle,
 ): Promise<CaptureFileDetail> {
-  if (routeFor(file.size) === 'direct') return uploadDirect(sessionId, file, onProgress)
+  const route = routeFor(file.size)
+  if (route === 'resumable') return uploadResumable(sessionId, file, onProgress, resume)
+  if (route === 'direct') return uploadDirect(sessionId, file, onProgress)
 
   const [created] = await uploadProxied(sessionId, [file])
   if (!created) {

@@ -1,7 +1,7 @@
 /**
- * Which of the two upload routes a file should take.
+ * Which of the three upload routes a file should take.
  *
- * Both routes end with the same `CaptureFile` row, and they trade against each other:
+ * All three end with the same `CaptureFile` row, and they trade against each other:
  *
  * - **Proxied** (`POST /captures/{id}/upload`) streams the body through the API, which checks the
  *   magic bytes and the size cap *before* anything is stored and collapses identical bytes by
@@ -11,9 +11,12 @@
  *   fails, so the guarantees survive — but there is no content checksum, because computing one
  *   would mean reading the object back, which is the cost the route exists to avoid. Uploading
  *   the same file twice therefore produces two rows where the proxied route produces one.
+ * - **Resumable** (`multipart` → a `PUT` per part → `complete`) is the direct route cut into
+ *   pieces. It costs two extra round trips and buys the only thing that matters on a site
+ *   connection: the unit of retry stops being the file. A transfer that drops re-sends one part.
  *
- * So the rule is about size and nothing else: below the threshold the proxied route's stronger
- * guarantees are worth a few seconds of a worker; above it, they are not worth minutes of one.
+ * So the rule is about size and nothing else, and both boundaries answer the same question —
+ * what is the largest amount of work worth losing when the connection goes?
  */
 
 /**
@@ -27,17 +30,39 @@
  */
 export const DIRECT_UPLOAD_MIN_BYTES = 32 * 1024 * 1024
 
-export type UploadRoute = 'proxied' | 'direct'
+/**
+ * Above this, a file is uploaded in parts.
+ *
+ * Chosen as the most transfer worth throwing away. A site uplink of a couple of megabits — which
+ * is an ordinary day on a half-built floor — moves 64 MiB in roughly four minutes, and four
+ * minutes is about as long as a failed attempt can be before re-sending it from the start stops
+ * being an inconvenience and starts being the reason the walkthrough never arrives. Below it the
+ * two extra round trips a chunked upload costs buy nothing.
+ */
+export const RESUMABLE_UPLOAD_MIN_BYTES = 64 * 1024 * 1024
 
-export function routeFor(sizeBytes: number, threshold = DIRECT_UPLOAD_MIN_BYTES): UploadRoute {
-  // Strictly greater: a file exactly at the threshold keeps the stronger guarantees. The boundary
-  // has to fall on one side deliberately, or it lands wherever the comparison happened to be
-  // written.
+export type UploadRoute = 'proxied' | 'direct' | 'resumable'
+
+export function routeFor(
+  sizeBytes: number,
+  threshold = DIRECT_UPLOAD_MIN_BYTES,
+  resumableThreshold = RESUMABLE_UPLOAD_MIN_BYTES,
+): UploadRoute {
+  // Strictly greater at both boundaries: a file exactly at a threshold keeps the simpler, more
+  // strongly guaranteed route. A boundary has to fall on one side deliberately, or it lands
+  // wherever the comparison happened to be written.
+  if (sizeBytes > resumableThreshold) return 'resumable'
   return sizeBytes > threshold ? 'direct' : 'proxied'
 }
 
 /**
- * Split a selection into the two routes, preserving the order the operator chose.
+ * Split a selection by how it has to be *sent*, preserving the order the operator chose.
+ *
+ * Two groups rather than three, because the difference that matters here is not which route a
+ * file takes but whether it can share a request. Small files go up together in one multipart
+ * form; everything else goes one at a time, each picking direct or resumable for itself. Two
+ * large uploads racing over a site connection finish no sooner together than in sequence, and in
+ * sequence the operator can be told which file is moving.
  *
  * Order is kept because the upload is reported back to them file by file; re-ordering would make
  * the progress line disagree with the list on screen for no reason.
@@ -45,12 +70,12 @@ export function routeFor(sizeBytes: number, threshold = DIRECT_UPLOAD_MIN_BYTES)
 export function planUploads<T extends { size: number }>(
   files: readonly T[],
   threshold = DIRECT_UPLOAD_MIN_BYTES,
-): { proxied: T[]; direct: T[] } {
+): { proxied: T[]; streamed: T[] } {
   const proxied: T[] = []
-  const direct: T[] = []
+  const streamed: T[] = []
   for (const file of files) {
-    if (routeFor(file.size, threshold) === 'direct') direct.push(file)
-    else proxied.push(file)
+    if (routeFor(file.size, threshold) === 'proxied') proxied.push(file)
+    else streamed.push(file)
   }
-  return { proxied, direct }
+  return { proxied, streamed }
 }

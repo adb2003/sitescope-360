@@ -44,6 +44,13 @@ from app.processing.media import SniffResult, sniff
 from app.schemas.capture import CaptureSessionCreate
 from app.storage import extension_of, get_storage, session_key, session_prefix
 from app.storage.base import validate_key
+from app.storage.multipart import (
+    MIN_PART_BYTES,
+    MultipartStorage,
+    PartPlan,
+    missing_parts,
+    plan_parts,
+)
 
 
 def create_session(db: Session, payload: CaptureSessionCreate, operator: User) -> CaptureSession:
@@ -228,6 +235,31 @@ def _checked_filename(filename: str) -> tuple[str, str]:
     return safe_name, extension
 
 
+def _checked_source_key(
+    session: CaptureSession, storage_key: str, safe_name: str, extension: str
+) -> None:
+    """Confirm a client-supplied key is one *this* session could have been issued.
+
+    Shared by both client-writes-first routes, because the check is the same and getting it
+    wrong in only one of them would be the easiest possible thing to miss.
+    """
+    validate_key(storage_key)
+
+    # Without this a client could name another session's object -- or one of its own *frames* --
+    # as a source file, and the server would happily adopt it.
+    prefix = session_prefix(session.project_id, session.floor_id, session.id, "source")
+    if not storage_key.startswith(prefix + "/"):
+        raise ValidationError("That storage key does not belong to this capture session")
+
+    # The key was minted from this filename's extension, so a mismatch means the client is
+    # naming a different file than it asked for. Pipeline stages stage temp files by the key's
+    # suffix, so letting the two disagree hands a .mp4 to an image decoder.
+    if PurePosixPath(storage_key).suffix.lower() != extension:
+        raise ValidationError(
+            f"{safe_name} does not match the uploaded object's type ({storage_key})"
+        )
+
+
 def prepare_direct_upload(
     db: Session,
     session: CaptureSession,
@@ -270,6 +302,244 @@ def prepare_direct_upload(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class PartTicket:
+    """One part's URL. Only parts the client still has to send get one."""
+
+    part_number: int
+    upload_url: str
+    headers: dict[str, str]
+    size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class MultipartTicket:
+    """A whole chunked upload, as the client needs to see it.
+
+    ``received`` is the resumable half: it is what storage confirms it is already holding, so a
+    client coming back after a crash knows what not to send again. ``parts`` is the complement —
+    the work that remains — which is why the two together are always the full plan.
+    """
+
+    storage_key: str
+    upload_id: str
+    part_size: int
+    part_count: int
+    total_bytes: int
+    received: list[int]
+    parts: list[PartTicket]
+    expires_in: int
+
+
+def _multipart_storage() -> MultipartStorage:
+    storage = get_storage()
+    if not isinstance(storage, MultipartStorage):
+        raise ValidationError(
+            f"The {storage.name} storage backend does not support chunked uploads; "
+            "request a single upload URL instead."
+        )
+    return storage
+
+
+def _ticket(
+    storage: MultipartStorage,
+    *,
+    storage_key: str,
+    upload_id: str,
+    plan: PartPlan,
+    wanted: list[int],
+    received: list[int],
+) -> MultipartTicket:
+    parts: list[PartTicket] = []
+    for number in wanted:
+        url, headers = storage.signed_part_url(storage_key, upload_id, number)
+        parts.append(
+            PartTicket(
+                part_number=number,
+                upload_url=url,
+                headers=headers,
+                size_bytes=plan.size_of(number),
+            )
+        )
+
+    return MultipartTicket(
+        storage_key=storage_key,
+        upload_id=upload_id,
+        part_size=plan.part_size,
+        part_count=plan.part_count,
+        total_bytes=plan.total_bytes,
+        received=received,
+        parts=parts,
+        expires_in=settings.storage_url_ttl_seconds,
+    )
+
+
+def prepare_multipart_upload(
+    db: Session,
+    session: CaptureSession,
+    *,
+    filename: str,
+    size_bytes: int,
+    content_type: str | None = None,
+) -> MultipartTicket:
+    """Start a chunked upload and hand back a URL for every part (§7, §32).
+
+    The third upload route, and the one for the case the other two handle badly. A single PUT of
+    a two-gigabyte walkthrough is one unit of retry: if it drops at ninety percent, ninety
+    percent is what has to be sent again, over the connection that just proved it cannot hold.
+    Here each part is its own PUT, so a drop costs one part.
+
+    The size is required rather than inferred because the part plan has to exist before the
+    first byte moves — both ends must agree on where the cut points are, or part 3 from the
+    client is not the range the server will assemble as part 3. It is also the earliest possible
+    place to refuse an oversized upload: after the transfer, all that can be done is delete it.
+    """
+    if session.status is CaptureSessionStatus.CANCELLED:
+        raise ConflictError("This capture session was cancelled")
+    if size_bytes > settings.max_upload_bytes:
+        raise PayloadTooLargeError(
+            f"Upload exceeds the {settings.max_upload_bytes / (1024**3):.1f} GiB limit"
+        )
+
+    safe_name, extension = _checked_filename(filename)
+    storage = _multipart_storage()
+
+    plan = plan_parts(size_bytes)
+    key = _source_key(session, new_id(), extension)
+    upload_id = storage.begin_multipart(key, content_type or "application/octet-stream")
+
+    log_event(
+        "upload.multipart_started",
+        session_id=session.id,
+        storage_key=key,
+        filename=safe_name,
+        parts=plan.part_count,
+        part_size=plan.part_size,
+    )
+    return _ticket(
+        storage,
+        storage_key=key,
+        upload_id=upload_id,
+        plan=plan,
+        wanted=list(range(1, plan.part_count + 1)),
+        received=[],
+    )
+
+
+def resume_multipart_upload(
+    session: CaptureSession,
+    *,
+    storage_key: str,
+    upload_id: str,
+    filename: str,
+    size_bytes: int,
+) -> MultipartTicket:
+    """Ask what landed, and get fresh URLs for what did not.
+
+    Two things expire during a long upload and both end here. The obvious one is the client:
+    an app killed mid-transfer has no record of which parts succeeded, and the only component
+    that does is the storage backend. The less obvious one is the URLs themselves — a signed URL
+    issued for part 200 has a lifetime, and a slow site connection can outlast it, so a resume
+    that only skipped completed parts would still stall on expired links for the rest.
+    """
+    safe_name, extension = _checked_filename(filename)
+    _checked_source_key(session, storage_key, safe_name, extension)
+
+    storage = _multipart_storage()
+    plan = plan_parts(size_bytes)
+    received = storage.list_multipart_parts(storage_key, upload_id)
+
+    return _ticket(
+        storage,
+        storage_key=storage_key,
+        upload_id=upload_id,
+        plan=plan,
+        wanted=missing_parts(received, plan.part_count),
+        received=[part.part_number for part in received],
+    )
+
+
+def complete_multipart_upload(
+    db: Session,
+    session: CaptureSession,
+    *,
+    storage_key: str,
+    upload_id: str,
+    filename: str,
+    size_bytes: int,
+) -> CaptureFile:
+    """Assemble the parts into one object, then adopt it exactly as a direct upload.
+
+    The checks here are about the *shape* of what was uploaded; the checks about its content are
+    :func:`register_direct_upload`'s, and running them a second time would be duplication with
+    two places to drift. So this establishes only what that function cannot see — that the parts
+    form a complete run — and then hands over.
+
+    A gap is refused rather than assembled. S3 completes an upload out of whatever parts it is
+    given, so parts 1, 2 and 4 would produce a real object: shorter than the original, decodable
+    for the first two thirds, and wrong in a way no size check or magic-byte sniff would catch.
+    """
+    if session.status is CaptureSessionStatus.CANCELLED:
+        raise ConflictError("This capture session was cancelled")
+
+    safe_name, extension = _checked_filename(filename)
+    _checked_source_key(session, storage_key, safe_name, extension)
+
+    storage = _multipart_storage()
+    plan = plan_parts(size_bytes)
+    received = storage.list_multipart_parts(storage_key, upload_id)
+
+    absent = missing_parts(received, plan.part_count)
+    if absent:
+        shown = ", ".join(str(number) for number in absent[:10])
+        more = f" and {len(absent) - 10} more" if len(absent) > 10 else ""
+        raise ConflictError(
+            f"{len(absent)} of {plan.part_count} parts have not been uploaded: {shown}{more}"
+        )
+
+    # Caught here rather than at completion because S3 raises `EntityTooSmall` for a short
+    # non-final part -- after the entire transfer has been paid for, and with a message that
+    # says nothing about which part or why.
+    undersized = [
+        part.part_number
+        for part in received
+        if part.part_number < plan.part_count and part.size_bytes < MIN_PART_BYTES
+    ]
+    if undersized:
+        raise ValidationError(
+            f"Parts {undersized[:10]} are below the {MIN_PART_BYTES // (1024 * 1024)} MiB "
+            "minimum; every part but the last must reach it"
+        )
+
+    stored = storage.complete_multipart(
+        storage_key, upload_id, content_type="application/octet-stream"
+    )
+    log_event(
+        "upload.multipart_completed",
+        session_id=session.id,
+        storage_key=storage_key,
+        parts=plan.part_count,
+        size_bytes=stored.size_bytes,
+    )
+    return register_direct_upload(db, session, storage_key=storage_key, filename=safe_name)
+
+
+def abort_multipart_upload(session: CaptureSession, *, storage_key: str, upload_id: str) -> None:
+    """Throw away a chunked upload the client has given up on.
+
+    Worth an endpoint of its own because the parts are billable and invisible: they are not
+    objects, so they do not appear in a listing of the bucket, and nothing else in this
+    application would ever go looking for them.
+    """
+    validate_key(storage_key)
+    prefix = session_prefix(session.project_id, session.floor_id, session.id, "source")
+    if not storage_key.startswith(prefix + "/"):
+        raise ValidationError("That storage key does not belong to this capture session")
+
+    _multipart_storage().abort_multipart(storage_key, upload_id)
+    log_event("upload.multipart_aborted", session_id=session.id, storage_key=storage_key)
+
+
 def register_direct_upload(
     db: Session,
     session: CaptureSession,
@@ -297,21 +567,7 @@ def register_direct_upload(
         raise ConflictError("This capture session was cancelled")
 
     safe_name, extension = _checked_filename(filename)
-    validate_key(storage_key)
-
-    # The key must be one this session could have been issued. Without this a client could
-    # register another session's object -- or one of its own *frames* -- as a source file.
-    prefix = session_prefix(session.project_id, session.floor_id, session.id, "source")
-    if not storage_key.startswith(prefix + "/"):
-        raise ValidationError("That storage key does not belong to this capture session")
-
-    # The key was minted from this filename's extension, so a mismatch means the client is
-    # registering a different file than it asked for. Pipeline stages stage temp files by the
-    # key's suffix, so letting the two disagree hands a .mp4 to an image decoder.
-    if PurePosixPath(storage_key).suffix.lower() != extension:
-        raise ValidationError(
-            f"{safe_name} does not match the uploaded object's type ({storage_key})"
-        )
+    _checked_source_key(session, storage_key, safe_name, extension)
 
     existing = db.scalar(
         select(CaptureFile).where(

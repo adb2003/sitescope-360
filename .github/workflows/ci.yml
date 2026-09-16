@@ -35,10 +35,13 @@ jobs:
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
 
+      # `--locked` asserts that uv.lock is already consistent with pyproject.toml and fails if
+      # it is not, which is the whole reason the lockfile is tracked: without it a dependency
+      # added to pyproject and never locked would install fine here and differ from every
+      # developer's machine. `--frozen` would *also* install from the lock but skips that check,
+      # so drift would pass silently — which is the opposite of the point.
       - name: Install dependencies
-        run: |
-          uv venv --python ${{ env.PYTHON_VERSION }}
-          uv pip install -e ".[dev]"
+        run: uv sync --locked --extra dev --python ${{ env.PYTHON_VERSION }}
 
       - name: Ruff (lint)
         run: uv run ruff check app tests
@@ -93,9 +96,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: |
-          uv venv --python ${{ env.PYTHON_VERSION }}
-          uv pip install -e ".[dev]"
+        run: uv sync --locked --extra dev --python ${{ env.PYTHON_VERSION }}
 
       - name: Apply migrations
         run: uv run alembic upgrade head
@@ -161,11 +162,12 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
+      # No `--extra dev`: this job only imports the enums to regenerate the contracts, and
+      # installing the test and lint toolchain to do it would be a minute of runner time per run
+      # for nothing.
       - name: Install backend
         working-directory: backend
-        run: |
-          uv venv --python ${{ env.PYTHON_VERSION }}
-          uv pip install -e .
+        run: uv sync --locked --python ${{ env.PYTHON_VERSION }}
 
       - name: Check generated contracts
         # `shared/contracts.ts` is generated from the backend enums. A stale copy means the UI

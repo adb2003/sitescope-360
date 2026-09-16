@@ -27,6 +27,7 @@ from app.api.routes import (
     monitoring,
     projects,
     reports,
+    sync,
 )
 
 # `annotations` is aliased: an unaliased import would rebind the name bound by
@@ -218,6 +219,7 @@ app.include_router(monitoring.router, prefix=prefix)
 app.include_router(reports.router, prefix=prefix)
 app.include_router(cameras.router, prefix=prefix)
 app.include_router(admin.router, prefix=prefix)
+app.include_router(sync.router, prefix=prefix)
 app.include_router(files.router, prefix=prefix)
 
 

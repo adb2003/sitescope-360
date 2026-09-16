@@ -1,9 +1,13 @@
 /**
  * The §5 capture workflow: select project → building → floor → zone, start, record, finish.
  *
- * The screen is deliberately usable with no connectivity. The floor list is fetched when online
- * and cached; a session is created **locally first** with a device-generated id, so "Start
- * capture" never waits on the network and never fails because of it.
+ * The screen is deliberately usable with no connectivity, and that now holds for choosing *where*
+ * as well as for recording. The project tree is read from the device's own cache — filled from
+ * `/sync` whenever there is a connection, see `lib/refData.ts` — rather than from three live
+ * requests, which used to stand between the operator and starting a capture on exactly the floors
+ * where there is no signal to answer them. A session is then created **locally first** with a
+ * device-generated id, so "Start capture" never waits on the network and never fails because
+ * of it.
  */
 
 import * as DocumentPicker from 'expo-document-picker'
@@ -22,8 +26,15 @@ import {
 } from '../lib/cameraCapture'
 import { CameraError } from '../lib/osc'
 import { useCamera } from '../lib/useCamera'
-import { api } from '../lib/api'
 import {
+  cachedFloors,
+  cachedProjects,
+  cachedZones,
+  hasCachedReferenceData,
+  syncReferenceData,
+} from '../lib/refData'
+import {
+  QUEUE_IS_AVAILABLE,
   createLocalSession,
   enqueueFile,
   finishLocalSession,
@@ -84,45 +95,50 @@ export function CaptureScreen({
   const [busy, setBusy] = useState(false)
   const [coords, setCoords] = useState<{ latitude: number; longitude: number } | null>(null)
 
-  // ---- reference data (online only) -------------------------------------
-  useEffect(() => {
-    if (!online) return
-    void (async () => {
-      try {
-        const page = await api.get<{ items: Array<{ id: string; name: string; code: string }> }>(
-          '/projects?limit=100',
-        )
-        setProjects(page.items)
-      } catch {
-        // Offline or unauthorised: the operator can still work from a previously chosen floor.
-      }
-    })()
-  }, [online])
+  // ---- reference data, from the device -----------------------------------
+  // Read from the local cache, always. Connectivity refreshes it and is never a precondition:
+  // three live requests used to stand between the operator and starting a capture, on exactly
+  // the floors where there is no signal to answer them.
+  const [refreshedAt, setRefreshedAt] = useState(0)
+  const [neverSynced, setNeverSynced] = useState(false)
 
   useEffect(() => {
-    if (!online || !projectId) return
+    if (!QUEUE_IS_AVAILABLE) return
     void (async () => {
-      try {
-        setFloors(await api.get<Floor[]>(`/projects/${projectId}/floors`))
-      } catch {
-        setFloors([])
-      }
+      setProjects(await cachedProjects())
+      setNeverSynced(!(await hasCachedReferenceData()))
     })()
-  }, [online, projectId])
+  }, [refreshedAt])
 
   useEffect(() => {
-    if (!online || !floorId) {
+    if (!QUEUE_IS_AVAILABLE || !projectId) {
+      setFloors([])
+      return
+    }
+    void (async () => setFloors(await cachedFloors(projectId)))()
+  }, [projectId, refreshedAt])
+
+  useEffect(() => {
+    if (!QUEUE_IS_AVAILABLE || !floorId) {
       setZones([])
       return
     }
+    void (async () => setZones(await cachedZones(floorId)))()
+  }, [floorId, refreshedAt])
+
+  // Refresh when there is a connection to refresh from. A failure is silent on purpose: the
+  // cache is what the screen runs on, and an operator who is offline has nothing to act on.
+  useEffect(() => {
+    if (!online || !QUEUE_IS_AVAILABLE) return
     void (async () => {
       try {
-        setZones(await api.get<Zone[]>(`/floors/${floorId}/zones`))
+        await syncReferenceData()
+        setRefreshedAt(Date.now())
       } catch {
-        setZones([])
+        // Keep showing what is cached.
       }
     })()
-  }, [online, floorId])
+  }, [online])
 
   // ---- elapsed timer ----------------------------------------------------
   useEffect(() => {
@@ -326,10 +342,20 @@ export function CaptureScreen({
 
   return (
     <ScrollView style={styles.flex} contentContainerStyle={styles.content}>
-      {!online ? (
+      {!online && !neverSynced ? (
         <Callout tone="warn" title="Offline">
-          Everything below still works. Sessions and files stay on this device and upload
-          automatically when the connection returns.
+          Everything below still works. The project list is the one downloaded on this device;
+          sessions and files stay here and upload automatically when the connection returns.
+        </Callout>
+      ) : null}
+
+      {/* The one case the device genuinely cannot cover. Worth saying plainly rather than
+          showing an empty picker, which looks identical to a broken app. */}
+      {!online && neverSynced ? (
+        <Callout tone="bad" title="No project list on this device yet">
+          The project tree is downloaded once and then kept, but this device has never had a
+          connection to download it from. Find signal briefly and it will be here for every
+          later visit, offline included.
         </Callout>
       ) : null}
 
@@ -351,7 +377,11 @@ export function CaptureScreen({
                 setFloorId(null)
                 setZoneId(null)
               }}
-              emptyLabel={online ? 'Loading projects…' : 'Connect once to load projects'}
+              emptyLabel={
+                neverSynced
+                  ? 'Connect once to download the project list'
+                  : 'No projects on this account'
+              }
             />
           </Field>
 

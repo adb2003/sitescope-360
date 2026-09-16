@@ -367,6 +367,54 @@ fails in production having worked locally:
    "MaxAgeSeconds": 3000 }]
 ```
 
+#### Offline in both directions: the reference-data cache
+
+The mobile app was offline-first in one direction only. A capture recorded without signal was
+held in SQLite and uploaded later — the hard half — but *starting* one needed three live requests
+(`/projects`, `/projects/{id}/floors`, `/floors/{id}/zones`). An operator standing on a
+half-built floor could not pick the floor they were standing on, so the capture they came to
+record never began, and the upload queue could not help because nothing was queued yet.
+
+`GET /sync` answers the whole question in one request and `mobile/src/lib/refData.ts` keeps the
+answer, in the same SQLite database the upload queue uses. The capture screen reads only from
+that cache; a connection refreshes it and is never a precondition.
+
+**The manifest, and why it is not a plain change feed.** A delta on `updated_at` can report a
+creation or an update and can never report a deletion — the row is gone, so nothing is left to
+carry a timestamp. A client that only applies changes keeps a deleted floor for ever and offers
+it to an operator whose captures the server will then refuse. So every response also carries the
+id and timestamp of *every* row that should exist: absent from the manifest means deleted, newer
+in the manifest than locally means missed. `mobile/src/lib/referenceSync.ts` is those rules as
+pure arithmetic, and `backend/app/services/sync.py` is the other half of the same contract — one
+has a test asserting a quiet sync still returns a full manifest, because the client is entitled
+to treat an empty manifest as "hold nothing".
+
+Affordable only because reference data is small: the seeded demo project tree is 9.8 KB in full
+and 2.2 KB for a quiet delta, so the manifest's whole cost is about two kilobytes a sync. The
+endpoint refuses above 20,000 rows rather than quietly returning a multi-megabyte one; at that
+size the honest answer is a tombstone table. Captures and frames are deliberately not synced
+this way — they are output, not reference data, and `/captures?since=` already pages them.
+
+Three details that look like fussiness and are not:
+
+* **The cursor is five seconds behind the present.** A row's `updated_at` can be *earlier* than
+  the moment it became visible: SQLite stores `CURRENT_TIMESTAMP` to the second, and
+  PostgreSQL's `now()` is the transaction start rather than the commit. A cursor at the present
+  steps over anything written in the boundary tick, permanently. The first version did exactly
+  that, and a test caught it.
+* **SQLite compares DATETIME as text.** `func.now()` writes no fractional part while a bound
+  Python datetime renders microseconds, so `'…12:00:01' >= '…12:00:01.000000'` is false as a
+  string. The `since` bound is widened to an earlier whole second to compensate.
+* **Timestamps are compared as instants on the client, never as strings.** ISO-8601 does not
+  order lexicographically across formats — `"…00Z"` sorts *after* `"…00.5+00:00"` because `Z` is
+  a later codepoint than `.` — so a string comparison calls a newer server record older and
+  never resyncs it.
+
+Cached timestamps come from the manifest rather than from the records, because only `ProjectOut`
+carries `updated_at`; `BuildingOut`, `FloorOut` and `ZoneOut` carry `created_at` alone. Reading
+it off the record cached `undefined` for three of the four collections, after which nothing could
+be proved current and every sync became a full one.
+
 #### Trajectory and alignment: what the estimate does and does not know
 
 The MAPPING stage recovers where the operator walked *relative to where they started* — frame to

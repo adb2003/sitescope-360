@@ -387,6 +387,60 @@ milliseconds, not minutes — so queueing them would add a polling round trip fo
 are unverified against physical hardware. Imports go through the same validation, magic-byte
 sniffing, size limits and de-duplication as a browser upload.
 
+### Offline sync — `/api/sync`
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/sync?since=` | The project tree as a delta, for clients that must work offline. |
+
+Returns projects, buildings, floors, zones and **active** floor plans. Omit `since` for a full
+sync; otherwise pass back the `cursor` from the previous response.
+
+It exists because the mobile app is offline-first in one direction only. A capture recorded
+without signal is queued and uploaded later — but *starting* one needs three live requests
+(`/projects`, `/projects/{id}/floors`, `/floors/{id}/zones`), so an operator standing on an
+unconnected floor cannot pick the floor they are standing on, and the capture they came to record
+never begins. No amount of upload queueing helps, because nothing is queued yet.
+
+Each collection comes back in two halves:
+
+```json
+{
+  "cursor": "2026-09-16T08:14:22Z",
+  "full": false,
+  "floors": {
+    "changed":  [ { "id": "…", "building_id": "…", "name": "Level 01", "level": 1 } ],
+    "manifest": [ { "id": "…", "updated_at": "2026-09-14T11:02:00Z" } ]
+  }
+}
+```
+
+`changed` holds full records — **apply them as upserts**, since the overlap below re-sends rows.
+`manifest` describes the *complete* set, always, even when nothing changed.
+
+**Why a manifest rather than a plain change feed.** A delta built on `updated_at` can report a
+creation or an update and can never report a deletion: the row is gone, so nothing is left to
+carry a timestamp. A client that only applies `changed` keeps a floor for ever and offers it to
+an operator whose captures the server will then refuse. The usual fix is a tombstone table
+written by every delete path; the manifest gets the same result with no migration and no new
+obligation on code that deletes things — anything held locally and absent from the manifest was
+deleted, and anything whose manifest timestamp is newer than the local copy was missed, so the
+client knows to resynchronise in full. This is affordable only because reference data is small
+(tens of floors, not thousands); the endpoint refuses above 20,000 rows rather than quietly
+returning a multi-megabyte manifest. **Captures and frames are deliberately not synced this
+way** — they are output rather than reference data, and `/captures?since=` already pages them.
+
+**The cursor is a few seconds behind the present, on purpose.** A row's `updated_at` can be
+earlier than the moment it became visible: SQLite stores `CURRENT_TIMESTAMP` to the second, and
+PostgreSQL's `now()` is the transaction start rather than the commit. A cursor taken at the
+present would step over anything written in the boundary tick, permanently. The overlap re-sends
+a few rows instead. A `since` in the future is refused with 422 rather than answered with an
+empty delta, because a client whose clock runs fast would otherwise never receive another change
+while every request looked successful.
+
+Floor plan **images** are not inlined — only metadata and a signed URL. A client that wants them
+offline fetches them while it still has a connection.
+
 ### Admin and system
 
 | Method | Path | Purpose |

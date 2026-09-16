@@ -63,6 +63,18 @@ def _start(client: TestClient, headers: dict[str, str], session_id: str, name: s
     )
 
 
+def _ticket(client: TestClient, headers: dict[str, str], session_id: str, name: str, size: int):
+    """Start an upload, insisting it worked.
+
+    `.json()` on an unchecked response turns any refusal into a `KeyError` on whichever field
+    the test reads next, which says nothing about why the server refused. Asserting the status
+    here means a failure names the reason instead.
+    """
+    response = _start(client, headers, session_id, name, size)
+    assert response.status_code == 200, response.text
+    return dict(response.json())
+
+
 def _put_part(client: TestClient, part: dict, body: bytes):
     """PUT one part to its signed URL, as the client would."""
     url = part["upload_url"].replace(settings.public_base_url, "")
@@ -153,7 +165,7 @@ def test_a_file_uploaded_in_parts_becomes_an_ordinary_capture_file(
     session_id = _session(client, headers, _floor(client, headers, "MP-1"), "CAP-20260916-01-M001")
     size = len(two_part_file)
 
-    ticket = _start(client, headers, session_id, "walk.jpg", size).json()
+    ticket = _ticket(client, headers, session_id, "walk.jpg", size)
     assert ticket["part_count"] == 2
     assert ticket["received"] == []
     assert [part["part_number"] for part in ticket["parts"]] == [1, 2]
@@ -190,7 +202,7 @@ def test_parts_are_assembled_by_number_rather_than_by_arrival(
     headers = auth_headers(client, admin.email)
     session_id = _session(client, headers, _floor(client, headers, "MP-9"), "CAP-20260916-01-M010")
     size = len(two_part_file)
-    ticket = _start(client, headers, session_id, "walk.jpg", size).json()
+    ticket = _ticket(client, headers, session_id, "walk.jpg", size)
     first, second = ticket["parts"]
 
     _put_part(client, second, two_part_file[first["size_bytes"] :])
@@ -213,7 +225,7 @@ def test_completing_with_a_part_missing_is_refused_and_assembles_nothing(
     headers = auth_headers(client, admin.email)
     session_id = _session(client, headers, _floor(client, headers, "MP-2"), "CAP-20260916-01-M002")
     size = len(two_part_file)
-    ticket = _start(client, headers, session_id, "walk.jpg", size).json()
+    ticket = _ticket(client, headers, session_id, "walk.jpg", size)
 
     first = ticket["parts"][0]
     _put_part(client, first, two_part_file[: first["size_bytes"]])
@@ -238,7 +250,7 @@ def test_a_resumed_upload_is_told_what_landed_and_sends_only_the_rest(
     headers = auth_headers(client, admin.email)
     session_id = _session(client, headers, _floor(client, headers, "MP-3"), "CAP-20260916-01-M003")
     size = len(two_part_file)
-    ticket = _start(client, headers, session_id, "walk.jpg", size).json()
+    ticket = _ticket(client, headers, session_id, "walk.jpg", size)
 
     first = ticket["parts"][0]
     _put_part(client, first, two_part_file[: first["size_bytes"]])
@@ -273,7 +285,7 @@ def test_a_short_middle_part_is_named_here_rather_than_by_the_storage_backend(
     headers = auth_headers(client, admin.email)
     session_id = _session(client, headers, _floor(client, headers, "MP-4"), "CAP-20260916-01-M004")
     size = len(two_part_file)
-    ticket = _start(client, headers, session_id, "walk.jpg", size).json()
+    ticket = _ticket(client, headers, session_id, "walk.jpg", size)
 
     _put_part(client, ticket["parts"][0], two_part_file[:1024])
     _put_part(client, ticket["parts"][1], two_part_file[1024:])
@@ -311,7 +323,7 @@ def test_parts_cannot_be_completed_into_another_sessions_key(client: TestClient,
     floor_id = _floor(client, headers, "MP-6")
     mine = _session(client, headers, floor_id, "CAP-20260916-01-M006")
     theirs = _session(client, headers, floor_id, "CAP-20260916-01-M007")
-    ticket = _start(client, headers, mine, "walk.jpg", 4096).json()
+    ticket = _ticket(client, headers, mine, "walk.jpg", 4096)
 
     response = _complete(client, headers, theirs, ticket, "walk.jpg", 4096)
 
@@ -334,7 +346,7 @@ def test_aborting_discards_the_parts(client: TestClient, admin, two_part_file) -
     headers = auth_headers(client, admin.email)
     session_id = _session(client, headers, _floor(client, headers, "MP-8"), "CAP-20260916-01-M009")
     size = len(two_part_file)
-    ticket = _start(client, headers, session_id, "walk.jpg", size).json()
+    ticket = _ticket(client, headers, session_id, "walk.jpg", size)
     first = ticket["parts"][0]
     _put_part(client, first, two_part_file[: first["size_bytes"]])
 

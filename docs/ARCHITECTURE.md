@@ -415,6 +415,52 @@ carries `updated_at`; `BuildingOut`, `FloorOut` and `ZoneOut` carry `created_at`
 it off the record cached `undefined` for three of the four collections, after which nothing could
 be proved current and every sync became a full one.
 
+#### Push, and why polling stays
+
+The processing status page polled every twenty seconds. Correct, and slow in both directions: an
+operator watching a five-minute walkthrough saw a bar that appeared stalled, a four-second stage
+was invisible entirely, and every open tab asked a question whose answer was almost always
+"nothing has changed".
+
+So the pipeline announces what it did (`app/events/`), and `GET /api/events` — a WebSocket —
+carries it to the browser. Measured against the running stack: **124 ms** from `POST /process`
+to the capture list showing *Processing*, and all fifteen stage transitions of a real pipeline
+run delivered live.
+
+**Polling stays.** Push is an optimisation, never the source of truth: a dropped socket, a
+missed frame, a tab that was asleep all have to be survivable, so the database stays
+authoritative and the client keeps its poll as a floor. This makes the status fast; it does not
+make it correct. Everything else follows from that — an event is a *hint* ("this capture moved,
+ask again") rather than data, which is what lets a single authorisation check at connect suffice
+and what makes a lost message harmless.
+
+**The bus follows `QUEUE_BACKEND`, and does not get a setting of its own.** With
+`QUEUE_BACKEND=redis` the worker is a separate process and cannot reach the API's open sockets,
+so the message travels through the Redis the queue already needs. With `thread` the worker is a
+thread of the API process, and an in-process fan-out is better — no broker, so the whole chain
+still runs on a laptop. The broken combination, a Redis queue with an in-process bus, publishes
+into the worker's own memory where nobody is listening, and *looks* fine: the pipeline runs, the
+status is committed, the poll eventually finds it. Deriving the choice removes the option.
+
+Three details that each cost something to get wrong:
+
+* **Authentication is a message, not a query parameter.** A browser cannot set headers on
+  `new WebSocket(url)`, and `?token=…` writes a live bearer credential into access logs, proxy
+  logs and browser history. The socket opens subscribed to nothing and is closed with 1008 if no
+  token arrives in ten seconds.
+* **Subscribing is eager.** The first version returned an async generator, which registers
+  nothing until its consumer first iterates — so an event published between "ready" and the first
+  `async for` went to nobody, and the subscription could not be closed while an `__anext__` was
+  pending, which is a waiting socket's normal state. `Subscription` is an object instead.
+* **The reverse proxy needs its own location.** The general `/api/` block sets `Connection ""`
+  to pool connections upstream, which is precisely the header an upgrade must carry instead —
+  without `/api/events` as a separate block the socket fails behind nginx while working against
+  the dev server, and the client falls back to polling so nothing looks broken. The idle timeout
+  is raised to an hour there, because an idle socket is the normal state between captures.
+
+A slow subscriber is dropped after 256 queued messages rather than growing without bound, which
+is safe for the same reason everything else here is: it loses the notifications, not the state.
+
 #### Trajectory and alignment: what the estimate does and does not know
 
 The MAPPING stage recovers where the operator walked *relative to where they started* — frame to

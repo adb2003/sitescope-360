@@ -16,6 +16,9 @@ export default defineConfig({
       '/api': {
         target: process.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000',
         changeOrigin: true,
+        // The event socket goes through the same prefix. Without this the proxy answers the
+        // upgrade request with a 404 and the push feature is missing in development only.
+        ws: true,
       },
     },
   },

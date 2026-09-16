@@ -22,6 +22,7 @@ from app.api.routes import (
     auth,
     cameras,
     captures,
+    events,
     files,
     floorplans,
     monitoring,
@@ -65,6 +66,8 @@ TAGS_METADATA = [
     {"name": "cameras", "description": "Camera providers and registered devices."},
     {"name": "admin", "description": "Processing jobs, system capabilities, health."},
     {"name": "files", "description": "Signed asset delivery for the local storage backend."},
+    {"name": "sync", "description": "Reference-data delta sync for offline-first clients."},
+    {"name": "events", "description": "WebSocket push for capture processing status."},
 ]
 
 
@@ -220,6 +223,7 @@ app.include_router(reports.router, prefix=prefix)
 app.include_router(cameras.router, prefix=prefix)
 app.include_router(admin.router, prefix=prefix)
 app.include_router(sync.router, prefix=prefix)
+app.include_router(events.router, prefix=prefix)
 app.include_router(files.router, prefix=prefix)
 
 

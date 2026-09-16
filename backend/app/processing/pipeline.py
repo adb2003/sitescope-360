@@ -26,6 +26,7 @@ from app.core.enums import (
 )
 from app.core.errors import ConflictError, ValidationError
 from app.core.logging import log_event
+from app.events import publish_capture_status
 from app.models import CaptureFile, CaptureSession, ProcessingJob
 from app.queue import get_queue
 from app.queue.base import JobSpec
@@ -124,6 +125,10 @@ def enqueue_pipeline(
         stages=[str(stage) for stage in to_run],
         forced=force,
     )
+    # The first notification, and the one that makes the status page useful immediately: the
+    # operator pressed "process" in one tab and the capture list in another now says so without
+    # waiting out a poll interval.
+    publish_capture_status(session.id, str(session.status), progress=0.0)
     return jobs
 
 

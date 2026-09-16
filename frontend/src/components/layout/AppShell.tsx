@@ -30,6 +30,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-do
 
 import { Badge, Button, Spinner } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
+import { useCaptureEvents } from '@/hooks/useCaptureEvents'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { useProjects } from '@/hooks/queries'
 import { cn, humanize, initials } from '@/lib/utils'
@@ -65,6 +66,11 @@ export function AppShell() {
   const location = useLocation()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [dark, setDark] = useState(() => !document.documentElement.classList.contains('light'))
+
+  // One socket per tab, opened here because every page cares about the same events. Its return
+  // value is deliberately unused: the pages underneath poll, and nothing may depend on the
+  // socket being up.
+  useCaptureEvents(Boolean(session))
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)

@@ -23,6 +23,7 @@ from app.core.enums import (
 from app.core.errors import ProcessingError, SiteScopeError
 from app.core.logging import correlation_id, get_logger, log_event, new_correlation_id
 from app.database.session import SessionLocal
+from app.events import publish_capture_status
 from app.models import CaptureSession, ProcessingJob
 from app.processing.pipeline import mark_session_failed, mark_session_ready
 from app.processing.stages import STAGE_HANDLERS, STAGE_SESSION_STATUS
@@ -71,6 +72,11 @@ def handle_job(spec: JobSpec) -> dict[str, Any]:
             stage=str(spec.job_type),
             attempt=job.attempt,
         )
+        # After the commit, always. An event is an instruction to refetch, so announcing a
+        # status the database has not yet been told about sends the client to read the previous
+        # one -- and then nothing arrives to correct it until the next poll, which is precisely
+        # the delay the push exists to remove.
+        publish_capture_status(session.id, str(session.status), stage=str(spec.job_type))
 
         result = handler(db, session, spec)
 
@@ -91,6 +97,9 @@ def handle_job(spec: JobSpec) -> dict[str, Any]:
             stage=str(spec.job_type),
             duration_seconds=job.duration_seconds,
         )
+        publish_capture_status(
+            session.id, str(session.status), stage=str(spec.job_type), progress=1.0
+        )
         return result
 
     except Exception as exc:
@@ -107,6 +116,14 @@ def handle_job(spec: JobSpec) -> dict[str, Any]:
             session_id=spec.session_id,
             stage=str(spec.job_type),
             error_code=code,
+            error=message,
+        )
+        # The failure is the notification that matters most: it is the one the operator would
+        # otherwise sit and wait through, watching a progress bar that has stopped moving.
+        publish_capture_status(
+            spec.session_id,
+            str(CaptureSessionStatus.FAILED),
+            stage=str(spec.job_type),
             error=message,
         )
         raise

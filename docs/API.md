@@ -441,6 +441,42 @@ while every request looked successful.
 Floor plan **images** are not inlined — only metadata and a signed URL. A client that wants them
 offline fetches them while it still has a connection.
 
+### Events — `/api/events` (WebSocket)
+
+A WebSocket that pushes capture-processing changes, so a client does not have to ask every
+twenty seconds. The handshake is fixed:
+
+1. the socket opens;
+2. the client sends `{"type": "auth", "token": "<access token>"}`;
+3. the server replies `{"type": "ready"}`, and events follow.
+
+```json
+{ "type": "capture.status", "session_id": "CAP-…", "status": "analyzing",
+  "stage": "quality", "progress": 1.0, "at": "2026-09-16T08:14:22Z" }
+```
+
+**The token is a message, not a query parameter.** A browser cannot set headers on
+`new WebSocket(url)`, and `?token=…` writes a live bearer credential into every access log,
+every proxy log and the browser's own history. Nothing is subscribed until the token arrives; a
+client that never sends one is closed with **1008** after ten seconds — a policy close, distinct
+from a network failure, so the client can tell "stop retrying" from "try again".
+
+**An event is a hint, never data.** It says a capture moved; the client refetches through the
+normal authorised endpoints. That is what keeps one authorisation check at connect sufficient —
+no event carries anything `GET /captures/{id}` would refuse — and it is what makes a dropped
+message harmless.
+
+**Push never replaces polling.** The database stays authoritative and clients keep a poll as a
+floor, because a dropped socket, a missed frame or a sleeping tab all have to be survivable.
+Measured against the running stack: a status change reached the UI in **124 ms**, where the poll
+interval is 20 s.
+
+Deployment: the bus follows `QUEUE_BACKEND` — Redis pub/sub when the queue is Redis (the worker
+is a separate process and cannot reach the API's sockets), in-process otherwise. Behind a reverse
+proxy the socket needs its own location with `Upgrade`/`Connection: upgrade` and a long
+`proxy_read_timeout`; `infrastructure/nginx/nginx.conf` has it, and the general `/api/` block
+cannot serve it because it sets `Connection ""`.
+
 ### Admin and system
 
 | Method | Path | Purpose |

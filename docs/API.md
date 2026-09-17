@@ -221,8 +221,27 @@ it destroys an entire site's capture history, and a mistyped id should not be en
 | DELETE | `/locations/{id}` | Deletes the point; frames become unplaced, not deleted. |
 
 Coordinates are floor-plan **pixels**. A point outside the raster is rejected rather than clamped —
-silently clamping would hide a broken editor. A PDF is stored but reports zero dimensions and
-explains that it cannot be used for pixel placement until rasterised.
+silently clamping would hide a broken editor.
+
+**PDF sheets are rasterised on upload.** That is the format drawings actually arrive in, and it
+used to be the one format the product could not use: a PDF stored, reported zero dimensions, and
+told the operator to go and export a PNG. Now the page is rendered to PNG at 150 DPI (PDFium via
+`pypdfium2`), the render becomes the plan, and the original PDF is kept beside it.
+
+Send `page` with the upload to pick a sheet (1-based, default 1). One sheet becomes one plan
+deliberately: a 40-page set also contains sections, elevations and details, and importing them
+all as floor plans would be worse than importing none.
+
+The response carries a `render` object — `page`, `page_count`, `dpi`, page size in points, and
+the source PDF's storage key. `page` is the load-bearing field: a plan's pixel coordinates belong
+to one specific sheet, and a raster on its own cannot say which. It lives in its own column
+rather than inside `calibration`, because `PUT /floorplans/{id}/calibration` replaces that value
+wholesale.
+
+**The render does not imply a scale.** A PDF knows its paper size and nothing about the building
+— the drawing scale is printed on the sheet, not stored in the file — so `px_per_meter` stays
+null until a human calibrates two points against a printed dimension. Deriving it from page
+geometry would produce a confident, precise and wrong number.
 
 ### Captures
 

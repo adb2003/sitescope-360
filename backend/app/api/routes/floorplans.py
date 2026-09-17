@@ -30,6 +30,7 @@ from app.core.errors import (
 from app.core.ids import new_id
 from app.core.logging import log_event
 from app.models import CaptureFrame, CaptureLocation, FloorPlan
+from app.processing.pdf import looks_like_pdf, render_page
 from app.schemas.common import Message
 from app.schemas.project import (
     CaptureLocationCreate,
@@ -51,11 +52,6 @@ router = APIRouter(tags=["floor plans"])
 
 #: Floor plans are documents, not imagery — 64 MiB is generous for an E1 sheet.
 MAX_FLOORPLAN_BYTES = 64 * 1024 * 1024
-#: PDFs are accepted and stored, but a raster is needed for pixel coordinates.
-PDF_RASTER_NOTE = (
-    "PDF floor plans are stored but cannot be used for pixel-coordinate placement until they "
-    "are rasterised. Upload a PNG or JPG export of the sheet to place capture points."
-)
 
 
 @router.post(
@@ -69,6 +65,13 @@ def upload_floor_plan(
     user: RequireFloorPlanEdit,
     file: Annotated[UploadFile, File(description="PNG, JPG or PDF floor plan")],
     name: Annotated[str | None, Form()] = None,
+    page: Annotated[
+        int,
+        Form(
+            ge=1,
+            description="Which sheet of a PDF to rasterise, 1-based. Ignored for images.",
+        ),
+    ] = 1,
 ) -> FloorPlanOut:
     # Existence check only: a 404 here is the point, the row itself is not needed.
     get_floor_or_404(db, floor_id)
@@ -90,14 +93,31 @@ def upload_floor_plan(
     if not data:
         raise ValidationError("Floor plan file is empty")
 
-    is_pdf = data[:4] == b"%PDF"
+    is_pdf = looks_like_pdf(data)
     if is_pdf and extension != ".pdf":
         raise UnsupportedMediaError("File content is a PDF but the extension is not .pdf")
 
+    render: dict[str, object] | None = None
+    source_data = data
     if is_pdf:
-        # Dimensions are unknown without a rasteriser; recorded as 0 and surfaced in the API so
-        # the editor can explain the limitation instead of placing points on a zero-size canvas.
-        width_px, height_px, content_type = 0, 0, "application/pdf"
+        # Rasterised here, in the request, rather than queued. Every positional feature in the
+        # application works in plan pixels, so a plan that exists without a raster is a plan the
+        # operator can upload and then not use -- which is the state this route used to leave
+        # them in. One sheet at 150 DPI is a few hundred milliseconds; waiting for it is better
+        # than returning a row that cannot be placed on yet.
+        sheet = render_page(data, page=page)
+        # The *rendered* bytes become the plan: every consumer downstream -- the viewer, the
+        # minimap, the location editor -- reads `storage_key` expecting an image, and pointing it
+        # at a PDF is what made this format unusable in the first place. The original is kept
+        # beside it, so a future re-render at a different DPI does not need the file re-uploaded.
+        data, width_px, height_px, content_type = (
+            sheet.png,
+            sheet.width_px,
+            sheet.height_px,
+            "image/png",
+        )
+        extension = ".png"
+        render = sheet.to_metadata()
     else:
         try:
             with Image.open(io.BytesIO(data)) as image:
@@ -111,6 +131,14 @@ def upload_floor_plan(
     plan_id = new_id()
     key = floorplan_key(project_id, floor_id, f"{plan_id}{extension}")
     get_storage().put_bytes(key, data, content_type)
+
+    if is_pdf and render is not None:
+        # Keep the sheet it came from. Re-rendering at a different DPI, or pulling a second sheet
+        # out of the same set, should not need the operator to find the file again -- and on a
+        # site that received the set by email six months ago, they may not be able to.
+        source_key = floorplan_key(project_id, floor_id, f"{plan_id}-source.pdf")
+        get_storage().put_bytes(source_key, source_data, "application/pdf")
+        render["source_storage_key"] = source_key
 
     # A newly uploaded plan becomes the active one; earlier revisions are kept for history so an
     # older capture's coordinates remain interpretable against the plan they were placed on.
@@ -130,7 +158,10 @@ def upload_floor_plan(
         file_size_bytes=len(data),
         is_active=True,
         uploaded_by_id=user.id,
-        calibration={"note": PDF_RASTER_NOTE} if is_pdf else None,
+        # `calibration` stays empty: it means the human-entered pixel-to-metre scale, and a PDF
+        # says nothing about a building's dimensions however precisely it describes its paper.
+        calibration=None,
+        render=render,
     )
     db.add(plan)
     db.commit()
@@ -230,6 +261,12 @@ def delete_floor_plan(plan_id: str, db: DbSession, _: RequireFloorPlanEdit) -> M
         )
     with contextlib.suppress(Exception):
         get_storage().delete(plan.storage_key)
+    # And the PDF it was rendered from, which is a second object under a key only the plan row
+    # knows. Deleting the row without it leaves the sheet in storage with nothing referencing it.
+    source_key = (plan.render or {}).get("source_storage_key")
+    if isinstance(source_key, str):
+        with contextlib.suppress(Exception):
+            get_storage().delete(source_key)
     db.delete(plan)
     db.commit()
     return Message(message="Floor plan deleted")
@@ -249,6 +286,7 @@ def _plan_out(plan: FloorPlan) -> FloorPlanOut:
                 "file_size_bytes",
                 "px_per_meter",
                 "calibration",
+                "render",
                 "is_active",
                 "created_at",
             )

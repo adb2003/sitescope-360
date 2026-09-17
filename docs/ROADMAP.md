@@ -51,18 +51,23 @@ Some Phase 2 work landed early because it was needed to make Phase 1 honest:
 
 Making automatic placement good enough to trust without anchors.
 
-### 2.1 Loop closure and global optimisation
+### 2.1 Loop closure and global optimisation · **delivered**
 
 **The problem.** Dead reckoning drifts. Confidence decays multiplicatively along the chain, so a
 long walkthrough ends with a low-confidence tail even when every individual step was good.
 
-**The approach.** Detect revisits (the operator walks back past a position), then close the loop
-and redistribute the error. `VisionEngine.similarity()` already provides the revisit signal; what
-is missing is a pose graph and a solver.
+**What was built.** `app/vision/slam.py` — revisit detection over dHash perceptual hashes and
+ORB, then SE(2) pose-graph optimisation by Levenberg–Marquardt with a Huber robust kernel and
+bearing-only residuals. Co-located (zero-parallax) closures are handled separately from ones with
+a baseline, and short-range **skip constraints** across 2–3 frame spans mean a corridor walk that
+never revisits is still globally optimised rather than left as a dead-reckoning chain.
+`mapping_method` on the session records which path produced the track.
 
-- Bag-of-words or learned descriptors for place recognition across a session.
-- Pose-graph optimisation (g2o, GTSAM, or a small custom Gauss-Newton over SE(2)).
-- Replace `DeadReckoningPositionEstimator` — the interface already allows it.
+**What is still open here.** Place recognition is within a session only, so it cannot match
+against a floor captured last week — that is 2.2 below, and it is the harder half. A custom
+solver was written rather than adopting g2o or GTSAM: both are C++ builds with heavier licence
+and packaging consequences than a few hundred lines of NumPy, and the graph sizes here (tens to
+a few hundred poses) do not need their performance.
 
 ### 2.2 Cross-session localisation
 
@@ -188,7 +193,12 @@ Not oversights:
 Collected in one place, all documented at their source:
 
 1. **Positioning is relative and scale-free.** Anchor two points on a floor plan to place a track.
-2. **Not SLAM.** No loop closure, no global optimisation; drift accumulates over long sequences.
+2. **Graph SLAM, but monocular.** Loop closure and SE(2) pose-graph optimisation are implemented
+   (`app/vision/slam.py`: Levenberg–Marquardt with a Huber kernel, bearing-only residuals, plus
+   short-range skip constraints so a walk that never revisits still gets optimised). Drift is
+   bounded rather than eliminated: a route with no revisit has nothing to close against, and
+   `mapping_method` records which of the two produced each track. Scale and bearing are still
+   absent — see (1).
 3. **Planar motion assumed.** Ramps and stairs violate it.
 4. **Frame spacing matters a lot.** Below ~2 m works; at 4 m the mapper correctly refuses.
 5. **Track accuracy through ORB is platform-dependent** — 0.13 m mean on Windows vs 1.57 m on
@@ -197,8 +207,10 @@ Collected in one place, all documented at their source:
    pinned, reproducible feature detector.
 6. **Coverage is declared, not detected.** It compares visited points to administrator-declared
    expectations; square footage is apportioned, never measured from imagery.
-7. **PDF floor plans are stored but not rasterised**, so they cannot be used for pixel placement
-   until exported as PNG/JPG.
+7. **One PDF sheet becomes one plan.** A sheet set is rasterised a page at a time, chosen on
+   upload — a 40-page set also contains sections, elevations and details, and importing them all
+   as floor plans would be worse than importing none. There is no sheet picker that previews the
+   pages; the operator has to know which page they want.
 8. **The compass is relative**, not magnetic — an uploaded image carries no device heading, and the
    viewer labels it `rel`.
 9. **The thread queue is not durable.** Fine for development; `QUEUE_BACKEND=redis` for anything

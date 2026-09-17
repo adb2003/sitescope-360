@@ -36,6 +36,7 @@ source-available licences.
 | [opencv-python-headless](https://github.com/opencv/opencv-python) | 5.0.0.93 | Apache-2.0² | ORB features, image/video I/O |
 | [Pillow](https://github.com/python-pillow/Pillow) | 12.3.0 | MIT-CMU (HPND) | EXIF extraction, floor-plan rendering |
 | [reportlab](https://github.com/MrBitBucketer/reportlab) | 5.0.1 | BSD-3-Clause | PDF report generation |
+| [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) | 5.13.0 | BSD-3-Clause, Apache-2.0 ³ | Rasterising PDF floor-plan sheets |
 | [httpx](https://github.com/encode/httpx) | 0.28.1 | BSD-3-Clause | HTTP client for camera adapters |
 
 ¹ **psycopg 3 is LGPL-3.0-or-later.** It is used as an unmodified, dynamically imported library —
@@ -48,6 +49,13 @@ non-permissive dependency and is needed **only for PostgreSQL**: the platform ru
 BSD-3-Clause). The **headless** build is used deliberately: it excludes the GUI/Qt components, so
 no additional licence obligations and a much smaller container image. It also means the vision
 engine cannot accidentally try to open a window on a server.
+
+³ `pypdfium2` bundles **PDFium**, Chromium's PDF engine, as a prebuilt binary in the wheel — so
+that binary's licence ships too, and it is BSD-3-Clause (with Apache-2.0 covering the Python
+bindings). Chosen over the obvious alternative for exactly this reason: **PyMuPDF is AGPL-3.0**
+unless licensed commercially, which the no-copyleft policy above rules out. `pdf2image` would
+also have been permissive but needs the poppler binaries installed on the host, which is a system
+dependency this project otherwise does not have.
 
 ### Development only — not shipped
 

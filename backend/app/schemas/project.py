@@ -155,6 +155,10 @@ class FloorPlanOut(ORMModel):
     file_size_bytes: int
     px_per_meter: float | None
     calibration: dict[str, Any] | None
+    #: Present when the raster was produced from a PDF rather than uploaded as an image. Carries
+    #: the page it came from, which is what makes this plan's pixel coordinates interpretable at
+    #: all when the source was a multi-sheet set.
+    render: dict[str, Any] | None = None
     is_active: bool
     created_at: datetime
     asset: SignedAsset | None = None

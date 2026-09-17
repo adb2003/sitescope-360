@@ -525,10 +525,13 @@ export function useCreateZone(projectId: string, floorId: string) {
 export function useUploadFloorPlan(projectId: string, floorId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (file: File) => {
+    mutationFn: ({ file, page }: { file: File; page?: number }) => {
       const form = new FormData()
       form.append('file', file)
       form.append('name', file.name)
+      // Only meaningful for a PDF, and the server ignores it for an image. Sent unconditionally
+      // so the two call sites do not have to agree on what counts as a PDF.
+      if (page && page > 0) form.append('page', String(page))
       return api.upload<FloorPlan>(`/floors/${floorId}/floorplan`, form)
     },
     onSuccess: () => {

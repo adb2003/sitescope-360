@@ -332,7 +332,7 @@ export function FloorPlanCanvas({
       <div className={cn('panel p-4', className)}>
         <Callout tone="warn" title="This floor plan cannot be used for placement">
           {String(plan.calibration?.note ?? '') ||
-            'The plan has no pixel dimensions. Upload a PNG or JPG export of the drawing to place capture points on it.'}
+            'The plan has no pixel dimensions, so there is no grid to place capture points on. Upload the drawing again — a PNG, JPG or PDF sheet all produce a usable raster.'}
         </Callout>
       </div>
     )

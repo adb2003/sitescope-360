@@ -168,6 +168,12 @@ class FloorPlan(Base, TimestampMixin):
     #: Optional two-point calibration: pixels per real-world metre. Needed later for BIM (§30).
     px_per_meter: Mapped[float | None] = mapped_column(Float, nullable=True)
     calibration: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+    #: How the raster was produced, when it was not uploaded as one — see `processing/pdf.py`.
+    #:
+    #: Its own column rather than a key inside ``calibration``, because the calibration endpoint
+    #: replaces that value wholesale: recording the render there would mean calibrating a plan
+    #: silently erased the record of which PDF sheet its coordinates belong to.
+    render: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
     is_active: Mapped[bool] = mapped_column(nullable=False, default=True)
     uploaded_by_id: Mapped[str | None] = mapped_column(
         PKType, ForeignKey("users.id", ondelete="SET NULL"), nullable=True

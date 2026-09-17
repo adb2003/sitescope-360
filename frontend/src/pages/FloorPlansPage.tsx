@@ -389,14 +389,17 @@ function UploadPlanDialog({
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setError(null)
-    const input = event.currentTarget.elements.namedItem('file') as HTMLInputElement | null
+    const elements = event.currentTarget.elements
+    const input = elements.namedItem('file') as HTMLInputElement | null
     const file = input?.files?.[0]
     if (!file) {
       setError('Choose a file first')
       return
     }
+    const pageInput = elements.namedItem('page') as HTMLInputElement | null
+    const page = Number(pageInput?.value ?? 1)
     try {
-      await mutation.mutateAsync(file)
+      await mutation.mutateAsync({ file, page: Number.isFinite(page) ? page : 1 })
       onClose()
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : 'Upload failed')
@@ -409,9 +412,18 @@ function UploadPlanDialog({
         <Field
           label="Drawing file"
           required
-          hint="PNG or JPG is recommended. A PDF is stored but cannot be used for pixel placement until it is rasterised."
+          hint="PNG, JPG or PDF. A PDF sheet is rasterised on upload, so capture points can be placed on it straight away."
         >
           <Input name="file" type="file" accept=".png,.jpg,.jpeg,.pdf" required />
+        </Field>
+        {/* Only one sheet becomes a floor plan. A set contains sections, elevations and details,
+            and importing all of them as plans to place capture points on would be worse than
+            importing none — so the operator names the sheet they want. */}
+        <Field
+          label="PDF sheet"
+          hint="Which page of a multi-sheet PDF to use. Ignored for images."
+        >
+          <Input name="page" type="number" min={1} step={1} defaultValue={1} />
         </Field>
         {error ? <Callout tone="bad">{error}</Callout> : null}
         <Callout tone="info" title="Replacing an existing plan">

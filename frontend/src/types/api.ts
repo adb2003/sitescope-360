@@ -170,9 +170,27 @@ export interface FloorPlan {
   file_size_bytes: number
   px_per_meter: number | null
   calibration: Record<string, unknown> | null
+  /**
+   * Present when the raster was rendered from a PDF rather than uploaded as an image.
+   *
+   * `page` is the part that matters to a reader: on a sheet set, this plan's pixel coordinates
+   * belong to one specific sheet, and the raster alone cannot say which.
+   */
+  render: PlanRender | null
   is_active: boolean
   created_at: string
   asset: SignedAsset | null
+}
+
+export interface PlanRender {
+  source: string
+  page: number
+  page_count: number
+  dpi: number
+  page_width_pt: number
+  page_height_pt: number
+  scale_note: string
+  source_storage_key?: string
 }
 
 export interface CaptureLocation {

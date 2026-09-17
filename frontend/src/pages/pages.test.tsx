@@ -278,6 +278,7 @@ describe('FloorPlanCanvas', () => {
     file_size_bytes: 12345,
     px_per_meter: 40,
     calibration: null,
+    render: null,
     is_active: true,
     created_at: '2026-09-01T00:00:00Z',
     asset: { key: 'k', url: 'http://test/plan.png', expires_in: 3600 },
@@ -341,14 +342,17 @@ describe('FloorPlanCanvas', () => {
   })
 
   it('refuses placement on a plan with no raster dimensions', () => {
+    // PDFs are rasterised on upload now, so this is no longer the everyday case — but a plan
+    // stored before that existed still has zero dimensions, and placing points against a
+    // zero-size grid divides by zero and pins everything to one corner.
     render(
       <FloorPlanCanvas
-        plan={{ ...PLAN, width_px: 0, height_px: 0, calibration: { note: 'PDF not rasterised' } }}
+        plan={{ ...PLAN, width_px: 0, height_px: 0, calibration: { note: 'Legacy plan' } }}
         locations={[]}
       />,
     )
     expect(screen.getByText(/cannot be used for placement/i)).toBeInTheDocument()
-    expect(screen.getByText(/PDF not rasterised/)).toBeInTheDocument()
+    expect(screen.getByText(/Legacy plan/)).toBeInTheDocument()
   })
 
   it('draws an estimated path dashed and a manual path solid', () => {

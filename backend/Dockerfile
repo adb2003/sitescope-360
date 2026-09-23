@@ -6,26 +6,45 @@
 
 FROM python:3.12-slim-bookworm AS builder
 
+# UV_PROJECT_ENVIRONMENT points uv at /opt/venv instead of a project-local .venv, so the runtime
+# stage still has exactly one directory to copy across.
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
 
 RUN pip install --no-cache-dir uv==0.5.11
 
 WORKDIR /build
 
-# Dependencies are resolved and installed from the manifest alone, before any source is copied,
-# so editing a Python file does not invalidate the (slow, large) dependency layer.
-COPY pyproject.toml ./
-RUN uv venv /opt/venv \
-    && uv pip compile pyproject.toml --output-file /tmp/requirements.txt \
-    && VIRTUAL_ENV=/opt/venv uv pip install --no-cache --requirement /tmp/requirements.txt
+# Installed from `uv.lock`, not resolved here. This used to run `uv pip compile pyproject.toml`,
+# which resolved afresh at build time: the image could ship different versions from the ones CI
+# had just tested, and two builds of the same commit could differ from each other. CI installs
+# the same lock with the same `--locked`, so the tested environment and the shipped one are now
+# the same set of pins.
+#
+# `--locked` asserts the lock is consistent with pyproject rather than quietly updating it. A
+# container build is the wrong place to discover that a dependency was added and never locked,
+# and the wrong place to fix it.
+#
+# Still before any source is copied, so editing a Python file does not invalidate the (slow,
+# large) dependency layer — `--no-install-project` is what keeps that split.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-install-project --no-dev
 
-# Now the source. Installed with --no-deps because everything is already present above.
+# Now the source. The project itself installs here, against dependencies already present above.
+#
+# `--no-editable` matters in a container and nowhere else. `uv sync` installs the project editable
+# by default, which writes a `.pth` file pointing at this builder's /build — a directory that does
+# not exist in the runtime stage, because only /opt/venv is copied across. The result still
+# *appears* to work, since the runtime copies the source to /app and imports resolve from the
+# working directory; it breaks the moment anything runs from elsewhere. A non-editable install
+# puts the code in site-packages, which is what the previous `uv pip install .` produced and what
+# survives the stage boundary.
 COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
-RUN VIRTUAL_ENV=/opt/venv uv pip install --no-cache --no-deps .
+RUN uv sync --locked --no-dev --no-editable
 
 # ---- runtime ----------------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime

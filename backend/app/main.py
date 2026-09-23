@@ -36,7 +36,7 @@ from app.api.routes import (
 # and defeats static checking.
 from app.api.routes import annotations as annotation_routes
 from app.core.config import settings
-from app.core.errors import SiteScopeError
+from app.core.errors import RateLimitedError, SiteScopeError
 from app.core.logging import configure_logging, correlation_id, get_logger, log_event
 
 logger = get_logger("sitescope.api")
@@ -136,7 +136,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Correlation-Id", "X-Response-Time-Ms"],
+    expose_headers=["X-Correlation-Id", "X-Response-Time-Ms", "Retry-After"],
 )
 
 
@@ -169,7 +169,11 @@ async def correlation_middleware(
 async def sitescope_error_handler(request: Request, exc: SiteScopeError) -> JSONResponse:
     if exc.status_code >= 500:
         logger.exception("Unhandled domain error", extra={"path": request.url.path})
-    return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
+    # `Retry-After` is the standard way to say "wait this long", and the only one a generic HTTP
+    # client will act on. The same number is in the body for a browser fetch, which cannot read
+    # the header cross-origin unless it is explicitly exposed.
+    headers = {"Retry-After": str(exc.retry_after)} if isinstance(exc, RateLimitedError) else None
+    return JSONResponse(status_code=exc.status_code, content=exc.to_payload(), headers=headers)
 
 
 @app.exception_handler(RequestValidationError)

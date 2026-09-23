@@ -49,6 +49,50 @@ Only `GET /health`, `GET /api/system/health`, `POST /api/auth/login`, `POST /api
 validation, so an unauthenticated caller learns nothing about whether their payload was
 acceptable.
 
+#### Sign-in is rate limited
+
+Both auth routes are limited, and a refusal is **429** with `Retry-After` (also in the body, since
+a browser fetch cannot read the header cross-origin unless it is exposed — it is).
+
+| Limit | Default | Counts | Why |
+| --- | --- | --- | --- |
+| Per client address | 60 / 5 min | *every* attempt | CPU exhaustion |
+| Per account | 10 failures / 15 min | failures only | brute force |
+
+The address limit exists because of cost asymmetry rather than guessing: bcrypt is deliberately
+slow, so every request costs this server a fraction of a CPU-second and costs the caller nothing.
+A few hundred concurrent requests saturate the API without a single correct password. It is
+therefore checked **before** the password is verified — a limiter that ran afterwards would have
+already paid the cost it exists to avoid — and it counts successes too, because a successful
+login costs exactly the same bcrypt time as a failed one.
+
+The account limit counts only failures, and a successful sign-in clears the count: someone
+signing in correctly all day is not attacking anything, and leaving a user one mistake from
+lockout after they have demonstrated the right password buys nothing.
+
+**Two honest caveats.** The account limit can be spent *against* a known address by someone who
+wants that person locked out; that is the accepted trade against unbounded targeted brute force,
+mitigated by keeping the window short and the lockout self-expiring. And the limiter **fails
+open** — if its Redis is unreachable, requests are allowed and a warning is logged, because a
+limiter that failed closed would turn a broker blip into an outage of the one endpoint everything
+depends on.
+
+Defaults are tunable: `AUTH_ADDRESS_MAX_ATTEMPTS`, `AUTH_ADDRESS_WINDOW_SECONDS`,
+`AUTH_ACCOUNT_MAX_FAILURES`, `AUTH_ACCOUNT_WINDOW_SECONDS`. Zero disables either limit, for a
+deployment that limits at its edge instead.
+
+**`TRUST_PROXY_HEADERS` matters for this to work.** Behind a proxy every request arrives from the
+proxy's address, so the per-address limit becomes one global bucket for the whole site. Turning
+it on makes the API key on `X-Real-IP` instead — which is safe **only** when every route to the
+service passes through a proxy that overwrites that header, as `infrastructure/nginx/nginx.conf`
+does. It is off by default, and `docker-compose.yml` turns it on for the containerised stack.
+Note this uses `X-Real-IP` rather than the first entry of `X-Forwarded-For`: nginx *appends* to
+`X-Forwarded-For`, so its leftmost value is whatever the caller sent, and limiting on it would
+let anyone bypass the limit by rotating a fake header.
+
+nginx applies its own `limit_req` to the two sign-in routes as a second layer. The API's limit is
+better informed; nginx's is the only one that can decline before a worker is occupied.
+
 ### Authorization
 
 Capability-based, derived from the §27 role matrix and enforced as a route dependency. A refusal

@@ -52,6 +52,34 @@ class Settings(BaseSettings):
     refresh_token_ttl_days: int = 14
     bcrypt_rounds: int = 12
 
+    #: Attempts per client address on the unauthenticated auth routes, per window. Set to 0 to
+    #: disable.
+    #:
+    #: This is the CPU control rather than the brute-force one, so it is deliberately generous:
+    #: a construction office behind one NAT address may have thirty people signing in within a
+    #: few minutes of each other, and a limit that locks the site out at nine in the morning
+    #: would be removed within the week. 60 in five minutes leaves that comfortable while
+    #: bounding what a single source can spend of this server's bcrypt time.
+    auth_address_max_attempts: int = 60
+    auth_address_window_seconds: int = 300
+
+    #: Failed sign-ins per account, per window. Set to 0 to disable.
+    #:
+    #: Counts failures only — someone signing in correctly all day is not attacking anything.
+    #: Ten is well above a person mistyping a password and far below anything useful to a guesser
+    #: at bcrypt speeds. Short, and never permanent: this limit can be spent *against* a known
+    #: address by someone who wants that person locked out, so it must always expire on its own.
+    auth_account_max_failures: int = 10
+    auth_account_window_seconds: int = 900
+
+    #: Whether `X-Real-IP` may be believed.
+    #:
+    #: Off by default, because the header means nothing when the API is reachable directly —
+    #: anyone can set it, and a rate limit keyed on a value the caller chooses is not a limit.
+    #: Turn it on only when every route to this service passes through a proxy that overwrites
+    #: it, as `infrastructure/nginx/nginx.conf` does.
+    trust_proxy_headers: bool = False
+
     # ---- storage ---------------------------------------------------------
     storage_backend: Literal["local", "s3"] = "local"
     storage_root: Path = REPO_ROOT / "var" / "storage"

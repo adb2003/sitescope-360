@@ -31,6 +31,12 @@ x-backend-env: &backend-env
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
   FRAME_INTERVAL_SECONDS: ${FRAME_INTERVAL_SECONDS:-2.0}
   MAPPING_CONFIDENCE_THRESHOLD: ${MAPPING_CONFIDENCE_THRESHOLD:-0.45}
+  # Safe here and only here: in this stack the API is reachable only through the nginx gateway,
+  # which overwrites X-Real-IP with the connection's real source. Without it every user arrives
+  # as the proxy's address and the per-address sign-in limit becomes one global bucket for the
+  # whole site — which would lock everyone out on a busy morning rather than limiting anybody.
+  # Leave it off wherever the API port is exposed directly: then the header is caller-supplied.
+  TRUST_PROXY_HEADERS: "true"
 
 services:
   db:

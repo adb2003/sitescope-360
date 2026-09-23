@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request, status
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession, Pagination, RequireUserManage
+from app.auth import ratelimit
 from app.auth.rbac import capabilities_for
 from app.auth.security import (
     create_access_token,
@@ -38,17 +39,31 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/login", response_model=TokenPair)
 def login(payload: LoginRequest, request: Request, db: DbSession) -> TokenPair:
+    # Both checks come before the password is verified, and that ordering is the point: bcrypt is
+    # deliberately expensive, so a limiter that runs afterwards has already paid the cost it
+    # exists to avoid. See `app/auth/ratelimit.py` for why there are two of them.
+    ratelimit.check_address(request)
+    ratelimit.check_account(payload.email)
+
     user = db.scalar(select(User).where(User.email == payload.email.lower()))
     # Verify against a dummy hash when the user does not exist, so a missing account and a wrong
     # password take the same time and cannot be distinguished by an attacker.
     if user is None:
         verify_password(payload.password, _timing_equaliser_hash())
+        ratelimit.record_failure(payload.email)
         raise AuthenticationError("Incorrect email or password")
     if not verify_password(payload.password, user.password_hash):
+        ratelimit.record_failure(payload.email)
         raise AuthenticationError("Incorrect email or password")
     if not user.is_active:
+        # Not counted as a failure: the credentials were right, and counting this would let a
+        # deactivated account's own correct attempts lock out the address it is signing in from.
         raise AuthenticationError("This account has been deactivated")
 
+    # The correct password has been demonstrated, so earlier fumbles stop counting — otherwise a
+    # user who mistypes four times and then succeeds spends the rest of the window one mistake
+    # from a lockout, for no security benefit.
+    ratelimit.clear_account(payload.email)
     user.last_login_at = datetime.now(UTC)
     tokens = _issue_tokens(db, user, request.headers.get("user-agent"))
     db.commit()
@@ -59,6 +74,10 @@ def login(payload: LoginRequest, request: Request, db: DbSession) -> TokenPair:
 @router.post("/refresh", response_model=TokenPair)
 def refresh(payload: RefreshRequest, request: Request, db: DbSession) -> TokenPair:
     """Rotate the refresh token: the presented token is revoked and a new one issued."""
+    # Unauthenticated in the same sense login is — anyone can post a guess at a token — so it
+    # gets the address limit too. No account limit: the caller has not named an account, and a
+    # refresh token is 256 bits rather than something a person chose.
+    ratelimit.check_address(request)
     digest = hash_refresh_token(payload.refresh_token)
     record = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == digest))
     if record is None or record.revoked_at is not None:

@@ -58,6 +58,21 @@ class PayloadTooLargeError(SiteScopeError):
     code = "payload_too_large"
 
 
+class RateLimitedError(SiteScopeError):
+    """Too many attempts. Carries how long to wait, so a client need not guess.
+
+    ``retry_after`` is surfaced as the HTTP header of the same name as well as in the body: a
+    browser fetch reads the body, and anything scripted reads the header.
+    """
+
+    status_code = 429
+    code = "rate_limited"
+
+    def __init__(self, message: str, retry_after: int, **details: Any) -> None:
+        super().__init__(message, retry_after=retry_after, **details)
+        self.retry_after = max(1, int(retry_after))
+
+
 class ProcessingError(SiteScopeError):
     """Raised inside a pipeline stage; recorded on the ProcessingJob row."""
 

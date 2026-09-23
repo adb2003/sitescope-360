@@ -15,24 +15,11 @@ Most of what follows is about the ways a limiter can exist and not work:
 
 from __future__ import annotations
 
-import pytest
 from fastapi.testclient import TestClient
 
 from app.auth import ratelimit
 from app.core.config import settings
 from tests.conftest import PASSWORD
-
-
-@pytest.fixture(autouse=True)
-def _fresh_counter():
-    """A limiter with no memory of the previous test.
-
-    The counter is a process-wide singleton, so without this the tests would limit each other —
-    and the failure would look like the feature working too well.
-    """
-    ratelimit.reset_counter()
-    yield
-    ratelimit.reset_counter()
 
 
 def _login(client: TestClient, email: str, password: str = "wrong-password", **headers):

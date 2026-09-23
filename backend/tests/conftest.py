@@ -61,6 +61,28 @@ def clean_database() -> Iterator[None]:
     Base.metadata.drop_all(engine)
 
 
+@pytest.fixture(autouse=True)
+def reset_rate_limits() -> Iterator[None]:
+    """A fresh sign-in allowance for every test.
+
+    The limiter is a process-wide singleton, and almost every test in the suite signs in through
+    `auth_headers` — from one address, since every request comes from the same TestClient. Three
+    hundred tests therefore spend the per-address allowance many times over, and the suite starts
+    rate-limiting *itself*.
+
+    The failures land in whichever unrelated tests happen to run after the budget is gone, which
+    is the worst possible place to read them from: this is how the feature first went red in CI,
+    with `assert 429 == 200` in tests that have nothing to do with authentication.
+
+    Resetting rather than disabling, so the limiter stays live everywhere and a test that really
+    does sign in too often still sees it.
+    """
+    from app.auth import ratelimit
+
+    ratelimit.reset_counter()
+    yield
+
+
 @pytest.fixture
 def db() -> Iterator[Session]:
     session = SessionLocal()

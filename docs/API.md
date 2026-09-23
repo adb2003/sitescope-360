@@ -93,6 +93,35 @@ let anyone bypass the limit by rotating a fake header.
 nginx applies its own `limit_req` to the two sign-in routes as a second layer. The API's limit is
 better informed; nginx's is the only one that can decline before a worker is occupied.
 
+#### Request bodies are capped per route
+
+**1 MiB by default**, raised only where a large body is the point:
+
+| Route | Ceiling |
+| --- | --- |
+| `PUT /api/files/…` | 2 GiB — direct uploads and multipart parts |
+| `POST /api/captures/{id}/upload` | 2 GiB — the proxied upload |
+| `POST /api/floors/{id}/floorplan` | 128 MiB — the route itself caps at 64 MiB |
+| everything else | 1 MiB |
+
+Over the ceiling is **413** with the usual `{code, message}` envelope and the limit in `details`.
+
+This was previously 2 GB everywhere, set once at nginx's http level because one route uploads
+video. The route that made it matter is `/auth/login`: it needs no credentials, and FastAPI
+parses a request body to build the endpoint's arguments **before** the function runs — so the
+sign-in rate limiter, which lives inside the function, never saw a huge body. The limit is
+therefore enforced by middleware that answers before routing and body parsing, and by nginx.
+
+Enforced in **both** places on purpose. Neither Starlette nor uvicorn imposes a default body
+limit, so an API exposed without the gateway had no ceiling at all; and nginx can refuse before a
+worker is occupied, which the application cannot.
+
+**One stated limitation:** the application checks `Content-Length` only. A request that declares
+no length (chunked transfer) is bounded by nginx, which enforces its limit across the accumulated
+body, but not by the middleware — counting bytes as they stream would mean wrapping `receive` in
+front of a 2 GiB upload, and a bug there breaks the uploads this project works hardest to keep
+reliable. Tunable with `MAX_JSON_BODY_BYTES`.
+
 ### Authorization
 
 Capability-based, derived from the §27 role matrix and enforced as a route dependency. A refusal

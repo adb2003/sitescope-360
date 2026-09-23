@@ -17,6 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.body_limit import BodySizeLimitMiddleware
 from app.api.routes import (
     admin,
     auth,
@@ -128,6 +129,15 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+)
+
+# Added first, so it wraps outermost and answers before CORS, routing or body parsing. A limit
+# that runs after the body has been read is not a limit on anything.
+app.add_middleware(
+    BodySizeLimitMiddleware,
+    default_limit=settings.max_json_body_bytes,
+    upload_limit=settings.max_upload_bytes,
+    api_prefix=settings.api_prefix,
 )
 
 app.add_middleware(

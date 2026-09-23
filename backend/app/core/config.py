@@ -110,6 +110,15 @@ class Settings(BaseSettings):
 
     # ---- uploads ---------------------------------------------------------
     max_upload_bytes: int = 2 * 1024 * 1024 * 1024  # 2 GiB
+
+    #: Ceiling on a request body for every route that is *not* an upload.
+    #:
+    #: The upload routes need gigabytes; nothing else here needs more than a form. 1 MiB is far
+    #: above the largest legitimate body the API accepts — a 50-anchor alignment request is a few
+    #: kilobytes — and far below what it costs to parse as JSON into memory. It matters most on
+    #: `/auth/login`, which needs no credentials and whose body is parsed before the sign-in rate
+    #: limiter can refuse anything.
+    max_json_body_bytes: int = 1024 * 1024
     allowed_image_extensions: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [".jpg", ".jpeg", ".png"]
     )

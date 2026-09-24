@@ -17,6 +17,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native'
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context'
 
+import { ErrorBoundary } from './src/components/ErrorBoundary'
 import { tokens } from './src/lib/api'
 import { openQueue, pendingCount, sync, QUEUE_IS_AVAILABLE } from './src/lib/queue'
 import { CameraScreen } from './src/screens/CameraScreen'
@@ -27,7 +28,23 @@ import { spacing, theme } from './src/theme'
 
 type Tab = 'camera' | 'capture' | 'queue'
 
+/**
+ * The outer boundary, for a failure during boot or in the shell itself.
+ *
+ * Separate from the per-tab one because there is nothing to switch to when this fires: opening
+ * the local database, restoring the session and the sign-in gate all happen out here, and a
+ * throw from any of them would otherwise close the app on launch — the worst possible moment,
+ * since the operator cannot even reach the queue to confirm their captures are still there.
+ */
 export default function App() {
+  return (
+    <ErrorBoundary scope="app">
+      <CaptureApp />
+    </ErrorBoundary>
+  )
+}
+
+function CaptureApp() {
   const [ready, setReady] = useState(false)
   const [signedIn, setSignedIn] = useState(false)
   const [tab, setTab] = useState<Tab>('capture')
@@ -130,19 +147,25 @@ export default function App() {
           </Pressable>
         </View>
 
+        {/* Inside the tab bar, so a screen that crashes leaves the other tabs reachable — the
+            operator whose capture screen died can still open the queue and see their recordings
+            waiting. Keyed on the tab, so switching away clears it without them needing to know
+            what a boundary is. */}
         <View style={styles.flex}>
-          {tab === 'camera' ? (
-            <CameraScreen onReady={() => setTab('capture')} />
-          ) : tab === 'capture' ? (
-            <CaptureScreen
-              online={online}
-              onQueueChanged={refreshQueueCount}
-              onOpenQueue={() => setTab('queue')}
-              onOpenCamera={() => setTab('camera')}
-            />
-          ) : (
-            <QueueScreen online={online} onQueueChanged={refreshQueueCount} />
-          )}
+          <ErrorBoundary resetKey={tab}>
+            {tab === 'camera' ? (
+              <CameraScreen onReady={() => setTab('capture')} />
+            ) : tab === 'capture' ? (
+              <CaptureScreen
+                online={online}
+                onQueueChanged={refreshQueueCount}
+                onOpenQueue={() => setTab('queue')}
+                onOpenCamera={() => setTab('camera')}
+              />
+            ) : (
+              <QueueScreen online={online} onQueueChanged={refreshQueueCount} />
+            )}
+          </ErrorBoundary>
         </View>
 
         <View style={styles.tabBar}>

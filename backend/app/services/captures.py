@@ -44,6 +44,7 @@ from app.processing.media import SniffResult, sniff
 from app.schemas.capture import CaptureSessionCreate
 from app.storage import extension_of, get_storage, session_key, session_prefix
 from app.storage.base import validate_key
+from app.storage.maintenance import purge_abandoned_uploads
 from app.storage.multipart import (
     MIN_PART_BYTES,
     MultipartStorage,
@@ -403,6 +404,12 @@ def prepare_multipart_upload(
 
     safe_name, extension = _checked_filename(filename)
     storage = _multipart_storage()
+
+    # Opportunistic, throttled to once an hour, and deliberately here: starting a chunked upload
+    # is the act that creates parts, so it is the right moment to collect the ones an earlier
+    # attempt abandoned. A busy deployment sweeps often and an idle one does not spin, with no
+    # scheduler process to run.
+    purge_abandoned_uploads()
 
     plan = plan_parts(size_bytes)
     key = _source_key(session, new_id(), extension)

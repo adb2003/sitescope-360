@@ -95,6 +95,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     get_queue()
 
+    # Sweep parts left by chunked uploads nobody finished. A deploy is a natural moment for it,
+    # and on the filesystem backend nothing else would ever collect them.
+    from app.storage.maintenance import purge_abandoned_uploads
+
+    dropped = purge_abandoned_uploads(force=True)
+    if dropped:
+        logger.info("Cleared %d abandoned upload(s) from staging", dropped)
+
     yield
 
     from app.queue import reset_queue

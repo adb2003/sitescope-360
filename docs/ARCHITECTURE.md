@@ -323,9 +323,21 @@ be refused *before* any bytes move, which the presigned single PUT cannot do at 
 Locally, parts are ordinary objects under a staging prefix, which is what lets them reuse the
 signed `PUT /api/files/{key}` route unchanged. The prefix deliberately sits outside the project
 tree, so a part can never satisfy the "does this key belong to that session" check applied to a
-finished object. `LocalStorage.purge_stale_uploads` is the filesystem's substitute for a bucket
-lifecycle rule; on S3, `AbortIncompleteMultipartUpload` is the backstop for a client that simply
-stops calling.
+finished object.
+
+**Collecting what nobody finished.** An upload that is neither completed nor aborted leaves its
+parts behind. On S3 that is the bucket's `AbortIncompleteMultipartUpload` rule; a filesystem has
+no equivalent, so `LocalStorage.purge_stale_uploads` is the substitute — and it is *called*, which
+is worth stating because for a while it was not. It existed, this document claimed it was the
+safeguard, and nothing invoked it: every abandoned upload stranded its parts permanently, so a
+2 GB walkthrough failing at ninety percent left nearly 2 GB behind for ever.
+
+It runs at API startup, and again when a chunked upload begins, throttled to once an hour per
+process (`storage/maintenance.py`). Tying it to the act that creates the garbage means a busy
+deployment sweeps often and an idle one does not spin — and it needs no cron, no beat worker and
+no second process, which is what keeps the whole stack runnable on a laptop. Age comes from the
+staging manifest rather than directory mtime, because writing a part touches the directory and
+would keep a stalled upload looking fresh indefinitely.
 
 #### Which route a file takes
 

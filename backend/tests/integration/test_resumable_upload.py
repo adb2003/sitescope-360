@@ -340,6 +340,93 @@ def test_an_unsupported_extension_never_starts_an_upload(client: TestClient, adm
     assert response.status_code == 415, response.text
 
 
+# ---- collecting what nobody finished ---------------------------------------------------------
+def _stale_staging(age_seconds: int) -> str:
+    """A staging directory whose manifest says it was started long ago."""
+    import json
+    import time
+
+    storage = get_storage()
+    upload_id = storage.begin_multipart(
+        "projects/p/floors/f/sessions/s/source/abc.jpg", "image/jpeg"
+    )
+    directory = storage.root / storage.STAGING_PREFIX / upload_id
+    manifest = directory / "manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["started"] = int(time.time()) - age_seconds
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    return upload_id
+
+
+def test_parts_from_an_upload_nobody_finished_are_collected() -> None:
+    """The sweep itself. On the filesystem backend nothing else ever reclaims these.
+
+    S3 has `AbortIncompleteMultipartUpload` on the bucket; a directory has no equivalent, so a
+    two-gigabyte walkthrough abandoned at ninety percent strands nearly two gigabytes for ever.
+    """
+    storage = get_storage()
+    upload_id = _stale_staging(age_seconds=48 * 3600)
+    assert (storage.root / storage.STAGING_PREFIX / upload_id).is_dir()
+
+    dropped = storage.purge_stale_uploads()
+
+    assert dropped >= 1
+    assert not (storage.root / storage.STAGING_PREFIX / upload_id).exists()
+
+
+def test_an_upload_still_in_progress_is_left_alone() -> None:
+    """Age is the whole test: sweeping an upload a client is mid-way through destroys it."""
+    storage = get_storage()
+    fresh = _stale_staging(age_seconds=0)
+
+    storage.purge_stale_uploads()
+
+    assert (storage.root / storage.STAGING_PREFIX / fresh).is_dir()
+
+
+def test_the_sweep_runs_when_a_chunked_upload_starts(client: TestClient, admin) -> None:
+    """Wired to the act that creates the garbage, so no scheduler is needed.
+
+    The method existed and had no caller at all, which made the documented safeguard a fiction:
+    every abandoned upload accumulated permanently. This is the test that would have caught it.
+    """
+    from app.storage.maintenance import reset_purge_throttle
+
+    reset_purge_throttle()
+    storage = get_storage()
+    headers = auth_headers(client, admin.email)
+    session_id = _session(client, headers, _floor(client, headers, "MP-P"), "CAP-20260101-01-PURGE")
+    stale = _stale_staging(age_seconds=48 * 3600)
+
+    assert _start(client, headers, session_id, "walk.jpg", 4096).status_code == 200
+
+    assert not (storage.root / storage.STAGING_PREFIX / stale).exists()
+
+
+def test_the_sweep_is_throttled_so_every_upload_does_not_walk_the_directory(
+    client: TestClient, admin
+) -> None:
+    """Once an hour per process is enough for something a day old.
+
+    Without the throttle a deployment starting uploads steadily would rescan staging on every
+    one of them, which is work that finds nothing almost every time.
+    """
+    from app.storage.maintenance import reset_purge_throttle
+
+    reset_purge_throttle()
+    storage = get_storage()
+    headers = auth_headers(client, admin.email)
+    session_id = _session(client, headers, _floor(client, headers, "MP-T"), "CAP-20260101-01-THROT")
+
+    # First upload sweeps and stamps the throttle.
+    _start(client, headers, session_id, "walk.jpg", 4096)
+    # A directory that goes stale *after* that must survive until the interval elapses.
+    stale = _stale_staging(age_seconds=48 * 3600)
+    _start(client, headers, session_id, "walk2.jpg", 4096)
+
+    assert (storage.root / storage.STAGING_PREFIX / stale).is_dir()
+
+
 @pytest.mark.slow
 def test_aborting_discards_the_parts(client: TestClient, admin, two_part_file) -> None:
     """Parts are billable and invisible: not objects, not listed, and never looked for again."""

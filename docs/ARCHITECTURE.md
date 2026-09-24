@@ -367,6 +367,34 @@ fails in production having worked locally:
    "MaxAgeSeconds": 3000 }]
 ```
 
+#### The queue has to be recoverable, not just durable
+
+Durability was never the problem — SQLite and the device filesystem had that. Two ways a capture
+could get *stuck* were:
+
+**A file nobody could remove.** `queue.ts` had `enqueueFile` and `discardUploaded` and nothing for
+a pending one, so a wrong file — wrong floor, wrong take, a 2 GiB video picked by mistake — could
+not be taken out. It held device storage, and because files upload serially and a failure stops
+the run, one that kept failing blocked every capture queued behind it. The only escape was
+reinstalling the app, which throws away the captures the operator *does* want. `removeFile` fixes
+that, behind a confirmation that names the file and says the copy is the only one, because it is.
+
+A chunked upload already in flight is abandoned server-side first so its parts do not linger —
+best effort, because the operator is usually removing a file *because* they are short of space or
+signal, and refusing to free their storage until the server answers would deny them the one thing
+they asked for. Stranded parts are bounded by `LocalStorage.purge_stale_uploads` or S3's
+`AbortIncompleteMultipartUpload`; a device with no room is not.
+
+**A file stuck in `uploading`.** `sync` marks a row `uploading` before the transfer and moves it
+on afterwards. A phone killing the app in between is ordinary, and the row then kept that status
+for ever — invisible to `sync`, which picks up only `pending` and `failed`. The capture silently
+never uploaded and nothing on screen explained why. `openQueue` now returns those rows to
+`pending`: nothing can legitimately be uploading at the moment the database opens, so they are
+all orphans.
+
+Both rules live in `mobile/src/lib/queuePolicy.ts` rather than in `queue.ts`, so the Node test
+runner reaches them without booting expo-sqlite — the same split as `syncPolicy.ts`.
+
 #### Offline in both directions: the reference-data cache
 
 The mobile app was offline-first in one direction only. A capture recorded without signal was

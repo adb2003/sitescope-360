@@ -203,3 +203,28 @@ export function uploadFile<T>(
   if (route === 'direct') return uploadDirect<T>(io, sessionId, file)
   return io.postFile<T>(`/captures/${sessionId}/upload`, file)
 }
+
+/**
+ * Tell the server to throw away a chunked upload nobody is going to finish.
+ *
+ * Called when the operator removes a queued file that already has parts in storage. Those parts
+ * are invisible otherwise — they are not objects, nothing lists them, and on S3 they are billed
+ * until something says so — which makes giving up something a client has to *do* rather than
+ * something it does by going quiet.
+ *
+ * Takes the name and size because the endpoint validates the key against them, the same checks
+ * every other step of the chunked route applies.
+ */
+export async function abandonUpload(
+  io: UploadIO,
+  sessionId: string,
+  resume: ResumeHandle,
+  file: { name: string; sizeBytes: number },
+): Promise<void> {
+  await io.post(`/captures/${sessionId}/multipart/abort`, {
+    storage_key: resume.storageKey,
+    upload_id: resume.uploadId,
+    filename: file.name,
+    size_bytes: file.sizeBytes,
+  })
+}

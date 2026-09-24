@@ -7,13 +7,15 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
-import { RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native'
+import { Alert, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native'
 
 import { Badge, Body, Button, Callout, Card, Divider, Heading, Label } from '../components/ui'
+import { isRemovable } from '../lib/queuePolicy'
 import {
   discardUploaded,
   listFiles,
   listSessions,
+  removeFile,
   requestProcessing,
   sync,
   type PendingFile,
@@ -64,6 +66,43 @@ export function QueueScreen({
       await load()
       setBusy(false)
     }
+  }
+
+  /**
+   * Ask before destroying the only copy of a recording.
+   *
+   * A queued file exists nowhere else until it uploads, so this is genuinely irreversible — the
+   * alert names the file and says so plainly rather than asking "Are you sure?", which tells an
+   * operator nothing about what they are about to lose.
+   */
+  function confirmRemove(file: PendingFile) {
+    Alert.alert(
+      'Remove this file?',
+      `${file.name} has not uploaded yet. Removing it deletes the only copy from this device, `
+        + 'and it cannot be recovered.',
+      [
+        { text: 'Keep it', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              setBusy(true)
+              setMessage(null)
+              try {
+                const removed = await removeFile(file.id)
+                setMessage(removed ? `Removed ${file.name}.` : `${file.name} was already gone.`)
+              } catch (caught) {
+                setMessage(caught instanceof Error ? caught.message : 'Could not remove the file')
+              } finally {
+                setBusy(false)
+                await load()
+              }
+            })()
+          },
+        },
+      ],
+    )
   }
 
   async function process(sessionId: string) {
@@ -194,6 +233,16 @@ export function QueueScreen({
                               : 'neutral'
                       }
                     />
+                    {/* Only for files still on the device. An uploaded one is the server's now,
+                        and `Clear uploaded` below is the right way to reclaim that space. */}
+                    {isRemovable(file.status) ? (
+                      <Button
+                        label="Remove"
+                        variant="ghost"
+                        disabled={busy}
+                        onPress={() => confirmRemove(file)}
+                      />
+                    ) : null}
                   </View>
                 ))}
 

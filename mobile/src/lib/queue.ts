@@ -29,9 +29,10 @@ import { Platform } from 'react-native'
 import type * as SQLiteTypes from 'expo-sqlite'
 
 import { api } from './api'
+import { isRemovable, stuckUploadIds } from './queuePolicy'
 import { isAlreadyProcessing, sessionsReadyForProcessing } from './syncPolicy'
 import { clearOrphanedParts, expoUploadIO } from './uploadIO'
-import { ResumableUploadInterrupted, uploadFile, type ResumeHandle } from './uploads'
+import { ResumableUploadInterrupted, abandonUpload, uploadFile, type ResumeHandle } from './uploads'
 
 const DB_NAME = 'sitescope.db'
 const UPLOAD_DIR = `${FileSystem.documentDirectory}captures/`
@@ -165,6 +166,10 @@ export async function openQueue(): Promise<SQLiteTypes.SQLiteDatabase> {
 
   await addColumnIfMissing(database, 'files', 'resume_key', 'TEXT')
   await addColumnIfMissing(database, 'files', 'resume_upload_id', 'TEXT')
+
+  // Nothing can be mid-upload at the moment the database opens, so any row claiming to be is
+  // from a run the OS ended. Left alone it would never be retried and never explained.
+  await recoverInterruptedUploads(database)
 
   await FileSystem.makeDirectoryAsync(UPLOAD_DIR, { intermediates: true }).catch(() => undefined)
   return database
@@ -476,6 +481,69 @@ export async function requestProcessing(sessionId: string): Promise<void> {
     )
   }
   await api.post(`/captures/${sessionId}/process`, {})
+}
+
+/**
+ * Take one file out of the queue and delete it from the device.
+ *
+ * **This destroys the only copy.** A queued recording exists nowhere else until it uploads, so
+ * the caller must have asked the operator first — `QueueScreen` does, with the file named.
+ *
+ * It exists because the alternative was worse. A wrong file — the wrong floor, the wrong take, a
+ * 2 GiB video picked by mistake — could not be removed at all: it sat in SQLite occupying device
+ * storage, and because files upload serially and a failure stops the run, a file that keeps
+ * failing blocks every capture queued behind it. The only escape was reinstalling the app, which
+ * throws away the captures the operator actually wants.
+ *
+ * A chunked upload already in flight is abandoned server-side first, so its parts do not linger.
+ * That call is best effort: the operator is usually removing a file *because* they are short of
+ * space or signal, and refusing to free their storage until the server can be reached would deny
+ * them the one thing they asked for. Stranded parts are collected by
+ * `LocalStorage.purge_stale_uploads` or, on S3, by the bucket's `AbortIncompleteMultipartUpload`
+ * rule — bounded, where a device with no room is not.
+ */
+export async function removeFile(fileId: string): Promise<boolean> {
+  const db = await openQueue()
+  const row = await db.getFirstAsync<Record<string, unknown>>('SELECT * FROM files WHERE id = ?', [
+    fileId,
+  ])
+  if (!row) return false
+
+  const file = rowToFile(row)
+  if (!isRemovable(file.status)) return false
+
+  if (file.resume) {
+    await abandonUpload(expoUploadIO, file.sessionId, file.resume, {
+      name: file.name,
+      sizeBytes: file.sizeBytes,
+    }).catch(() => undefined)
+  }
+
+  await FileSystem.deleteAsync(file.localUri, { idempotent: true }).catch(() => undefined)
+  await db.runAsync('DELETE FROM files WHERE id = ?', [fileId])
+  return true
+}
+
+/**
+ * Return rows orphaned mid-upload to `pending`, so they are retried instead of forgotten.
+ *
+ * `sync` marks a row `uploading` before the transfer and only moves it on afterwards. A phone
+ * killing the app in between is ordinary, and the row then keeps that status for ever — invisible
+ * to `sync`, which picks up only `pending` and `failed`. The capture silently never uploads, and
+ * nothing on screen explains why.
+ *
+ * Called from `openQueue`, where "something is uploading" cannot be true: whatever process was
+ * doing it no longer exists.
+ */
+async function recoverInterruptedUploads(db: SQLiteTypes.SQLiteDatabase): Promise<number> {
+  const rows = await db.getAllAsync<{ id: string; status: string }>(
+    'SELECT id, status FROM files',
+  )
+  const stuck = stuckUploadIds(rows)
+  for (const id of stuck) {
+    await db.runAsync("UPDATE files SET status = 'pending' WHERE id = ?", [id])
+  }
+  return stuck.length
 }
 
 export async function discardUploaded(): Promise<number> {

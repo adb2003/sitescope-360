@@ -427,6 +427,31 @@ def test_the_sweep_is_throttled_so_every_upload_does_not_walk_the_directory(
     assert (storage.root / storage.STAGING_PREFIX / stale).is_dir()
 
 
+def test_a_host_that_only_just_booted_still_sweeps(monkeypatch) -> None:
+    """Never swept is not the same as swept at time zero, on a clock that starts at boot.
+
+    `time.monotonic` counts from boot, so a machine twelve seconds into its uptime is twelve
+    seconds away from zero: with 0.0 standing for "never", the throttle concluded it had just
+    swept and skipped every opportunistic sweep for the first hour of uptime — which is exactly
+    the hour after a deploy. CI caught this and a developer machine never would, because uptime
+    there is measured in days; hence a stubbed clock rather than the real one.
+    """
+    from app.storage import maintenance
+
+    class JustBooted:
+        @staticmethod
+        def monotonic() -> float:
+            return 12.0
+
+    storage = get_storage()
+    stale = _stale_staging(age_seconds=48 * 3600)
+    maintenance.reset_purge_throttle()
+    monkeypatch.setattr(maintenance, "time", JustBooted)
+
+    assert maintenance.purge_abandoned_uploads() >= 1
+    assert not (storage.root / storage.STAGING_PREFIX / stale).exists()
+
+
 @pytest.mark.slow
 def test_aborting_discards_the_parts(client: TestClient, admin, two_part_file) -> None:
     """Parts are billable and invisible: not objects, not listed, and never looked for again."""

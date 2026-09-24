@@ -36,7 +36,14 @@ logger = get_logger(__name__)
 #: nothing, and sweeping less often lets a deployment that never restarts accumulate indefinitely.
 PURGE_INTERVAL_SECONDS = 3600
 
-_last_purge = 0.0
+#: When the last sweep ran, on the monotonic clock, or ``None`` if none has yet.
+#:
+#: ``None`` rather than ``0.0``, because ``time.monotonic()`` counts from boot: on a host that came
+#: up two minutes ago the distance from zero is two minutes, so a zero sentinel reads as "swept just
+#: now" and suppresses every opportunistic sweep for the first hour of uptime — exactly the window
+#: after a deploy. The startup sweep hides most of the damage; a worker process that never runs the
+#: lifespan would simply not sweep at all.
+_last_purge: float | None = None
 _lock = threading.Lock()
 
 
@@ -56,7 +63,7 @@ def purge_abandoned_uploads(*, force: bool = False) -> int:
     with _lock:
         # Checked and stamped under the same lock, so two requests arriving together produce one
         # sweep rather than two walking the same directory.
-        if not force and now - _last_purge < PURGE_INTERVAL_SECONDS:
+        if not force and _last_purge is not None and now - _last_purge < PURGE_INTERVAL_SECONDS:
             return 0
         _set_last_purge(now)
 
@@ -71,11 +78,11 @@ def purge_abandoned_uploads(*, force: bool = False) -> int:
     return dropped
 
 
-def _set_last_purge(value: float) -> None:
+def _set_last_purge(value: float | None) -> None:
     global _last_purge
     _last_purge = value
 
 
 def reset_purge_throttle() -> None:
     """Forget when the last sweep happened. For tests."""
-    _set_last_purge(0.0)
+    _set_last_purge(None)

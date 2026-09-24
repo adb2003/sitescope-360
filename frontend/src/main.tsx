@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 
 import { App } from '@/App'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { ApiError } from '@/lib/api'
 import { AuthProvider } from '@/hooks/useAuth'
 import { ProjectContextProvider } from '@/hooks/useProjectContext'
@@ -29,14 +30,20 @@ if (!container) throw new Error('#root is missing from index.html')
 
 createRoot(container).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <ProjectContextProvider>
-          <AuthProvider>
-            <App />
-          </AuthProvider>
-        </ProjectContextProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
+    {/* Outermost, for a failure in the shell or a provider — the cases where there is no
+        navigation left to escape with and a reload is the only move. The per-page boundary in
+        AppShell handles everything below it, and handles it better, because the operator keeps
+        the rest of the application. */}
+    <ErrorBoundary scope="app">
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <ProjectContextProvider>
+            <AuthProvider>
+              <App />
+            </AuthProvider>
+          </ProjectContextProvider>
+        </BrowserRouter>
+      </QueryClientProvider>
+    </ErrorBoundary>
   </StrictMode>,
 )

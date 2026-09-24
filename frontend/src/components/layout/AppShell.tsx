@@ -28,6 +28,7 @@ import {
 import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 
+import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { Badge, Button, Spinner } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
 import { useCaptureEvents } from '@/hooks/useCaptureEvents'
@@ -190,7 +191,13 @@ export function AppShell() {
         </header>
 
         <main className="min-w-0 flex-1">
-          <Outlet />
+          {/* Inside the shell, so a page that throws leaves the navigation intact — an operator
+              whose viewer crashed can still reach the upload queue and see their capture is
+              safe. Keyed on the path so walking away from the broken page clears it, rather than
+              the fallback following them around until they reload. */}
+          <ErrorBoundary resetKey={location.pathname}>
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
     </div>

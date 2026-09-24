@@ -209,12 +209,32 @@ async function send(path: string, options: RequestOptions): Promise<Response> {
     body = JSON.stringify(options.body)
   }
 
-  return fetch(buildUrl(path, options.query), {
+  const response = await fetch(buildUrl(path, options.query), {
     method: options.method ?? 'GET',
     headers,
     body,
     signal: options.signal,
   })
+  rememberCorrelationId(response)
+  return response
+}
+
+/**
+ * The correlation id of the most recent API response, or null.
+ *
+ * Kept so a crash screen can give the operator something a developer can search the server logs
+ * for. It is the *last request*, not the cause — a render error may have nothing to do with it —
+ * and the UI is careful to label it that way rather than implying a link it cannot know about.
+ */
+let lastCorrelationId: string | null = null
+
+function rememberCorrelationId(response: Response): void {
+  const id = response.headers.get('X-Correlation-Id')
+  if (id) lastCorrelationId = id
+}
+
+export function getLastCorrelationId(): string | null {
+  return lastCorrelationId
 }
 
 async function finish<T>(response: Response, options: RequestOptions): Promise<T> {

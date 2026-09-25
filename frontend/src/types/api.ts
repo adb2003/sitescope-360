@@ -429,6 +429,12 @@ export interface LocalizeResult {
   reused_locations: number
   new_locations: number
   references_considered: number
+  /**
+   * Hops of automatic recognition between this placement and a point a person placed. 0 means it
+   * was anchored against points somebody put down; higher means a chain of estimates, each one
+   * accurate only to a viewpoint tolerance, and nothing in the coordinates shows it.
+   */
+  generation: number
   rms_error_px: number | null
   matches: LocalizeMatch[]
 }

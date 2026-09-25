@@ -29,6 +29,15 @@ Frames placed by the fitted transform get new locations instead, because a fit s
 frame probably was, not that it was where some earlier frame was. Snapping those to nearby
 existing points would turn an estimate into a claim of identity.
 
+**Drift compounds, so it is counted.** The points this service creates become references for the
+next capture, and every hop matches only to within a viewpoint tolerance — so a chain of
+placements can walk away from the truth while every generation looks exactly like the first in
+the coordinates. `CaptureLocation.placement_generation` records how many hops separate a point
+from a person, and `MAX_ANCHOR_GENERATION` refuses to *create* points from references deeper than
+that. Reusing a point is never refused however deep it is: joining an existing point adds no new
+coordinate, so the frame is exactly as right or wrong as that point already was, and shares that
+with every other capture there — which is what date-to-date comparison actually needs.
+
 The service flushes and never commits. It is called both from a route and from inside the
 MAPPING pipeline stage, and the stage runner owns a transaction it rolls back when a stage
 fails — a commit here would leave half a stage's work behind after that rollback.
@@ -67,6 +76,24 @@ from app.vision.types import FeatureSet, RelativePose
 #: anything like itself.
 MAX_REFERENCE_FRAMES = 400
 
+#: How many hops of recognition a reference may be from a person and still anchor a *new* point.
+#:
+#: Recognition places a capture from earlier captures, and the points it creates then anchor the
+#: capture after that. Left alone, that chain runs forever: every hop matches only to within a
+#: viewpoint tolerance, so each one can add up to about a metre, and after enough of them a point
+#: is in the wrong room while looking exactly like one a person placed.
+#:
+#: The cap applies only to *creating* points. Reusing one is always allowed however deep it is,
+#: because joining an existing point introduces no new coordinate — the frame is exactly as right
+#: or wrong as the point already was, and shares that with every other capture there, which is
+#: what date-to-date comparison needs. Creating a point is where a new number enters the system,
+#: and that is what this bounds.
+#:
+#: Three, so a floor stays usable for a few unattended visits before it wants a human again. When
+#: the cap bites, the answer is cheap and the report says so: anchor one capture by hand, and its
+#: points are generation 0.
+MAX_ANCHOR_GENERATION = 3
+
 #: What `placement_method` records when this service did the placing.
 PLACEMENT_METHOD = "cross_session"
 
@@ -89,6 +116,10 @@ class LocalizationOutcome:
     reused_locations: int = 0
     new_locations: int = 0
     references_considered: int = 0
+    #: Hops of automatic recognition between this placement and a point a person placed. 0 means
+    #: it was anchored against points somebody put down; higher means a chain, and a chain is
+    #: exactly what the coordinates cannot show.
+    generation: int = 0
     transform: dict[str, float] | None = None
     report: dict[str, Any] = field(default_factory=dict)
 
@@ -103,6 +134,7 @@ class LocalizationOutcome:
             "reused_locations": self.reused_locations,
             "new_locations": self.new_locations,
             "references_considered": self.references_considered,
+            "generation": self.generation,
             "transform": self.transform,
             "recognition": self.report,
         }
@@ -238,15 +270,25 @@ def _place_whole_track(
             "transform across it."
         )
 
-    anchors = [
-        (match.query_index, match.plan_x, match.plan_y)
-        for match in report.matches
-        if frames[match.query_index].rel_x is not None
+    usable_matches = [
+        match for match in report.matches if frames[match.query_index].rel_x is not None
     ]
+    anchors = [(match.query_index, match.plan_x, match.plan_y) for match in usable_matches]
     if len(anchors) < MIN_TRANSFORM_MATCHES:
         return (
             f"{len(anchors)} of the recognised frames have an estimated position, which is too "
             "few to fit a transform over the walk."
+        )
+
+    # How far these anchors already are from a person. Every point this fit creates inherits the
+    # deepest of them plus one, so this is the number that decides whether the walk may create
+    # points at all — not whether it may be recognised, which is never in question.
+    depth = max(match.generation for match in usable_matches)
+    if depth >= MAX_ANCHOR_GENERATION:
+        return (
+            f"The recognised frames are {depth} hops of automatic recognition away from a point "
+            "anyone placed, so new points fitted from them would be guesses built on guesses. "
+            "Anchor one capture of this floor by hand to reset the chain."
         )
 
     fit = MapBuilder().place_track(poses, anchors)
@@ -285,6 +327,7 @@ def _place_whole_track(
             provenance=DataProvenance.ESTIMATED,
             confidence=float(entry["confidence"]),
             created_by_id=user_id,
+            generation=depth + 1,
             commit=False,
         )
         _bind(frame, location, confidence=float(entry["confidence"]))
@@ -304,7 +347,13 @@ def _place_whole_track(
 
     note = (
         f"Placed automatically from {len(anchors)} frames recognised in earlier captures of this "
-        f"floor; residual {fit.transform.rms_error_px:.1f}px. Positions are estimated."
+        f"floor; residual {fit.transform.rms_error_px:.1f}px. Positions are estimated"
+        + (
+            f", and the {created} new point(s) are {depth + 1} hop(s) of recognition from a point "
+            "anyone placed."
+            if created
+            else ", and every frame joined a point that already existed."
+        )
     )
     outcome = LocalizationOutcome(
         ok=True,
@@ -317,6 +366,7 @@ def _place_whole_track(
         new_locations=created,
         references_considered=report.references_considered,
         transform=fit.transform.to_dict(),
+        generation=depth + 1 if created else depth,
         report=report.to_dict(),
     )
     _record(db, session, outcome)
@@ -349,10 +399,13 @@ def _place_recognised_only(
         mode="recognised",
         reason="placed" if reused else "no_matches",
         note=note,
+        # Whatever the deepest point it joined was. Nothing was created, so nothing was added to
+        # the chain — this capture is exactly as far from a person as the points it sat down on.
         placed_frames=reused,
         matched_frames=len(report.matches),
         reused_locations=reused,
         references_considered=report.references_considered,
+        generation=max((match.generation for match in report.matches), default=0),
         report=report.to_dict(),
     )
     _record(db, session, outcome)
@@ -470,6 +523,7 @@ def _reference_frames(db: Session, session: CaptureSession) -> list[ReferenceFra
             plan_y=float(location.y),
             perceptual_hash=str(frame.perceptual_hash),
             location_id=location.id,
+            generation=int(location.placement_generation or 0),
             load_features=loader(str(frame.feature_blob_key)),
         )
         for frame, location in rows

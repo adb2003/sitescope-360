@@ -289,6 +289,11 @@ Three numbers carry the design, and each is a refusal:
 | `MAX_PARALLAX_DEG` = 8.0 | **Not** slam's 0.3°. That asks whether a walk stood where it already stood; this asks whether an operator stood close enough a week later. 0.3° is 1.6 cm at 3 m depth, which no revisit satisfies. 8° is roughly 0.5 m at that depth and 1.7 m across a 12 m space — a viewpoint tolerance, not an identity test. |
 | `MIN_TRANSFORM_MATCHES` = 3 | Two correspondences fit a similarity transform exactly, so the residual is zero however wrong they are. Below three, only the frames actually recognised are placed. |
 
+Because these placements become the references for the next capture, each point records how far
+it is from a person (`placement_generation`) and `MAX_ANCHOR_GENERATION` bounds how deep a chain
+may get before new points stop being created from it. Reuse is never capped: joining a point adds
+no coordinate and so adds no error.
+
 Every shortlisted candidate is verified and the **least-parallax** one wins. The tolerance can
 exceed the spacing between capture points, so two adjacent references may both qualify; taking
 the first would shift the whole walk by one point, and since every frame shifts the same way the

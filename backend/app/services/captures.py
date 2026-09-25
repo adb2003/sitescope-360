@@ -742,6 +742,7 @@ def create_location(
     provenance: DataProvenance = DataProvenance.MANUAL,
     confidence: float | None = None,
     created_by_id: str | None = None,
+    generation: int = 0,
     commit: bool = True,
 ) -> CaptureLocation:
     """Create one capture point on a floor plan.
@@ -749,6 +750,10 @@ def create_location(
     ``commit=False`` flushes instead, for callers that create several points as one unit of work
     — and for the pipeline stages, where the stage runner owns the transaction and rolls it back
     on failure. A commit from inside a stage would survive that rollback.
+
+    ``generation`` is how many hops of automatic recognition separate this point from a person.
+    It defaults to 0 because every caller but one is human-driven — the floor-plan editor, and a
+    transform an operator anchored. Only cross-session recognition passes anything else.
     """
     plan = _resolve_plan(db, floor, floor_plan_id)
     # Coordinates are floor-plan pixels; a point outside the raster is a client bug, and
@@ -783,6 +788,7 @@ def create_location(
         y=y,
         provenance=provenance,
         confidence=confidence,
+        placement_generation=generation,
         created_by_id=created_by_id,
     )
     db.add(location)
@@ -809,9 +815,22 @@ def _resolve_plan(db: Session, floor: Floor, floor_plan_id: str | None) -> Floor
 
 
 def assign_frame_to_location(
-    db: Session, frame: CaptureFrame, location: CaptureLocation
+    db: Session,
+    frame: CaptureFrame,
+    location: CaptureLocation,
+    *,
+    provenance: DataProvenance = DataProvenance.MANUAL,
+    confidence: float = 1.0,
 ) -> CaptureFrame:
-    """Bind a frame to a floor-plan location and rebuild the session's path (§12, §13)."""
+    """Bind a frame to a floor-plan location and rebuild the session's path (§12, §13).
+
+    ``provenance`` defaults to ``MANUAL`` because the common caller is a person dropping a pin,
+    and for them full confidence is the truth. It is a parameter because it was not the truth for
+    every caller: anchoring creates its locations as ``ESTIMATED`` — they came out of a transform
+    fitted to a handful of points — and then this function stamped every frame it placed as
+    hand-positioned at confidence 1.0, so the location row and the frame sitting on it disagreed
+    about where the number came from (§46).
+    """
     session = db.get(CaptureSession, frame.session_id)
     if session is None:
         raise NotFoundError("The frame's capture session no longer exists")
@@ -821,8 +840,8 @@ def assign_frame_to_location(
         )
 
     frame.location_id = location.id
-    frame.position_provenance = DataProvenance.MANUAL
-    frame.position_confidence = 1.0
+    frame.position_provenance = provenance
+    frame.position_confidence = confidence
     db.flush()
 
     from app.processing.stages import build_capture_path

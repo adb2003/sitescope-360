@@ -173,14 +173,14 @@ Stated plainly, because "it builds" and "it works" are different claims.
 
 | Area | Status |
 | --- | --- |
-| Backend: 376 tests, ruff, ruff-format, mypy | **Verified** — all pass on this machine |
+| Backend: 380 tests, ruff, ruff-format, mypy | **Verified** — all pass on this machine |
 | Migrations on SQLite; PostgreSQL DDL generation; no model drift | **Verified** |
 | Full §52 workflow end to end over HTTP | **Verified** |
 | Two-view geometry vs ground truth | **Verified** — known pose recovered to <1° yaw, <0.05 m track error on exact correspondences |
 | Relative positioning through ORB, end to end | **Verified, platform-dependent** — 0.13 m mean on Windows, 1.57 m on Linux CI. See [VISION_PIPELINE.md](docs/VISION_PIPELINE.md#measured-accuracy). |
 | Mapping refusal when frames are too far apart | **Verified** |
-| Cross-session placement: a second capture of a floor places itself | **Verified** — over HTTP against the live API and in `test_cross_session.py`; the revisit joined all five of the first capture's points rather than making its own. The parallax bar is a viewpoint tolerance, not an identity test — see [limitation 6](docs/ROADMAP.md). |
-| Frontend: 107 tests, ESLint, TypeScript, production build | **Verified** |
+| Cross-session placement: a second capture of a floor places itself | **Verified** — over HTTP against the live API and in `test_cross_session.py`; the revisit joined all five of the first capture's points rather than making its own. The parallax bar is a viewpoint tolerance, not an identity test, and points created by recognition record how many hops they are from a point a person placed — see [limitation 6](docs/ROADMAP.md). |
+| Frontend: 109 tests, ESLint, TypeScript, production build | **Verified** |
 | Demo seed, live API over HTTP | **Verified** |
 | Docker Compose, Dockerfiles, nginx | **Written, not executed locally** — Docker is not installed on this machine. CI builds both images and runs a stack smoke test. |
 | Mobile: TypeScript, 31 camera-protocol tests | **Verified** — the OSC client takes its transport as a dependency, so it runs under Node in CI. |

@@ -138,7 +138,16 @@ def align_session_to_plan(
             confidence=entry["confidence"],
             created_by_id=user_id,
         )
-        capture_service.assign_frame_to_location(db, frame, location)
+        # ESTIMATED on the frame too, matching the location it is being bound to. Nobody said
+        # this frame was here: a transform fitted to two or three points said so, and the
+        # confidence that travels with it is the estimator's, not a person's certainty.
+        capture_service.assign_frame_to_location(
+            db,
+            frame,
+            location,
+            provenance=DataProvenance.ESTIMATED,
+            confidence=entry["confidence"],
+        )
         placed += 1
 
     # Recorded so a reader can tell a hand-anchored placement from one that recognised itself

@@ -580,6 +580,21 @@ capture placed two pixels from last month's is on the plan and compares against 
 placed by the transform rather than recognised get new locations, because a fit says where a
 frame probably was, not that it was where some earlier frame was.
 
+**Drift is counted, not merely hoped against.** The points recognition creates become the
+references for the next capture, so the tolerance above compounds along a chain — and every
+generation looks exactly like the first in the coordinates, which is the whole danger.
+`capture_locations.placement_generation` records how many hops separate a point from a person: 0
+for one somebody placed or anchored, 1 for one fitted from generation-0 points, and so on.
+`MAX_ANCHOR_GENERATION` (3) refuses to *create* points from references deeper than that; the walk
+falls back to placing only what it recognised, and the note tells the operator to anchor one
+capture by hand to reset the chain.
+
+Reusing a point is never refused, however deep. Joining an existing point introduces no new
+coordinate — the frame is exactly as right or wrong as that point already was, and shares that
+error with every other capture standing there, which is precisely what date-to-date comparison
+needs. Creating a point is where a new number enters the system, so that is the only thing
+bounded.
+
 `placement_method` records `manual_anchors` or `cross_session`, and `localization_report` keeps
 the evidence — every match with its inlier count and residual parallax, everything rejected and
 why, and the fitted transform. The coordinates from the two paths are indistinguishable; how much

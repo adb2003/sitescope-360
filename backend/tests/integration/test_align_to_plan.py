@@ -100,6 +100,40 @@ def test_two_anchors_place_the_whole_track(client: TestClient, admin, panorama_f
     assert all(frame["location_id"] for frame in placed), placed
 
 
+def test_an_anchored_frame_is_estimated_not_manual(
+    client: TestClient, admin, panorama_factory
+) -> None:
+    """Nobody said where these frames were; a transform fitted to two points did (§46).
+
+    The locations anchoring creates have always been recorded as `estimated`, and for a while the
+    frames bound to them were stamped `manual` at confidence 1.0 — so the point said "a fit put me
+    here" and the frame standing on it said "a person did", about the same placement. Only one of
+    those can be true, and for every frame except the anchors themselves it is the first.
+    """
+    headers = auth_headers(client, admin.email)
+    floor_id = _floor_with_plan(client, headers, "ALN-PROV")
+    session_id, frames = _walked_capture(
+        client, headers, floor_id, panorama_factory, "CAP-20260914-100000-ALPV"
+    )
+
+    _align(
+        client,
+        headers,
+        session_id,
+        [
+            {"frame_id": frames[0]["id"], "x": 100.0, "y": 100.0},
+            {"frame_id": frames[-1]["id"], "x": 400.0, "y": 100.0},
+        ],
+    )
+
+    placed = client.get(f"/api/captures/{session_id}/frames", headers=headers).json()["items"]
+    assert {frame["position_provenance"] for frame in placed} == {"estimated"}
+    # Confidence now comes from the fit rather than being stamped 1.0 — but that is deliberately
+    # not asserted here. This walk maps at full confidence, so the estimator's own number *is*
+    # 1.0 and the two sources are indistinguishable on this input. An assertion that cannot fail
+    # for the right reason is worse than none, and the provenance above is the claim that matters.
+
+
 def test_the_anchors_land_where_they_were_dropped(
     client: TestClient, admin, panorama_factory
 ) -> None:

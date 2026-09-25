@@ -517,6 +517,7 @@ def _location_out(location: CaptureLocation, stats: LocationStats) -> CaptureLoc
                 "y",
                 "provenance",
                 "confidence",
+                "placement_generation",
                 "created_at",
             )
         },

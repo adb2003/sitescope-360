@@ -32,6 +32,10 @@ WALK = [(index * 1.2, 0.0, 0.0) for index in range(5)]
 #: uploaded bytes differ, so the second capture is not silently de-duplicated against the first.
 REVISIT = [(x + 0.15, y, heading) for x, y, heading in WALK]
 
+#: A later visit that also walks past the end of the original route, so it recognises the old
+#: points and has somewhere genuinely new to put points of its own.
+EXTENDED = [*REVISIT, (6.0, 0.0, 0.0), (7.2, 0.0, 0.0)]
+
 #: Plan pixels the first capture is anchored to. 100px per 1.2 m stop, so the whole walk spans
 #: 400px — comfortably past `MIN_ANCHOR_SEPARATION_PX`.
 ANCHOR_START = (100.0, 100.0)
@@ -279,3 +283,66 @@ def test_the_endpoint_places_a_capture_that_processing_could_not(
     assert body["ok"] is True, body
     assert body["placed_frames"] >= 3, body
     assert body["reused_locations"] >= 3, body
+
+
+# ---- how far a point is from a person ----------------------------------------
+def _locations(client: TestClient, headers: dict[str, str], floor_id: str) -> list[dict]:
+    return client.get(f"/api/floors/{floor_id}/locations", headers=headers).json()
+
+
+def test_a_point_created_by_recognition_records_its_distance_from_a_person(
+    client: TestClient, panorama_factory, walked_floor
+) -> None:
+    """Reusing a point adds no error; creating one does. Only the second deepens the chain.
+
+    A frame that joins an existing point is exactly as right or wrong as that point already was,
+    and shares that with every other capture there. A point *fitted* from those, though, is a new
+    coordinate derived from a match that was only ever accurate to a viewpoint tolerance — so it
+    is one hop further from anything a person checked, and says so.
+    """
+    headers, floor_id, _first_id, _first_frames = walked_floor
+
+    _second_id, _frames = _capture(
+        client, headers, floor_id, panorama_factory, "CAP-20260908-090000-FB", EXTENDED
+    )
+
+    by_generation: dict[int, int] = {}
+    for location in _locations(client, headers, floor_id):
+        generation = location["placement_generation"]
+        by_generation[generation] = by_generation.get(generation, 0) + 1
+
+    assert by_generation.get(0, 0) >= 3, "the hand-anchored points must stay at generation 0"
+    assert by_generation.get(1, 0) >= 1, "points fitted from them are one hop further out"
+
+
+def test_the_chain_is_refused_once_it_is_too_deep(
+    client: TestClient, panorama_factory, walked_floor, monkeypatch
+) -> None:
+    """The cap. Without it, recognition anchors to its own output forever.
+
+    Each hop matches only to within a viewpoint tolerance, so a chain of them drifts — silently,
+    because generation four looks exactly like generation zero in the coordinates. Past the cap a
+    walk may still be *recognised* (reuse costs nothing) but may not create new points from what
+    it recognised.
+
+    The cap is lowered to zero here rather than walking the floor four times: the behaviour under
+    test is what happens when the references are too deep, not how many captures it takes to get
+    there.
+    """
+    from app.services import relocalization
+
+    headers, floor_id, _first_id, _first_frames = walked_floor
+    monkeypatch.setattr(relocalization, "MAX_ANCHOR_GENERATION", 0)
+    before = len(_locations(client, headers, floor_id))
+
+    second_id, _frames = _capture(
+        client, headers, floor_id, panorama_factory, "CAP-20260908-090000-FC", EXTENDED
+    )
+
+    report = client.get(f"/api/captures/{second_id}", headers=headers).json()["localization_report"]
+    assert report["mode"] == "recognised", report["note"]
+    assert report["new_locations"] == 0
+    assert "anchor one capture of this floor by hand" in report["note"].lower()
+    # Recognition still happened: the frames it knew were placed on the points it knew.
+    assert report["reused_locations"] >= 3
+    assert len(_locations(client, headers, floor_id)) == before

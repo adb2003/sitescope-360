@@ -341,6 +341,10 @@ class VisionEngine:
                     "therefore evidence of nothing",
                     "a floor that has changed beyond recognition since it was last captured "
                     "will not be recognised, which is a refusal rather than a wrong answer",
+                    "points created by recognition anchor the next capture, so the tolerance "
+                    "compounds along a chain; each point records how many hops it is from one a "
+                    "person placed, and creating points from references more than three hops out "
+                    "is refused (reusing one is always allowed, as it adds no new coordinate)",
                     "the first capture of any floor still has to be anchored by hand",
                 ],
             },

@@ -44,6 +44,7 @@ function result(overrides: Partial<LocalizeResult> = {}): LocalizeResult {
     reused_locations: 5,
     new_locations: 0,
     references_considered: 40,
+    generation: 1,
     rms_error_px: 3.5,
     matches: [match(), match({ query_index: 1, parallax_deg: 2.4 })],
     ...overrides,
@@ -96,6 +97,20 @@ describe('RecognisePlacement', () => {
     show(result({ ok: false, mode: 'none', reason, placed_frames: 0, matches: [] }))
 
     expect(screen.getByText(title)).toBeInTheDocument()
+  })
+
+  it('warns when the placement rests on a chain of earlier estimates', () => {
+    // Generation four looks exactly like generation zero in the coordinates, which is the whole
+    // reason it has to be said in words.
+    show(result({ generation: 4 }))
+
+    expect(screen.getByText(/4 hops of automatic recognition/)).toBeInTheDocument()
+  })
+
+  it('does not mention hops for a placement anchored to hand-placed points', () => {
+    show(result({ generation: 1 }))
+
+    expect(screen.queryByText(/hops of automatic recognition/)).not.toBeInTheDocument()
   })
 
   it('says nothing at all before it has been run', () => {

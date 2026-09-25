@@ -132,6 +132,10 @@ class ReferenceFrame:
     #: The location row the frame is bound to, so a recognised frame can join it rather than
     #: creating a second point a few pixels away for the same physical spot.
     location_id: str
+    #: Hops of automatic recognition between this point and a person; 0 means someone placed it.
+    #: Carried through so a caller can tell how far it is trusting a chain of estimates, not just
+    #: how well this one pair matched.
+    generation: int
     #: Fetches the descriptors, which live in object storage rather than the database.
     #:
     #: A callable and not a `FeatureSet` because the hash shortlist runs first and discards most
@@ -158,6 +162,8 @@ class PlaceMatch:
     #: because it is the only orientation evidence that survives between sessions.
     yaw_offset_deg: float
     confidence: float
+    #: The matched reference's generation, so the caller can bound the chain it is inheriting.
+    generation: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -172,6 +178,7 @@ class PlaceMatch:
             "hash_distance": self.hash_distance,
             "yaw_offset_deg": round(self.yaw_offset_deg, 2),
             "confidence": round(self.confidence, 4),
+            "generation": self.generation,
         }
 
 
@@ -337,6 +344,7 @@ class Relocalizer:
             hash_distance=hash_distance,
             yaw_offset_deg=_yaw_from_rotation(rotation),
             confidence=_confidence(matches.inlier_count, parallax_deg, self.max_parallax_deg),
+            generation=reference.generation,
         )
 
 

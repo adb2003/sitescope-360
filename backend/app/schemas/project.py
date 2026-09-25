@@ -204,6 +204,11 @@ class CaptureLocationOut(ORMModel):
     y: float
     provenance: DataProvenance
     confidence: float | None
+    #: Hops of automatic recognition between this point and a person. 0 means someone placed it
+    #: or anchored the fit that produced it; higher means a chain of estimates, each one accurate
+    #: only to a viewpoint tolerance. `provenance` cannot express this — every point a fit
+    #: produces is `estimated` whether a human anchored that fit or another estimate did.
+    placement_generation: int = 0
     created_at: datetime
     frame_count: int = 0
     latest_frame_id: str | None = None

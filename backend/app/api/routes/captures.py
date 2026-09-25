@@ -734,6 +734,7 @@ def localize_capture_from_earlier_captures(
         reused_locations=outcome.reused_locations,
         new_locations=outcome.new_locations,
         references_considered=outcome.references_considered,
+        generation=outcome.generation,
         rms_error_px=(outcome.transform or {}).get("rms_error_px"),
         matches=[
             LocalizeMatchOut(

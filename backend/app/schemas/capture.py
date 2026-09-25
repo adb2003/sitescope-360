@@ -249,6 +249,10 @@ class LocalizeResult(BaseModel):
     reused_locations: int
     new_locations: int
     references_considered: int
+    #: Hops of automatic recognition between this placement and a point a person placed. 0 means
+    #: it was anchored against points somebody put down. Higher means a chain of estimates, which
+    #: the coordinates cannot show and `provenance` cannot express.
+    generation: int = 0
     rms_error_px: float | None = None
     matches: list[LocalizeMatchOut] = Field(default_factory=list)
 

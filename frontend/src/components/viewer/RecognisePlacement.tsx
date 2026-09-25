@@ -102,6 +102,18 @@ function Outcome({ result }: { result: LocalizeResult }) {
           Positions are estimated; check them on the plan.
         </span>
       ) : null}
+      {/*
+        The chain nobody can see in the coordinates. A placement anchored to points that were
+        themselves recognised inherits their tolerance and adds its own, and generation four looks
+        exactly like generation zero on the plan — so when it is more than a hop deep, say so and
+        say what fixes it.
+      */}
+      {result.generation > 1 ? (
+        <span className="mt-1 block text-ink-subtle">
+          This sits {result.generation} hops of automatic recognition away from a point anyone
+          placed by hand. Anchoring one capture of this floor manually resets that.
+        </span>
+      ) : null}
     </Callout>
   )
 }

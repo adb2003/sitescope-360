@@ -353,7 +353,13 @@ anchoring, `none` changed nothing. Branch on `reason` rather than on `note`, whi
 person: `placed`, `no_references` (this floor has never been captured and placed — anchor one
 walk by hand and every later one can place itself), `no_matches`, `already_placed`,
 `not_processed`. They call for different responses and only `no_matches` means the recognition
-actually looked at imagery and disagreed. `matches[].parallax_deg` is the evidence behind each placement
+actually looked at imagery and disagreed.
+
+Capture points carry `placement_generation`: 0 for a point a person placed or anchored, and one
+more for each hop of automatic recognition between it and that person. Recognition refuses to
+create points from references more than three hops out — it falls back to placing only the frames
+it recognised, which adds no new coordinates — so a floor wants one hand-anchored capture
+occasionally rather than never. `matches[].parallax_deg` is the evidence behind each placement
 — near zero means the two cameras were in nearly the same spot — and `placement_method` plus
 `localization_report` on the session keep the whole record. It will not overwrite frames that are
 already placed unless called with `?replace_existing=true`.

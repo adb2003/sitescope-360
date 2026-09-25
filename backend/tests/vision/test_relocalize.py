@@ -138,6 +138,7 @@ def _reference(
     plan: tuple[float, float] = (100.0, 100.0),
     digest: str = "ffffffffffffffff",
     location_id: str = "L-1",
+    generation: int = 0,
 ) -> ReferenceFrame:
     """A placed frame from an earlier capture, scripted to produce ``match``."""
     features = _features(seed=abs(hash(frame_id)) % 1000)
@@ -149,6 +150,7 @@ def _reference(
         plan_y=plan[1],
         perceptual_hash=digest,
         location_id=location_id,
+        generation=generation,
         load_features=lambda: features,
     )
 
@@ -395,3 +397,20 @@ def test_nothing_to_match_against_is_not_an_error() -> None:
 
     assert report.matches == []
     assert report.references_considered == 0
+
+
+def test_a_match_carries_the_references_distance_from_a_person() -> None:
+    """Drift compounds through the chain, and the coordinates cannot show it.
+
+    A point created by recognising against a point created by recognising is two tolerances away
+    from anything a person checked. The service caps how deep that goes, and it can only do that
+    if the depth travels with the match.
+    """
+    results: dict[int, MatchResult] = {}
+    reference = _reference(results, _same_spot(), generation=2)
+
+    report = Relocalizer(StubMatcher(results)).recognise(
+        [_features(1)], ["ffffffffffffffff"], [reference]
+    )
+
+    assert report.matches[0].generation == 2

@@ -234,7 +234,10 @@ Collected in one place, all documented at their source:
    but it can exceed the spacing between capture points, so the nearest candidate by parallax
    wins and a wrong choice shifts the whole capture by one point with no residual to show for it.
    Three anchors are required before any track is placed, and the evidence is kept in
-   `localization_report`.
+   `localization_report`. Because recognition's own points anchor the next capture, each point
+   records how many hops it is from one a person placed (`placement_generation`) and creating
+   points from references more than three hops out is refused — reusing one is always allowed,
+   since it adds no new coordinate.
 7. **Coverage is declared, not detected.** It compares visited points to administrator-declared
    expectations; square footage is apportioned, never measured from imagery.
 8. **One PDF sheet becomes one plan.** A sheet set is rasterised a page at a time, chosen on

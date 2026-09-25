@@ -314,6 +314,24 @@ class CaptureLocation(Base, TimestampMixin):
         EnumType(DataProvenance, 20), nullable=False, default=DataProvenance.MANUAL
     )
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    #: How many hops of automatic recognition stand between this point and a person.
+    #:
+    #: ``0`` means someone put it here, or a transform they anchored did. ``1`` means it was
+    #: created by recognising frames against generation-0 points, ``2`` against generation-1, and
+    #: so on. Cross-session recognition matches to within a viewpoint tolerance rather than
+    #: exactly, so each hop can add up to about a metre — and a chain of them compounds silently,
+    #: because every generation looks exactly like the first in the coordinates.
+    #:
+    #: Recorded rather than prevented: reusing a point adds no error at all, so only *creating*
+    #: one from deep references is capped. See `services/relocalization.MAX_ANCHOR_GENERATION`.
+    #: ``server_default`` as well as ``default``: the column is NOT NULL on a table that already
+    #: had rows, so the database needs its own answer for the backfill — and for any writer that
+    #: does not come through this mapper, 0 is the truthful one.
+    placement_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
     created_by_id: Mapped[str | None] = mapped_column(
         PKType, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

@@ -21,16 +21,22 @@
  * recognise this against" is the correct answer for it.
  */
 
-import { ScanSearch } from 'lucide-react'
+import { RotateCcw, ScanSearch } from 'lucide-react'
+import { useState } from 'react'
 
 import { Button, Callout } from '@/components/ui'
-import type { LocalizeResult } from '@/types/api'
+import type { ClearPlacementResult, LocalizeResult } from '@/types/api'
 
 interface RecognisePlacementProps {
   result: LocalizeResult | null
+  cleared: ClearPlacementResult | null
+  /** Whether this capture currently has frames on the plan, which decides what can be done. */
+  placed: boolean
   pending: boolean
+  clearing: boolean
   error: string | null
-  onRun: () => void
+  onRun: (options?: { replaceExisting?: boolean }) => void
+  onClear: () => void
 }
 
 /** The largest residual parallax among the accepted matches — the weakest link in the evidence. */
@@ -118,7 +124,21 @@ function Outcome({ result }: { result: LocalizeResult }) {
   )
 }
 
-export function RecognisePlacement({ result, pending, error, onRun }: RecognisePlacementProps) {
+export function RecognisePlacement({
+  result,
+  cleared,
+  placed,
+  pending,
+  clearing,
+  error,
+  onRun,
+  onClear,
+}: RecognisePlacementProps) {
+  // Clearing unplaces every frame and deletes the points this placement invented. Cheap to
+  // redo — recognition can run again immediately — but not something to do on a stray click,
+  // so the button states what it is about to do before it does it.
+  const [confirmingClear, setConfirmingClear] = useState(false)
+
   return (
     <div className="space-y-3">
       <div>
@@ -129,11 +149,52 @@ export function RecognisePlacement({ result, pending, error, onRun }: RecogniseP
         </p>
       </div>
 
-      <Button size="sm" variant="secondary" icon={ScanSearch} loading={pending} onClick={onRun}>
-        Recognise this walk
-      </Button>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          variant="secondary"
+          icon={ScanSearch}
+          loading={pending}
+          disabled={clearing}
+          onClick={() => onRun(placed ? { replaceExisting: true } : undefined)}
+        >
+          {placed ? 'Recognise again, replacing' : 'Recognise this walk'}
+        </Button>
+        {placed ? (
+          <Button
+            size="sm"
+            variant={confirmingClear ? 'danger' : 'ghost'}
+            icon={RotateCcw}
+            loading={clearing}
+            disabled={pending}
+            onClick={() => {
+              if (!confirmingClear) {
+                setConfirmingClear(true)
+                return
+              }
+              setConfirmingClear(false)
+              onClear()
+            }}
+          >
+            {confirmingClear ? 'Confirm — unplace this walk' : 'Clear placement'}
+          </Button>
+        ) : null}
+      </div>
+
+      {confirmingClear ? (
+        <Callout tone="warn" title="This unplaces every frame of this capture">
+          Points it created are removed with it — leaving them behind would let a wrong placement
+          go on anchoring the next capture. Points it only joined belong to other captures and are
+          kept. Recognition can be run again straight afterwards.
+        </Callout>
+      ) : null}
 
       {error ? <Callout tone="bad">{error}</Callout> : null}
+      {cleared ? (
+        <Callout tone="info" title="Placement cleared">
+          {cleared.note}
+        </Callout>
+      ) : null}
       {result ? <Outcome result={result} /> : null}
     </div>
   )

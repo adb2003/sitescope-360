@@ -346,3 +346,104 @@ def test_the_chain_is_refused_once_it_is_too_deep(
     # Recognition still happened: the frames it knew were placed on the points it knew.
     assert report["reused_locations"] >= 3
     assert len(_locations(client, headers, floor_id)) == before
+
+
+# ---- undoing a placement -----------------------------------------------------
+def test_clearing_a_placement_unplaces_its_frames(
+    client: TestClient, panorama_factory, walked_floor
+) -> None:
+    """The escape hatch that makes unattended placement safe to run at all."""
+    headers, floor_id, _first_id, _first_frames = walked_floor
+    second_id, _frames = _capture(
+        client, headers, floor_id, panorama_factory, "CAP-20260908-090000-FD", REVISIT
+    )
+
+    response = client.delete(f"/api/captures/{second_id}/placement", headers=headers)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["frames_unplaced"] >= 3
+    after = client.get(f"/api/captures/{second_id}/frames", headers=headers).json()["items"]
+    assert _located(after) == []
+    detail = client.get(f"/api/captures/{second_id}", headers=headers).json()
+    assert detail["placement_method"] is None
+    assert detail["localization_report"] is None
+
+
+def test_clearing_removes_the_points_the_placement_invented(
+    client: TestClient, panorama_factory, walked_floor
+) -> None:
+    """Unbinding the frames alone would leave the mistake behind, still spreading.
+
+    A walk recognised into the wrong place creates points there. Those points are perfectly
+    eligible references for the next capture, so correcting the frames while leaving the points
+    would let the wrong answer go on propagating after somebody had already noticed it.
+    """
+    headers, floor_id, _first_id, _first_frames = walked_floor
+    before = len(_locations(client, headers, floor_id))
+    second_id, _frames = _capture(
+        client, headers, floor_id, panorama_factory, "CAP-20260908-090000-FE", EXTENDED
+    )
+    grown = len(_locations(client, headers, floor_id))
+    assert grown > before, "the extended walk should have created points of its own"
+
+    cleared = client.delete(f"/api/captures/{second_id}/placement", headers=headers).json()
+
+    assert cleared["locations_deleted"] == grown - before
+    assert len(_locations(client, headers, floor_id)) == before
+
+
+def test_clearing_never_removes_a_point_another_capture_uses(
+    client: TestClient, panorama_factory, walked_floor
+) -> None:
+    """The points it joined are not its to delete.
+
+    Everything the revisit stood on belongs to the capture that created it, and deleting those
+    would take the first capture's placement down with the second's.
+    """
+    headers, floor_id, first_id, _first_frames = walked_floor
+    second_id, _frames = _capture(
+        client, headers, floor_id, panorama_factory, "CAP-20260908-090000-FF", REVISIT
+    )
+
+    cleared = client.delete(f"/api/captures/{second_id}/placement", headers=headers).json()
+
+    assert cleared["locations_deleted"] == 0, cleared
+    still_placed = client.get(f"/api/captures/{first_id}/frames", headers=headers).json()["items"]
+    assert len(_located(still_placed)) >= 3, "the first capture must be untouched"
+
+
+def test_a_cleared_capture_can_be_recognised_again(
+    client: TestClient, panorama_factory, walked_floor
+) -> None:
+    """Undo then redo. Without this the escape hatch is a one-way door."""
+    headers, floor_id, _first_id, _first_frames = walked_floor
+    second_id, _frames = _capture(
+        client, headers, floor_id, panorama_factory, "CAP-20260908-090000-FG", REVISIT
+    )
+    client.delete(f"/api/captures/{second_id}/placement", headers=headers)
+
+    response = client.post(f"/api/captures/{second_id}/localize", headers=headers)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is True, body
+    assert body["placed_frames"] >= 3
+
+
+def test_replacing_an_existing_placement_is_opt_in(
+    client: TestClient, panorama_factory, walked_floor
+) -> None:
+    """Re-running over a placement someone may have corrected by hand needs to be asked for."""
+    headers, floor_id, _first_id, _first_frames = walked_floor
+    second_id, _frames = _capture(
+        client, headers, floor_id, panorama_factory, "CAP-20260908-090000-FH", REVISIT
+    )
+
+    refused = client.post(f"/api/captures/{second_id}/localize", headers=headers).json()
+    forced = client.post(
+        f"/api/captures/{second_id}/localize?replace_existing=true", headers=headers
+    ).json()
+
+    assert refused["reason"] == "already_placed"
+    assert forced["ok"] is True, forced
+    assert forced["placed_frames"] >= 3

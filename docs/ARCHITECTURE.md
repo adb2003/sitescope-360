@@ -595,6 +595,15 @@ error with every other capture standing there, which is precisely what date-to-d
 needs. Creating a point is where a new number enters the system, so that is the only thing
 bounded.
 
+**Undoing it removes the points too.** `DELETE /captures/{id}/placement` is the counterpart, and
+the reason automatic placement is safe to run unattended. Unplacing the frames alone would leave
+the invented points behind — empty, absent from every frame list, and still perfectly eligible as
+references for the next capture, so a mistake someone had already caught would go on propagating.
+The ids of created points are recorded in the report rather than inferred from provenance and
+emptiness, because a wrong guess either strands a phantom point or deletes one an operator
+declared by hand. Points the capture only joined are never removed: another capture may be
+standing on them.
+
 `placement_method` records `manual_anchors` or `cross_session`, and `localization_report` keeps
 the evidence — every match with its inlier count and residual parallax, everything rejected and
 why, and the fitted transform. The coordinates from the two paths are indistinguishable; how much

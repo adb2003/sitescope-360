@@ -16,6 +16,7 @@ import { PageBody, PageHeader } from '@/components/layout/AppShell'
 import {
   JobStatusBadge,
   MappingConfidenceNote,
+  PlacementNote,
   Metric,
   QualityBadge,
   SessionStatusBadge,
@@ -64,6 +65,20 @@ export function CaptureDetailPage() {
   const upload = useUploadCaptureFiles(sessionId ?? '')
   const fileInput = useRef<HTMLInputElement>(null)
   const [error, setError] = useState<string | null>(null)
+
+  const placedFrames = (frames.data?.items ?? []).filter((frame) => frame.location_id)
+  /*
+    Read from the frames rather than asserted. This was hard-coded to "manual", which was true
+    when dropping a pin was the only way a frame reached the plan — automatic placement has since
+    made it a claim rather than a fact, and it sat two lines under a note saying the capture had
+    placed itself. Where they disagree the weaker reading wins: one estimated frame makes the
+    count an estimate, because the number counts frames that were not all placed the same way.
+  */
+  const placementProvenance = placedFrames.some(
+    (frame) => frame.position_provenance && frame.position_provenance !== 'manual',
+  )
+    ? 'estimated'
+    : 'manual'
 
   const canUpload = can(Capability.Upload)
   const live = status.data
@@ -255,6 +270,19 @@ export function CaptureDetailPage() {
           />
         ) : null}
 
+        {/*
+          Mapping says what shape the walk was; this says where that shape ended up and who
+          decided. They are independent — the same track can be anchored by hand or recognise
+          itself — and placement is the one that runs unattended, so it is the one that has to
+          report somewhere an operator will see it.
+        */}
+        {session.data ? (
+          <PlacementNote
+            method={session.data.placement_method}
+            report={session.data.localization_report}
+          />
+        ) : null}
+
         {/* Session facts */}
         <div className="grid gap-3 lg:grid-cols-4">
           <Card className="p-3.5">
@@ -274,8 +302,8 @@ export function CaptureDetailPage() {
           <Card className="p-3.5">
             <Metric
               label="Placed on plan"
-              value={frames.data?.items.filter((frame) => frame.location_id).length ?? '—'}
-              provenance="manual"
+              value={frames.data ? placedFrames.length : '—'}
+              provenance={placementProvenance}
               hint={`of ${frames.data?.total ?? 0} frames`}
             />
           </Card>

@@ -296,6 +296,8 @@ describe('FloorPlanCanvas', () => {
       y: 100,
       provenance: 'manual' as const,
       confidence: null,
+      // Zero hops from a person: someone dropped this pin.
+      placement_generation: 0,
       created_at: '2026-09-01T00:00:00Z',
       frame_count: 2,
       latest_frame_id: 'fr1',
@@ -312,6 +314,8 @@ describe('FloorPlanCanvas', () => {
       y: 150,
       provenance: 'estimated' as const,
       confidence: 0.61,
+      // Estimated, but anchored against points a person placed — one hop, not a chain.
+      placement_generation: 1,
       created_at: '2026-09-01T00:00:00Z',
       frame_count: 0,
       latest_frame_id: null,

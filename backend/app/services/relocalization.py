@@ -120,6 +120,13 @@ class LocalizationOutcome:
     #: it was anchored against points somebody put down; higher means a chain, and a chain is
     #: exactly what the coordinates cannot show.
     generation: int = 0
+    #: Ids of the points this placement *created*, as opposed to joined.
+    #:
+    #: Recorded so undoing the placement can remove exactly them. Without the list, clearing a
+    #: capture would have to guess from provenance and emptiness — and a wrong guess either
+    #: leaves a phantom point on the plan, which then anchors the next capture, or deletes a
+    #: point an operator declared by hand.
+    created_location_ids: list[str] = field(default_factory=list)
     transform: dict[str, float] | None = None
     report: dict[str, Any] = field(default_factory=dict)
 
@@ -135,6 +142,7 @@ class LocalizationOutcome:
             "new_locations": self.new_locations,
             "references_considered": self.references_considered,
             "generation": self.generation,
+            "created_location_ids": list(self.created_location_ids),
             "transform": self.transform,
             "recognition": self.report,
         }
@@ -236,6 +244,86 @@ def localize_session_to_plan(
     return _place_recognised_only(db, session, frames, report, note_prefix=reason)
 
 
+@dataclass(frozen=True, slots=True)
+class ClearedPlacement:
+    """What undoing a placement removed."""
+
+    frames_unplaced: int
+    locations_deleted: int
+    note: str
+
+
+def clear_session_placement(db: Session, session: CaptureSession) -> ClearedPlacement:
+    """Unplace every frame of a capture, and remove the points the placement invented.
+
+    The points matter as much as the frames. A capture placed in the wrong corridor creates
+    points there, and unbinding the frames alone would leave them behind — empty, invisible on
+    any frame list, and still perfectly eligible as references for the *next* capture's
+    recognition. The wrong answer would go on propagating after being corrected.
+
+    Only points this placement created are removed, and only if nothing else is standing on them
+    now: they are named in `localization_report.created_location_ids` rather than inferred, so a
+    point an operator declared by hand is never mistaken for machine residue. Points the capture
+    merely joined are left alone — they belong to whoever created them.
+    """
+    from app.processing.stages import build_capture_path
+
+    frames = list(
+        db.scalars(
+            select(CaptureFrame).where(
+                CaptureFrame.session_id == session.id,
+                CaptureFrame.location_id.is_not(None),
+            )
+        )
+    )
+    for frame in frames:
+        frame.location_id = None
+        frame.position_provenance = None
+        frame.position_confidence = None
+    db.flush()
+
+    report = session.localization_report or {}
+    created = report.get("created_location_ids") or []
+    deleted = 0
+    for location_id in created:
+        location = db.get(CaptureLocation, location_id)
+        if location is None:
+            continue
+        still_used = db.scalar(
+            select(CaptureFrame.id).where(CaptureFrame.location_id == location_id).limit(1)
+        )
+        if still_used:
+            # Another capture recognised this point and is standing on it. It is theirs now.
+            continue
+        db.delete(location)
+        deleted += 1
+
+    session.placement_method = None
+    session.localization_report = None
+    db.flush()
+    build_capture_path(db, session)
+    db.flush()
+
+    log_event(
+        "mapping.placement_cleared",
+        session_id=session.id,
+        frames_unplaced=len(frames),
+        locations_deleted=deleted,
+    )
+    return ClearedPlacement(
+        frames_unplaced=len(frames),
+        locations_deleted=deleted,
+        note=(
+            f"Unplaced {len(frames)} frame(s)"
+            + (
+                f" and removed {deleted} point(s) this placement had created."
+                if deleted
+                else ". Every point it used belongs to another capture and was left alone."
+            )
+        ),
+    )
+
+
 # ---- the two outcomes --------------------------------------------------------
 def _place_whole_track(
     db: Session,
@@ -302,7 +390,7 @@ def _place_whole_track(
     matched_by_index = {match.query_index: match for match in report.matches}
 
     reused = 0
-    created = 0
+    created_ids: list[str] = []
     placed_indices: set[int] = set()
     for entry in fit.placed:
         index = int(entry["frame_index"])
@@ -331,7 +419,7 @@ def _place_whole_track(
             commit=False,
         )
         _bind(frame, location, confidence=float(entry["confidence"]))
-        created += 1
+        created_ids.append(location.id)
 
     # A frame the mapper never estimated has no pose, so the transform could not carry it — but
     # if it was recognised outright it does not need carrying: that match is a position on its
@@ -349,9 +437,9 @@ def _place_whole_track(
         f"Placed automatically from {len(anchors)} frames recognised in earlier captures of this "
         f"floor; residual {fit.transform.rms_error_px:.1f}px. Positions are estimated"
         + (
-            f", and the {created} new point(s) are {depth + 1} hop(s) of recognition from a point "
-            "anyone placed."
-            if created
+            f", and the {len(created_ids)} new point(s) are {depth + 1} hop(s) of recognition "
+            "from a point anyone placed."
+            if created_ids
             else ", and every frame joined a point that already existed."
         )
     )
@@ -360,13 +448,14 @@ def _place_whole_track(
         mode="transform",
         reason="placed",
         note=note,
-        placed_frames=reused + created,
+        placed_frames=reused + len(created_ids),
         matched_frames=len(report.matches),
         reused_locations=reused,
-        new_locations=created,
+        new_locations=len(created_ids),
         references_considered=report.references_considered,
         transform=fit.transform.to_dict(),
-        generation=depth + 1 if created else depth,
+        generation=depth + 1 if created_ids else depth,
+        created_location_ids=created_ids,
         report=report.to_dict(),
     )
     _record(db, session, outcome)
@@ -531,8 +620,11 @@ def _reference_frames(db: Session, session: CaptureSession) -> list[ReferenceFra
 
 
 __all__ = [
+    "MAX_ANCHOR_GENERATION",
     "MAX_REFERENCE_FRAMES",
     "PLACEMENT_METHOD",
+    "ClearedPlacement",
     "LocalizationOutcome",
+    "clear_session_placement",
     "localize_session_to_plan",
 ]

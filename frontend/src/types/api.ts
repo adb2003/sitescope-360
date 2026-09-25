@@ -204,6 +204,12 @@ export interface CaptureLocation {
   y: number
   provenance: DataProvenance
   confidence: number | null
+  /**
+   * Hops of automatic recognition between this point and a person. 0 means someone placed it or
+   * anchored the fit that produced it. `provenance` cannot express this: every point a fit
+   * produces is `estimated` whether a human anchored that fit or another estimate did.
+   */
+  placement_generation: number
   created_at: string
   frame_count: number
   latest_frame_id: string | null
@@ -254,6 +260,35 @@ export interface LoopClosureReport {
   confidence: string
 }
 
+/**
+ * What cross-session recognition compared and believed, as stored on the session.
+ *
+ * Mirrors `LocalizationOutcome.to_dict()`. Kept whole rather than flattened because it is the
+ * evidence behind an automatic placement, and an automatic placement that cannot be argued with
+ * is one that has to be taken on faith.
+ */
+export interface LocalizationReport {
+  ok: boolean
+  mode: 'transform' | 'recognised' | 'none'
+  reason: string
+  note: string
+  placed_frames: number
+  matched_frames: number
+  reused_locations: number
+  new_locations: number
+  references_considered: number
+  /** Hops of automatic recognition between this placement and a point a person placed. */
+  generation: number
+  created_location_ids: string[]
+  transform: Record<string, number> | null
+  recognition: {
+    matched_frames: number
+    references_considered: number
+    anchor_span_px: number
+    matches: LocalizeMatch[]
+  } | null
+}
+
 export interface CaptureSession {
   id: string
   project_id: string
@@ -280,6 +315,13 @@ export interface CaptureSession {
   mapping_method: string | null
   /** Null when loop closure found nothing to reconcile. */
   loop_closure_report: LoopClosureReport | null
+  /**
+   * How the track came to sit on the plan: "manual_anchors" | "cross_session". Distinct from
+   * `mapping_method`, which is how its *shape* was estimated. Null when it is not placed.
+   */
+  placement_method: string | null
+  /** What recognition compared and believed. Null when recognition never ran. */
+  localization_report: LocalizationReport | null
   frame_count: number
   file_count: number
   created_at: string
@@ -437,6 +479,19 @@ export interface LocalizeResult {
   generation: number
   rms_error_px: number | null
   matches: LocalizeMatch[]
+}
+
+/**
+ * What undoing a capture's placement removed.
+ *
+ * `locations_deleted` counts only points that placement created and that nothing else stands on
+ * now — a point another capture has since recognised belongs to that capture, and one an
+ * operator declared by hand is never machine residue.
+ */
+export interface ClearPlacementResult {
+  frames_unplaced: number
+  locations_deleted: number
+  note: string
 }
 
 /** What the anchor fit did, in terms the operator can check. */

@@ -51,6 +51,7 @@ from app.schemas.capture import (
     CaptureSessionDetail,
     CaptureSessionOut,
     CaptureSessionUpdate,
+    ClearPlacementResult,
     DirectUploadRegistration,
     DirectUploadRequest,
     DirectUploadTicketOut,
@@ -750,6 +751,30 @@ def localize_capture_from_earlier_captures(
             )
             for match in outcome.report.get("matches", [])
         ],
+    )
+
+
+@router.delete("/captures/{session_id}/placement", response_model=ClearPlacementResult)
+def clear_capture_placement(
+    session_id: str, db: DbSession, _: RequireLocationEdit
+) -> ClearPlacementResult:
+    """Undo a capture's placement: unplace its frames and remove the points it invented (§15).
+
+    The counterpart to automatic placement, and the reason automatic placement is safe to run
+    unattended. A walk recognised into the wrong corridor is not merely mispositioned — it has
+    created points there, and those points are eligible references for the *next* capture, so
+    the mistake propagates until something removes them.
+
+    Points the capture only *joined* are left alone: they belong to whoever created them, and
+    another capture may be standing on them. So are any an operator declared by hand.
+    """
+    session = get_session_or_404(db, session_id)
+    cleared = relocalization_service.clear_session_placement(db, session)
+    db.commit()
+    return ClearPlacementResult(
+        frames_unplaced=cleared.frames_unplaced,
+        locations_deleted=cleared.locations_deleted,
+        note=cleared.note,
     )
 
 

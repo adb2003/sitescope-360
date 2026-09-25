@@ -35,6 +35,7 @@ import type {
   DataProvenance,
   JobStatus,
   MappingConfidence,
+  LocalizationReport,
   LoopClosureReport,
   QualityVerdict,
 } from '@/types/api'
@@ -354,6 +355,78 @@ export function UnavailableAnalysis({
           ))}
         </ul>
       ) : null}
+    </Callout>
+  )
+}
+
+
+/**
+ * How a capture came to sit on the floor plan, on the page an operator actually opens (§46).
+ *
+ * Automatic placement runs at the end of processing on every capture, and for a while it
+ * reported nowhere anyone looks: the result lived in the viewer's Plan tab behind a button, so a
+ * walk that placed itself in the wrong corridor said nothing about it here. A placement that
+ * cannot be seen cannot be checked, which makes running it unattended a liability rather than a
+ * convenience.
+ *
+ * Three things are worth saying, and the coordinates say none of them: whether a person put this
+ * walk here or recognition did, how much of it was recognised as opposed to fitted, and how many
+ * hops of recognition stand between it and anything a person checked.
+ */
+export function PlacementNote({
+  method,
+  report,
+}: {
+  method?: string | null
+  report?: LocalizationReport | null
+}) {
+  if (!method && !report) return null
+
+  if (method === 'manual_anchors') {
+    return (
+      <Callout tone="estimated" title="Placed from manual anchors">
+        Someone named two or more frames on the plan and the rest were placed by the transform
+        fitted through them. Positions are estimated, not measured.
+      </Callout>
+    )
+  }
+
+  if (method !== 'cross_session') {
+    // Recognition ran and placed nothing. Worth saying on a floor nobody has captured before,
+    // because the fix is one hand-anchored walk and then every later one places itself.
+    return report?.note ? (
+      <Callout tone="warn" title="Not placed on the floor plan">
+        {report.note}
+      </Callout>
+    ) : null
+  }
+
+  const partial = report?.mode === 'recognised'
+  return (
+    <Callout
+      tone={partial ? 'warn' : 'estimated'}
+      title={partial ? 'Partly placed by recognition' : 'Placed by recognising earlier captures'}
+    >
+      <div className="space-y-2">
+        <p>{report?.note}</p>
+        {report ? (
+          <p className="text-xs text-ink-muted">
+            {report.recognition?.matched_frames ?? 0} frame
+            {report.recognition?.matched_frames === 1 ? '' : 's'} recognised against earlier
+            captures of this floor; {report.reused_locations} joined a point that already existed
+            and {report.new_locations} were created.
+            {report.generation > 1 ? (
+              <>
+                {' '}
+                This sits <span className="text-warn">{report.generation} hops</span> of automatic
+                recognition from a point anyone placed by hand — each hop is accurate only to a
+                viewpoint tolerance, and they add up. Anchoring one capture of this floor manually
+                resets that.
+              </>
+            ) : null}
+          </p>
+        ) : null}
+      </div>
     </Callout>
   )
 }

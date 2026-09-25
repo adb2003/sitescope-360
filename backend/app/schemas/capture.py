@@ -257,6 +257,19 @@ class LocalizeResult(BaseModel):
     matches: list[LocalizeMatchOut] = Field(default_factory=list)
 
 
+class ClearPlacementResult(BaseModel):
+    """What undoing a capture's placement removed.
+
+    ``locations_deleted`` counts only points the placement itself created and that nothing else
+    is standing on now. A point another capture has since recognised belongs to that capture and
+    survives — as does anything an operator declared by hand.
+    """
+
+    frames_unplaced: int
+    locations_deleted: int
+    note: str
+
+
 class CaptureFileOut(ORMModel):
     id: str
     session_id: str

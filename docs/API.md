@@ -344,6 +344,7 @@ geometry would produce a confident, precise and wrong number.
 | POST | `/captures/{id}/import` | Import from a registered camera device. |
 | POST | `/captures/{id}/align` | Pin the estimated track to the plan from ≥2 manual anchors. Driven by the viewer's Plan tab. |
 | POST | `/captures/{id}/localize` | Place the capture by recognising frames from earlier captures of the same floor. Runs automatically at the end of processing; this re-runs it. |
+| DELETE | `/captures/{id}/placement` | Undo a placement: unplace every frame and remove the points that placement created. |
 
 **Automatic placement.** `/localize` never fails for the ordinary refusals — a floor nobody has
 captured before, or a walk nothing recognised, are answers rather than errors, and both leave the
@@ -354,6 +355,14 @@ person: `placed`, `no_references` (this floor has never been captured and placed
 walk by hand and every later one can place itself), `no_matches`, `already_placed`,
 `not_processed`. They call for different responses and only `no_matches` means the recognition
 actually looked at imagery and disagreed.
+
+**Undoing a placement** is what makes running the automatic one unattended safe. `DELETE
+/captures/{id}/placement` unplaces every frame *and deletes the points that placement created* —
+leaving those behind would be worse than doing nothing, because an empty point in the wrong
+corridor is still a perfectly good reference for the next capture's recognition, so a corrected
+mistake would go on propagating. Points the capture merely joined are left alone: another capture
+may be standing on them, and one an operator declared by hand is never machine residue. The
+response says how many of each. Recognition can be re-run immediately afterwards.
 
 Capture points carry `placement_generation`: 0 for a point a person placed or anchored, and one
 more for each hop of automatic recognition between it and that person. Recognition refuses to

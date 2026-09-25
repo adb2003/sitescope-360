@@ -38,6 +38,7 @@ import {
   useCreateAnnotation,
   useFloorPaths,
   useFloorPlan,
+  useClearPlacement,
   useFrameAnnotations,
   useLocalizeCapture,
   useLocations,
@@ -46,7 +47,7 @@ import {
 import { Capability, useAuth } from '@/hooks/useAuth'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { ApiError } from '@/lib/api'
-import type { AlignTrackResult, LocalizeResult } from '@/types/api'
+import type { AlignTrackResult, ClearPlacementResult, LocalizeResult } from '@/types/api'
 import { formatDateTime, humanize } from '@/lib/utils'
 import {
   ANNOTATION_PRIORITY_VALUES,
@@ -117,8 +118,10 @@ export function ViewerPage() {
   const [alignError, setAlignError] = useState<string | null>(null)
   const align = useAlignCapture(frame?.session_id ?? '', frame?.floor_id ?? undefined)
   const [localizeResult, setLocalizeResult] = useState<LocalizeResult | null>(null)
+  const [clearedPlacement, setClearedPlacement] = useState<ClearPlacementResult | null>(null)
   const [localizeError, setLocalizeError] = useState<string | null>(null)
   const localize = useLocalizeCapture(frame?.session_id ?? '', frame?.floor_id ?? undefined)
+  const clearPlacement = useClearPlacement(frame?.session_id ?? '', frame?.floor_id ?? undefined)
   const assign = useAssignFrameLocation(frame?.floor_id ?? undefined)
 
   const canAnnotate = can(Capability.Annotate)
@@ -413,14 +416,19 @@ export function ViewerPage() {
                       {canPlace && orderedFrames.length >= 2 ? (
                         <RecognisePlacement
                           result={localizeResult}
+                          cleared={clearedPlacement}
+                          placed={orderedFrames.some((item) => item.location_id)}
                           pending={localize.isPending}
+                          clearing={clearPlacement.isPending}
                           error={localizeError}
-                          onRun={() => {
+                          onRun={(options) => {
                             setLocalizeError(null)
-                            localize.mutate(undefined, {
+                            setClearedPlacement(null)
+                            localize.mutate(options, {
                               onSuccess: (result) => {
                                 setLocalizeResult(result)
                                 void manifest.refetch()
+                                void sessionFrames.refetch()
                               },
                               // A refusal comes back as a 200 with `mode: none`, so anything that
                               // reaches here is a real failure rather than "nothing recognised".
@@ -429,6 +437,23 @@ export function ViewerPage() {
                                   error instanceof ApiError
                                     ? error.message
                                     : 'Could not check this capture against earlier ones',
+                                ),
+                            })
+                          }}
+                          onClear={() => {
+                            setLocalizeError(null)
+                            setLocalizeResult(null)
+                            clearPlacement.mutate(undefined, {
+                              onSuccess: (result) => {
+                                setClearedPlacement(result)
+                                void manifest.refetch()
+                                void sessionFrames.refetch()
+                              },
+                              onError: (error) =>
+                                setLocalizeError(
+                                  error instanceof ApiError
+                                    ? error.message
+                                    : 'Could not clear this placement',
                                 ),
                             })
                           }}

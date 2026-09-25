@@ -41,6 +41,7 @@ import type {
   FloorPlan,
   FrameComparison,
   FrequencyStatus,
+  ClearPlacementResult,
   JobSummary,
   LocalizeResult,
   Message,
@@ -661,7 +662,34 @@ export function useAlignCapture(sessionId: string, floorId: string | null | unde
 export function useLocalizeCapture(sessionId: string, floorId: string | null | undefined) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: () => api.post<LocalizeResult>(`/captures/${sessionId}/localize`, {}),
+    mutationFn: (options?: { replaceExisting?: boolean }) =>
+      api.post<LocalizeResult>(
+        `/captures/${sessionId}/localize${options?.replaceExisting ? '?replace_existing=true' : ''}`,
+        {},
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.capture(sessionId) })
+      void queryClient.invalidateQueries({ queryKey: keys.captureFrames(sessionId) })
+      if (floorId) {
+        void queryClient.invalidateQueries({ queryKey: keys.locations(floorId) })
+        void queryClient.invalidateQueries({ queryKey: keys.floorPaths(floorId) })
+      }
+    },
+  })
+}
+
+/**
+ * Undo a capture's placement (§15).
+ *
+ * The counterpart to automatic placement, and the reason running it unattended is safe: a walk
+ * recognised into the wrong corridor has *created points* there, and those points then anchor
+ * the next capture. Correcting the frames without removing them would let the mistake go on
+ * propagating after somebody had already caught it.
+ */
+export function useClearPlacement(sessionId: string, floorId: string | null | undefined) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.delete<ClearPlacementResult>(`/captures/${sessionId}/placement`),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.capture(sessionId) })
       void queryClient.invalidateQueries({ queryKey: keys.captureFrames(sessionId) })

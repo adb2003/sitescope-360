@@ -13,10 +13,11 @@
  */
 
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
 import { RecognisePlacement } from './RecognisePlacement'
-import type { LocalizeMatch, LocalizeResult } from '@/types/api'
+import type { ClearPlacementResult, LocalizeMatch, LocalizeResult } from '@/types/api'
 
 function match(overrides: Partial<LocalizeMatch> = {}): LocalizeMatch {
   return {
@@ -51,10 +52,23 @@ function result(overrides: Partial<LocalizeResult> = {}): LocalizeResult {
   }
 }
 
-function show(value: LocalizeResult | null) {
-  render(
-    <RecognisePlacement result={value} pending={false} error={null} onRun={vi.fn()} />,
-  )
+function show(
+  value: LocalizeResult | null,
+  overrides: Partial<React.ComponentProps<typeof RecognisePlacement>> = {},
+) {
+  const props = {
+    result: value,
+    cleared: null as ClearPlacementResult | null,
+    placed: false,
+    pending: false,
+    clearing: false,
+    error: null,
+    onRun: vi.fn(),
+    onClear: vi.fn(),
+    ...overrides,
+  }
+  render(<RecognisePlacement {...props} />)
+  return props
 }
 
 describe('RecognisePlacement', () => {
@@ -111,6 +125,45 @@ describe('RecognisePlacement', () => {
     show(result({ generation: 1 }))
 
     expect(screen.queryByText(/hops of automatic recognition/)).not.toBeInTheDocument()
+  })
+
+  it('offers to replace rather than silently re-running over a placement', () => {
+    // Re-running over frames somebody may have corrected by hand has to be asked for, so the
+    // button says what it is about to do and passes the flag that permits it.
+    const props = show(null, { placed: true })
+
+    screen.getByRole('button', { name: /Recognise again, replacing/ }).click()
+
+    expect(props.onRun).toHaveBeenCalledWith({ replaceExisting: true })
+  })
+
+  it('does not offer to clear a capture that is not placed', () => {
+    show(null, { placed: false })
+
+    expect(screen.queryByRole('button', { name: /Clear placement/ })).not.toBeInTheDocument()
+  })
+
+  it('does not unplace anything on the first click', async () => {
+    // The action removes points as well as frames. One stray click should explain it, not do it.
+    const props = show(null, { placed: true })
+
+    await userEvent.click(screen.getByRole('button', { name: /Clear placement/ }))
+
+    expect(props.onClear).not.toHaveBeenCalled()
+    expect(screen.getByText(/unplaces every frame of this capture/)).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /Confirm/ }))
+    expect(props.onClear).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports what clearing removed', () => {
+    show(null, {
+      placed: false,
+      cleared: { frames_unplaced: 7, locations_deleted: 2, note: 'Unplaced 7 frames.' },
+    })
+
+    expect(screen.getByText('Placement cleared')).toBeInTheDocument()
+    expect(screen.getByText(/Unplaced 7 frames/)).toBeInTheDocument()
   })
 
   it('says nothing at all before it has been run', () => {

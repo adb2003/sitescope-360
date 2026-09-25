@@ -742,7 +742,14 @@ def create_location(
     provenance: DataProvenance = DataProvenance.MANUAL,
     confidence: float | None = None,
     created_by_id: str | None = None,
+    commit: bool = True,
 ) -> CaptureLocation:
+    """Create one capture point on a floor plan.
+
+    ``commit=False`` flushes instead, for callers that create several points as one unit of work
+    — and for the pipeline stages, where the stage runner owns the transaction and rolls it back
+    on failure. A commit from inside a stage would survive that rollback.
+    """
     plan = _resolve_plan(db, floor, floor_plan_id)
     # Coordinates are floor-plan pixels; a point outside the raster is a client bug, and
     # silently clamping it would hide a broken editor.
@@ -779,7 +786,11 @@ def create_location(
         created_by_id=created_by_id,
     )
     db.add(location)
-    db.commit()
+    # Flushed either way: `next_location_code` reads the codes already on the floor, so a second
+    # point created before the first reaches the database would be handed the same code.
+    db.flush()
+    if commit:
+        db.commit()
     return location
 
 

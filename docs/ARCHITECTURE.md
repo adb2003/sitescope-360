@@ -538,6 +538,53 @@ Intermediate frames are *transformed*, not interpolated between the anchors. Int
 throw away the measured shape of the walk — the reason for estimating a track in the first place
 — and replace it with a straight line through points nobody visited.
 
+#### Recognising a floor that has been captured before
+
+Anchoring by hand is the right answer exactly once per floor. After that the floor is covered in
+frames whose plan coordinates are known, and a new walk can be placed by recognising where it
+stands rather than being told: `vision/relocalize.py` shortlists the new frames against earlier
+captures' placed frames by perceptual hash, matches with ORB, verifies against the spherical
+epipolar geometry, and then asks whether a *rotation alone* explains the correspondences. Two
+photographs from one spot differ only by rotation; move the camera and parallax appears
+immediately. Three surviving matches feed the same similarity fit anchoring uses, and the walk
+places itself. `services/relocalization.py` runs at the end of MAPPING and again on demand at
+`POST /captures/{id}/localize`.
+
+Three decisions in there are worth stating, because each is a place the feature could have been
+quietly wrong instead:
+
+**The parallax bar is 8°, not loop closure's 0.3°.** Slam asks whether a walk returned to a point
+it stood on, and it did, so it can demand a centimetre. This asks whether an operator stood close
+enough *a week later*, and they did not stand in the same place at all — 0.3° is 1.6 cm at 3 m
+depth, and holding a revisit to that would recognise nothing, which is a feature that does not
+exist. 8° is roughly half a metre at that depth and roughly 1.7 m across a 12 m space, because
+parallax is an angle and monocular vision still has no scale. So a match means the cameras were
+*close*, and the metres are an illustration rather than a measurement.
+
+**The nearest candidate wins, not the first acceptable one.** That tolerance can be wider than
+the spacing between capture points, so two adjacent reference points may both clear the bar for
+one frame. Taking whichever hashed closest would place it at its neighbour — and because every
+frame of the walk would shift the same way, the result is a pure translation, which a similarity
+transform reproduces *with a zero residual*. Nothing downstream would ever see it. Parallax is
+the only signal available that orders candidates by distance, so every shortlisted candidate is
+verified and the least-parallax one is taken.
+
+**Three matches, not two.** The same trap as manual anchoring, without the person: two
+correspondences are fitted exactly, so the residual is zero whatever they were. Below three, only
+the frames actually recognised are placed — directly, on their own evidence — and the rest of the
+walk still needs anchoring. That is reported as mode `recognised` rather than `transform`.
+
+A recognised frame **joins the earlier capture's location row** instead of getting a point of its
+own nearby. Comparing a place across dates is built on two frames sharing a location, so a
+capture placed two pixels from last month's is on the plan and compares against nothing. Frames
+placed by the transform rather than recognised get new locations, because a fit says where a
+frame probably was, not that it was where some earlier frame was.
+
+`placement_method` records `manual_anchors` or `cross_session`, and `localization_report` keeps
+the evidence — every match with its inlier count and residual parallax, everything rejected and
+why, and the fitted transform. The coordinates from the two paths are indistinguishable; how much
+they should be trusted is not (§46).
+
 #### Spatial data: PostGIS, on PostgreSQL only
 
 `capture_locations.geom` is a `geometry(Point, 0)` column, `GENERATED ALWAYS AS

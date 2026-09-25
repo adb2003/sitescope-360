@@ -55,6 +55,8 @@ from app.schemas.capture import (
     DirectUploadRequest,
     DirectUploadTicketOut,
     FrameAssignLocation,
+    LocalizeMatchOut,
+    LocalizeResult,
     MultipartCompleteRequest,
     MultipartResumeRequest,
     MultipartTicketOut,
@@ -68,6 +70,7 @@ from app.schemas.capture import (
 from app.schemas.common import Message, Page
 from app.services import alignment as alignment_service
 from app.services import captures as capture_service
+from app.services import relocalization as relocalization_service
 from app.services import viewer as viewer_service
 from app.services.assets import sign
 
@@ -690,6 +693,62 @@ def align_capture_to_plan(
         rotation_deg=result.rotation_deg,
         rms_error_px=result.rms_error_px,
         note=result.note,
+    )
+
+
+@router.post("/captures/{session_id}/localize", response_model=LocalizeResult)
+def localize_capture_from_earlier_captures(
+    session_id: str,
+    db: DbSession,
+    user: RequireLocationEdit,
+    replace_existing: Annotated[
+        bool, Query(description="Re-place frames that already have a location")
+    ] = False,
+) -> LocalizeResult:
+    """Place a capture by recognising frames from earlier captures of the same floor (§15).
+
+    The first walk of a floor must be anchored by hand. After that the floor is covered in frames
+    whose plan positions are known, so a new walk can be placed by recognising where it stands:
+    a frame taken from the same spot as an earlier one differs from it only by rotation, and that
+    is measurable. Three such frames place the whole track.
+
+    Runs automatically at the end of processing. This endpoint is for re-running it — after the
+    floor's first capture has been anchored, or after more captures have made the floor's
+    reference set richer.
+
+    Never raises for the ordinary refusals. "No earlier capture to match against" and "nothing
+    recognised" are answers, not errors, and both leave the capture exactly as it was.
+    """
+    session = get_session_or_404(db, session_id)
+    outcome = relocalization_service.localize_session_to_plan(
+        db, session, user_id=user.id, replace_existing=replace_existing
+    )
+    db.commit()
+    return LocalizeResult(
+        ok=outcome.ok,
+        mode=outcome.mode,
+        reason=outcome.reason,
+        note=outcome.note,
+        placed_frames=outcome.placed_frames,
+        matched_frames=outcome.matched_frames,
+        reused_locations=outcome.reused_locations,
+        new_locations=outcome.new_locations,
+        references_considered=outcome.references_considered,
+        rms_error_px=(outcome.transform or {}).get("rms_error_px"),
+        matches=[
+            LocalizeMatchOut(
+                query_index=int(match["query_index"]),
+                reference_frame_id=str(match["reference_frame_id"]),
+                reference_session_id=str(match["reference_session_id"]),
+                location_id=str(match["location_id"]),
+                plan_x=float(match["plan_x"]),
+                plan_y=float(match["plan_y"]),
+                inlier_count=int(match["inlier_count"]),
+                parallax_deg=float(match["parallax_deg"]),
+                confidence=float(match["confidence"]),
+            )
+            for match in outcome.report.get("matches", [])
+        ],
     )
 
 

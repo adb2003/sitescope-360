@@ -391,6 +391,48 @@ export interface TrackAnchor {
   y: number
 }
 
+/** One frame recognised as standing where an earlier capture's frame stood. */
+export interface LocalizeMatch {
+  query_index: number
+  reference_frame_id: string
+  reference_session_id: string
+  location_id: string
+  plan_x: number
+  plan_y: number
+  inlier_count: number
+  /**
+   * Residual parallax of the rotation-only fit, in degrees, and the whole basis of the claim.
+   * Two photographs from one spot differ only by rotation; near zero means the cameras were in
+   * nearly the same place. It is a tolerance and not an identity test — see the API docs.
+   */
+  parallax_deg: number
+  confidence: number
+}
+
+/**
+ * What automatic placement recognised and what it did about it.
+ *
+ * `mode` first: `transform` placed the whole walk from a fitted transform, `recognised` placed
+ * only the frames actually matched and the rest still need anchoring, `none` changed nothing.
+ */
+export interface LocalizeResult {
+  ok: boolean
+  mode: 'transform' | 'recognised' | 'none'
+  /**
+   * Why, in one token. `mode: none` covers three different situations that need three different
+   * things said about them, so branch on this rather than on the prose in `note`.
+   */
+  reason: 'placed' | 'no_references' | 'no_matches' | 'already_placed' | 'not_processed'
+  note: string
+  placed_frames: number
+  matched_frames: number
+  reused_locations: number
+  new_locations: number
+  references_considered: number
+  rms_error_px: number | null
+  matches: LocalizeMatch[]
+}
+
 /** What the anchor fit did, in terms the operator can check. */
 export interface AlignTrackResult {
   placed_frames: number

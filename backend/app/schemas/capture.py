@@ -72,6 +72,12 @@ class CaptureSessionOut(ORMModel):
     #: Verified revisits, rejected false positives, and how far the optimiser moved the track.
     #: Null when loop closure found nothing to reconcile.
     loop_closure_report: dict[str, Any] | None = None
+    #: How the track came to sit on the plan: "manual_anchors" or "cross_session". Distinct from
+    #: `mapping_method`, which is how its *shape* was estimated. Null when it is not placed.
+    placement_method: str | None = None
+    #: What cross-session recognition compared and believed, including what it rejected and why.
+    #: Null when recognition never ran.
+    localization_report: dict[str, Any] | None = None
     frame_count: int
     file_count: int
     created_at: datetime
@@ -205,6 +211,46 @@ class AlignTrackResult(BaseModel):
     rotation_deg: float
     rms_error_px: float
     note: str
+
+
+class LocalizeMatchOut(BaseModel):
+    """One frame recognised as standing where an earlier capture's frame stood."""
+
+    query_index: int
+    reference_frame_id: str
+    reference_session_id: str
+    location_id: str
+    plan_x: float
+    plan_y: float
+    inlier_count: int
+    #: Residual parallax of the rotation-only fit, degrees. Near zero is the whole claim: it is
+    #: what distinguishes "taken from this spot" from "shows this corridor".
+    parallax_deg: float
+    confidence: float
+
+
+class LocalizeResult(BaseModel):
+    """What automatic placement recognised, and what it did about it.
+
+    ``mode`` is the part to read first. ``transform`` means the whole walk was placed from a
+    fitted transform; ``recognised`` means only the frames actually matched were placed and the
+    rest still need anchoring; ``none`` means nothing was recognised and nothing was changed.
+    """
+
+    ok: bool
+    mode: str
+    #: One machine-readable token for why: ``placed``, ``no_references`` (this floor has never
+    #: been captured and placed), ``no_matches``, ``already_placed``, ``not_processed``. Read this
+    #: rather than the prose in ``note``, which is written for a person and will be reworded.
+    reason: str
+    note: str
+    placed_frames: int
+    matched_frames: int
+    reused_locations: int
+    new_locations: int
+    references_considered: int
+    rms_error_px: float | None = None
+    matches: list[LocalizeMatchOut] = Field(default_factory=list)
 
 
 class CaptureFileOut(ORMModel):

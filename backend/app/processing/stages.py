@@ -794,7 +794,30 @@ def stage_mapping(db: Session, session: CaptureSession, spec: JobSpec) -> dict[s
         "normalized_track": engine.map_builder.normalize_track(outcome.poses),
         "mapping_method": session.mapping_method,
         "loop_closure": slam_report,
+        "cross_session": _try_cross_session_placement(db, session),
     }
+
+
+def _try_cross_session_placement(db: Session, session: CaptureSession) -> dict[str, Any]:
+    """Place this capture from earlier captures of the same floor, if any recognise it.
+
+    Runs on every capture because there is no way to know in advance whether a floor has been
+    walked before — and on the floor's first capture it costs one query that returns nothing.
+
+    Swallows its own failures on purpose. A capture whose frames, features and track are all
+    intact has succeeded at mapping; failing the stage because an *additional* convenience could
+    not be computed would discard that work and take the retry button with it. The reason is
+    logged and returned in the stage result either way.
+    """
+    from app.services.relocalization import localize_session_to_plan
+
+    try:
+        return localize_session_to_plan(db, session).to_dict()
+    except Exception as exc:  # pragma: no cover - defensive; the service returns, not raises
+        logger.warning(
+            "Cross-session placement failed", extra={"session_id": session.id, "error": str(exc)}
+        )
+        return {"ok": False, "mode": "none", "note": f"Automatic placement failed: {exc}"}
 
 
 # ---- 7. VIEWER_DATA ----------------------------------------------------------

@@ -272,6 +272,29 @@ Refusals:
 - Collinear or coincident anchors → the fit is refused with an explanation.
 - Residual above 60 px → reported as a poor fit, and manual placement is recommended.
 
+### Anchors found by recognition instead of by hand
+
+`app/vision/relocalize.py`. Once a floor has one placed capture, later walks supply their own
+anchors: each new frame is shortlisted against that floor's placed frames by perceptual hash,
+matched, verified on the sphere, and then tested for **parallax**. Two photographs from one spot
+differ only by a rotation, so a rotation-only fit leaves almost nothing over; move the camera and
+the residual grows immediately. A surviving match adopts the reference frame's plan coordinates,
+and three of them feed the same Umeyama fit above.
+
+Three numbers carry the design, and each is a refusal:
+
+| | |
+| --- | --- |
+| `MIN_MATCH_INLIERS` = 90 | Loop closure's co-located bar. Appearance alone is worthless on a site full of identical bays. |
+| `MAX_PARALLAX_DEG` = 8.0 | **Not** slam's 0.3°. That asks whether a walk stood where it already stood; this asks whether an operator stood close enough a week later. 0.3° is 1.6 cm at 3 m depth, which no revisit satisfies. 8° is roughly 0.5 m at that depth and 1.7 m across a 12 m space — a viewpoint tolerance, not an identity test. |
+| `MIN_TRANSFORM_MATCHES` = 3 | Two correspondences fit a similarity transform exactly, so the residual is zero however wrong they are. Below three, only the frames actually recognised are placed. |
+
+Every shortlisted candidate is verified and the **least-parallax** one wins. The tolerance can
+exceed the spacing between capture points, so two adjacent references may both qualify; taking
+the first would shift the whole walk by one point, and since every frame shifts the same way the
+result is a pure translation that the similarity fit reproduces with a zero residual. Parallax is
+the only signal here that orders candidates by distance.
+
 ---
 
 ## 8. What is not implemented
@@ -287,6 +310,7 @@ UI reads that endpoint rather than hard-coding assumptions.
 | Progress detection | Not implemented — Phase 3. Needs a trained model *and* capture history. |
 | BIM comparison | Not implemented — Phase 3. Interfaces in `app/bim/`. |
 | Loop closure / global optimisation | Implemented — `vision/slam.py`. SE(2) pose graph, Levenberg-Marquardt, Huber kernel. See below. |
+| Cross-session localisation | Implemented — `vision/relocalize.py`. Places a new walk against a floor captured before. See §7. |
 | Bundle adjustment over 3D landmarks | Not implemented. The graph optimises poses; there is no landmark map. |
 | Metric positioning | Not possible monocularly. Direction only — see *Scale*, below. |
 

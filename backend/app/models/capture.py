@@ -124,6 +124,19 @@ class CaptureSession(Base, TimestampMixin):
     #: how far the optimiser moved the track. Null when SLAM did not run or found nothing.
     loop_closure_report: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
 
+    #: How the track came to sit on the floor plan: ``manual_anchors`` or ``cross_session``.
+    #:
+    #: Distinct from ``mapping_method``, which records how the *shape* was estimated. The two are
+    #: independent — the same pose-graph track can be placed by a person dragging two points or
+    #: by recognising frames from an earlier capture — and a reader cannot tell which happened
+    #: from the coordinates, so §46 requires it be recorded rather than inferred.
+    placement_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    #: What cross-session recognition compared and believed: the matched frames, their inlier
+    #: counts and parallax, what was rejected and why, and the fitted transform. Null when
+    #: recognition never ran or found nothing.
+    localization_report: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+
     #: Denormalised counters kept current by the pipeline; they make dashboards cheap.
     frame_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     file_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

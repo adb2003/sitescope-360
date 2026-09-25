@@ -316,6 +316,34 @@ class VisionEngine:
                     "accurate one) — it bounds drift rather than always reducing error",
                 ],
             },
+            "cross_session_localisation": {
+                "implemented": True,
+                "method": (
+                    "perceptual-hash shortlist against placed frames of earlier captures of the "
+                    "same floor, ORB matching, spherical epipolar verification, rotation-only "
+                    "fit; the least-parallax candidate anchors the frame, and three anchors fit "
+                    "a similarity transform over the whole track"
+                ),
+                "provenance": "estimated",
+                "limitations": [
+                    # The number that decides whether this feature exists at all, and the one it
+                    # is most likely to be wrong about. It is stated here rather than buried
+                    # because everything the feature produces inherits it.
+                    "a match means the two cameras were close, not identical: the 8 degree "
+                    "parallax bar is roughly half a metre at 3 m depth and roughly 1.7 m across "
+                    "a 12 m space, because parallax is an angle and monocular vision has no "
+                    "scale",
+                    "that tolerance can exceed the spacing between capture points, so the "
+                    "nearest candidate by parallax is chosen — a wrong choice shifts the whole "
+                    "capture by one point and a similarity fit reproduces it with no residual",
+                    "three anchors are required before a track is placed, because a two-point "
+                    "similarity fit matches its own anchors exactly and its residual is "
+                    "therefore evidence of nothing",
+                    "a floor that has changed beyond recognition since it was last captured "
+                    "will not be recognised, which is a refusal rather than a wrong answer",
+                    "the first capture of any floor still has to be anchored by hand",
+                ],
+            },
             "object_detection": {"implemented": False, "phase": 3},
             "defect_detection": {"implemented": False, "phase": 3},
             "progress_detection": {"implemented": False, "phase": 3},

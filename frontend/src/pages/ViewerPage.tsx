@@ -9,6 +9,7 @@ import { FloorPlanCanvas } from '@/components/floorplan/FloorPlanCanvas'
 import { MappingConfidenceNote } from '@/components/status'
 import { PlanMinimap, type MinimapOrientation } from '@/components/viewer/PlanMinimap'
 import { AnchorPlacement, type PendingAnchor } from '@/components/viewer/AnchorPlacement'
+import { RecognisePlacement } from '@/components/viewer/RecognisePlacement'
 import { TimeTravelPanel } from '@/components/viewer/TimeTravelPanel'
 import { FrameFilmstrip, QualityPanel, Viewer360 } from '@/components/viewer/Viewer360'
 import {
@@ -38,13 +39,14 @@ import {
   useFloorPaths,
   useFloorPlan,
   useFrameAnnotations,
+  useLocalizeCapture,
   useLocations,
   useViewerManifest,
 } from '@/hooks/queries'
 import { Capability, useAuth } from '@/hooks/useAuth'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { ApiError } from '@/lib/api'
-import type { AlignTrackResult } from '@/types/api'
+import type { AlignTrackResult, LocalizeResult } from '@/types/api'
 import { formatDateTime, humanize } from '@/lib/utils'
 import {
   ANNOTATION_PRIORITY_VALUES,
@@ -114,6 +116,9 @@ export function ViewerPage() {
   const [alignAnchorCount, setAlignAnchorCount] = useState<number | null>(null)
   const [alignError, setAlignError] = useState<string | null>(null)
   const align = useAlignCapture(frame?.session_id ?? '', frame?.floor_id ?? undefined)
+  const [localizeResult, setLocalizeResult] = useState<LocalizeResult | null>(null)
+  const [localizeError, setLocalizeError] = useState<string | null>(null)
+  const localize = useLocalizeCapture(frame?.session_id ?? '', frame?.floor_id ?? undefined)
   const assign = useAssignFrameLocation(frame?.floor_id ?? undefined)
 
   const canAnnotate = can(Capability.Annotate)
@@ -401,6 +406,31 @@ export function ViewerPage() {
                                   ),
                               },
                             )
+                          }}
+                        />
+                      ) : null}
+
+                      {canPlace && orderedFrames.length >= 2 ? (
+                        <RecognisePlacement
+                          result={localizeResult}
+                          pending={localize.isPending}
+                          error={localizeError}
+                          onRun={() => {
+                            setLocalizeError(null)
+                            localize.mutate(undefined, {
+                              onSuccess: (result) => {
+                                setLocalizeResult(result)
+                                void manifest.refetch()
+                              },
+                              // A refusal comes back as a 200 with `mode: none`, so anything that
+                              // reaches here is a real failure rather than "nothing recognised".
+                              onError: (error) =>
+                                setLocalizeError(
+                                  error instanceof ApiError
+                                    ? error.message
+                                    : 'Could not check this capture against earlier ones',
+                                ),
+                            })
                           }}
                         />
                       ) : null}

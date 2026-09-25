@@ -141,6 +141,10 @@ def align_session_to_plan(
         capture_service.assign_frame_to_location(db, frame, location)
         placed += 1
 
+    # Recorded so a reader can tell a hand-anchored placement from one that recognised itself
+    # against an earlier capture. The coordinates look identical; how much they should be trusted
+    # does not (§46).
+    session.placement_method = "manual_anchors"
     db.commit()
 
     log_event(

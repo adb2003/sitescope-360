@@ -42,6 +42,7 @@ import type {
   FrameComparison,
   FrequencyStatus,
   JobSummary,
+  LocalizeResult,
   Message,
   Page,
   Portfolio,
@@ -639,6 +640,28 @@ export function useAlignCapture(sessionId: string, floorId: string | null | unde
   return useMutation({
     mutationFn: (anchors: TrackAnchor[]) =>
       api.post<AlignTrackResult>(`/captures/${sessionId}/align`, { anchors }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.capture(sessionId) })
+      void queryClient.invalidateQueries({ queryKey: keys.captureFrames(sessionId) })
+      if (floorId) {
+        void queryClient.invalidateQueries({ queryKey: keys.locations(floorId) })
+        void queryClient.invalidateQueries({ queryKey: keys.floorPaths(floorId) })
+      }
+    },
+  })
+}
+
+/**
+ * Place a capture by recognising frames from earlier captures of the same floor (§15).
+ *
+ * The same invalidation as anchoring, for the same reason: one call can move every frame. It is
+ * a mutation even though the operator asked a question — "do you recognise this?" — because the
+ * server answers by placing what it recognised.
+ */
+export function useLocalizeCapture(sessionId: string, floorId: string | null | undefined) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.post<LocalizeResult>(`/captures/${sessionId}/localize`, {}),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.capture(sessionId) })
       void queryClient.invalidateQueries({ queryKey: keys.captureFrames(sessionId) })

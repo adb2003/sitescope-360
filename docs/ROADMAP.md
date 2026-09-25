@@ -63,19 +63,40 @@ a baseline, and short-range **skip constraints** across 2–3 frame spans mean a
 never revisits is still globally optimised rather than left as a dead-reckoning chain.
 `mapping_method` on the session records which path produced the track.
 
-**What is still open here.** Place recognition is within a session only, so it cannot match
-against a floor captured last week — that is 2.2 below, and it is the harder half. A custom
+**What is still open here.** Place recognition here is within a session only: it reconciles a
+walk with itself. Matching against a floor captured last week is 2.2 below, which is now built on
+the same co-location test at a looser threshold. A custom
 solver was written rather than adopting g2o or GTSAM: both are C++ builds with heavier licence
 and packaging consequences than a few hundred lines of NumPy, and the graph sizes here (tens to
 a few hundred poses) do not need their performance.
 
-### 2.2 Cross-session localisation
+### 2.2 Cross-session localisation · **delivered**
 
-Place a *new* capture against an *existing*, already-anchored floor. This is the highest-value
-Phase 2 item: it removes manual placement entirely for a floor captured before.
+**The problem.** Anchoring works and has to be repeated forever. The fiftieth walk down a
+corridor is placed by hand exactly like the first, even though the floor is already covered in
+frames whose plan coordinates are known.
 
-The data is already there — features are persisted per frame as `.npz` blobs, and locations are
-stable across visits — so this is a matching-and-solving problem, not a schema problem.
+**What was built.** `app/vision/relocalize.py` and `app/services/relocalization.py`. A new
+capture's frames are shortlisted against the placed frames of earlier captures of the same floor
+by perceptual hash, matched with ORB, verified against the spherical epipolar geometry, and then
+put to the question that actually matters: *was this taken from the same spot?* Frames taken from
+one point differ only by rotation, so a rotation-only fit leaves almost no parallax; frames
+twenty metres apart in the same corridor match beautifully and leave a great deal. Three
+surviving matches fit the same similarity transform that manual anchoring uses, and the whole
+walk is placed. It runs at the end of the MAPPING stage, so a second capture arrives placed with
+nobody doing anything, and `POST /api/captures/{id}/localize` re-runs it.
+
+A recognised frame **joins the earlier capture's location row** rather than creating a point
+beside it. That is the part that makes it worth having: comparing a place across dates works by
+two frames sharing a location, so a capture placed two pixels from last month's compares against
+nothing.
+
+**What is still open here.** The parallax bar is a viewpoint tolerance, not an identity test —
+see the limitation below, and `cross_session_localisation` in `GET /api/system/capabilities`,
+which states it in full. The stronger version resects the query position from bearings to several
+recognised references instead of adopting the nearest one's coordinates outright; that removes
+the tolerance from the answer rather than bounding it. A floor's *first* capture still has to be
+anchored by hand, and always will — nothing has been there before.
 
 ### 2.3 Automatic capture grouping
 
@@ -205,16 +226,25 @@ Collected in one place, all documented at their source:
    Linux CI with identical library versions, because platform builds of OpenCV detect slightly
    different keypoints. Quote a range, not a single number. Removing the variance would need a
    pinned, reproducible feature detector.
-6. **Coverage is declared, not detected.** It compares visited points to administrator-declared
+6. **A recognised place means a nearby camera, not the same camera position.** Cross-session
+   localisation accepts a match at up to 8° of residual parallax, which is roughly half a metre
+   against a wall 3 m away and roughly 1.7 m across a 12 m space — parallax is an angle and
+   monocular vision has no scale, so the metres vary with the room. The bar comfortably rejects
+   the failure that matters (a frame further down the same corridor reads as tens of degrees),
+   but it can exceed the spacing between capture points, so the nearest candidate by parallax
+   wins and a wrong choice shifts the whole capture by one point with no residual to show for it.
+   Three anchors are required before any track is placed, and the evidence is kept in
+   `localization_report`.
+7. **Coverage is declared, not detected.** It compares visited points to administrator-declared
    expectations; square footage is apportioned, never measured from imagery.
-7. **One PDF sheet becomes one plan.** A sheet set is rasterised a page at a time, chosen on
+8. **One PDF sheet becomes one plan.** A sheet set is rasterised a page at a time, chosen on
    upload — a 40-page set also contains sections, elevations and details, and importing them all
    as floor plans would be worse than importing none. There is no sheet picker that previews the
    pages; the operator has to know which page they want.
-8. **The compass is relative**, not magnetic — an uploaded image carries no device heading, and the
+9. **The compass is relative**, not magnetic — an uploaded image carries no device heading, and the
    viewer labels it `rel`.
-9. **The thread queue is not durable.** Fine for development; `QUEUE_BACKEND=redis` for anything
+10. **The thread queue is not durable.** Fine for development; `QUEUE_BACKEND=redis` for anything
    real. The API warns at startup and the API reports `"durable": false`.
-10. **Two adapters are unverified against hardware** (OSC, Insta360) and report
+11. **Two adapters are unverified against hardware** (OSC, Insta360) and report
    `implemented: false`.
-11. **No progress, defect, object or BIM analysis.** Phase 3.
+12. **No progress, defect, object or BIM analysis.** Phase 3.

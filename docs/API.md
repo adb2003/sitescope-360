@@ -343,6 +343,20 @@ geometry would produce a confident, precise and wrong number.
 | GET | `/captures/{id}/path` | The ordered capture path for this visit. |
 | POST | `/captures/{id}/import` | Import from a registered camera device. |
 | POST | `/captures/{id}/align` | Pin the estimated track to the plan from ≥2 manual anchors. Driven by the viewer's Plan tab. |
+| POST | `/captures/{id}/localize` | Place the capture by recognising frames from earlier captures of the same floor. Runs automatically at the end of processing; this re-runs it. |
+
+**Automatic placement.** `/localize` never fails for the ordinary refusals — a floor nobody has
+captured before, or a walk nothing recognised, are answers rather than errors, and both leave the
+capture untouched. Read `mode` first: `transform` placed the whole walk from a fitted similarity
+transform, `recognised` placed only the frames actually matched and the rest still need
+anchoring, `none` changed nothing. Branch on `reason` rather than on `note`, which is prose for a
+person: `placed`, `no_references` (this floor has never been captured and placed — anchor one
+walk by hand and every later one can place itself), `no_matches`, `already_placed`,
+`not_processed`. They call for different responses and only `no_matches` means the recognition
+actually looked at imagery and disagreed. `matches[].parallax_deg` is the evidence behind each placement
+— near zero means the two cameras were in nearly the same spot — and `placement_method` plus
+`localization_report` on the session keep the whole record. It will not overwrite frames that are
+already placed unless called with `?replace_existing=true`.
 
 **Which upload route.** `/upload` streams the body through the API and validates it *before*
 anything is stored, and de-duplicates identical bytes by checksum — the right default, and what

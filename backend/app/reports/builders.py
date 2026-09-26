@@ -32,6 +32,7 @@ from app.models import (
 )
 from app.services import monitoring
 from app.services.assets import sign_url
+from app.services.relocalization import PLACEMENT_METHOD as PLACEMENT_METHOD_CROSS_SESSION
 
 PROVENANCE_NOTE = {
     "capture_counts": "measured — counted from processed captures",
@@ -40,6 +41,8 @@ PROVENANCE_NOTE = {
         "manual — ratio of visited capture locations to administrator-declared expected "
         "capture points; square footage is apportioned, not measured from imagery"
     ),
+    # Replaced per report by `_positions_provenance`, which counts what actually happened to
+    # the captures in scope. Kept as the fallback for a report with nothing to count.
     "positions": (
         "estimated or manual — relative visual positioning is scale-free; manually placed "
         "points are exact on the floor plan"
@@ -80,7 +83,10 @@ def build_report(
             "start": period_start.isoformat() if period_start else None,
             "end": period_end.isoformat() if period_end else None,
         },
-        "provenance": PROVENANCE_NOTE,
+        "provenance": {
+            **PROVENANCE_NOTE,
+            "positions": _positions_provenance(db, project, floor_id, period_start, period_end),
+        },
         "platform": "SiteScope 360",
         "independence_note": (
             "Generated entirely by SiteScope 360. No third-party construction-monitoring "
@@ -97,6 +103,124 @@ def build_report(
     builder = builders[report_type]
     body = builder(db, project, floor_id, period_start, period_end)
     return {"report_type": str(report_type), **header, **body}
+
+
+def _describe_placement(session: CaptureSession, placed_frames: int) -> str:
+    """One capture's route onto the floor plan, in words rather than a token.
+
+    ``placed_frames`` is passed rather than inferred because a null ``placement_method`` means
+    two different things — frames bound to points one at a time in the editor, or a capture
+    nobody has placed at all — and a report that cannot tell those apart is no use to a reader
+    deciding whether to trust a position.
+    """
+    if session.placement_method == "manual_anchors":
+        return "anchored by hand"
+    if session.placement_method == PLACEMENT_METHOD_CROSS_SESSION:
+        report = session.localization_report or {}
+        generation = report.get("generation")
+        suffix = f" ({generation} hop(s) from a hand-placed point)" if generation else ""
+        return f"recognised from earlier captures{suffix}"
+    return "placed frame by frame" if placed_frames else "not placed"
+
+
+def _positions_provenance(
+    db: Session,
+    project: Project,
+    floor_id: str | None,
+    period_start: date | None,
+    period_end: date | None,
+) -> str:
+    """Say how the positions *in this report* came about, rather than how they can come about.
+
+    The static note this replaces was written when there were two answers — a person placed the
+    point, or a transform they anchored did — and it was complete. Cross-session recognition
+    added a third, and one that carries a caveat the other two do not: a recognised position
+    matches an earlier capture's point to within a viewpoint tolerance, and a chain of those
+    compounds. A report is the artefact that leaves the building and reaches people who will
+    never see the interface explaining any of this, so it states what happened here, with
+    numbers, rather than describing the range of things the software can do (§46).
+    """
+    scope = [CaptureSession.project_id == project.id]
+    if floor_id:
+        scope.append(CaptureSession.floor_id == floor_id)
+    if period_start:
+        scope.append(func.date(CaptureSession.started_at) >= period_start)
+    if period_end:
+        scope.append(func.date(CaptureSession.started_at) <= period_end)
+
+    placed_frames = (
+        select(CaptureFrame.session_id, func.count(CaptureFrame.id).label("placed"))
+        .where(CaptureFrame.location_id.is_not(None))
+        .group_by(CaptureFrame.session_id)
+        .subquery()
+    )
+    rows = db.execute(
+        select(CaptureSession.placement_method, func.coalesce(placed_frames.c.placed, 0))
+        .outerjoin(placed_frames, placed_frames.c.session_id == CaptureSession.id)
+        .where(*scope)
+    ).all()
+
+    if not rows:
+        return PROVENANCE_NOTE["positions"]
+
+    anchored = recognised = by_hand = unplaced = 0
+    for method, placed in rows:
+        if not placed:
+            unplaced += 1
+        elif method == "manual_anchors":
+            anchored += 1
+        elif method == PLACEMENT_METHOD_CROSS_SESSION:
+            recognised += 1
+        else:
+            # Placed, but by neither route that records itself: the frames were bound to points
+            # one at a time in the floor-plan editor.
+            by_hand += 1
+
+    if anchored + recognised + by_hand == 0:
+        return (
+            f"not placed — none of the {len(rows)} captures in this report has been positioned "
+            "on a floor plan."
+        )
+
+    parts = []
+    if anchored:
+        parts.append(f"{anchored} anchored by hand")
+    if recognised:
+        parts.append(f"{recognised} recognised against earlier captures of the same floor")
+    if by_hand:
+        parts.append(f"{by_hand} placed frame by frame")
+    if unplaced:
+        parts.append(f"{unplaced} not placed")
+
+    note = (
+        f"estimated — of {len(rows)} captures here, " + ", ".join(parts) + ". "
+        "Relative visual positioning is scale-free, so a track's position comes from the points "
+        "it was fitted to rather than from measurement."
+    )
+
+    if recognised:
+        depth = (
+            db.scalar(
+                select(func.max(CaptureLocation.placement_generation))
+                .select_from(CaptureLocation)
+                .join(CaptureFrame, CaptureFrame.location_id == CaptureLocation.id)
+                .join(CaptureSession, CaptureSession.id == CaptureFrame.session_id)
+                .where(*scope)
+            )
+            or 0
+        )
+        note += (
+            " A recognised position matches an earlier capture's point to within a viewpoint "
+            "tolerance rather than exactly"
+        )
+        note += (
+            f", and the furthest any point here sits from one a person placed is {depth} hop(s) "
+            "of automatic recognition."
+            if depth
+            else ", though every point used here was placed by a person or a fit they anchored."
+        )
+
+    return note
 
 
 # ---- individual reports ------------------------------------------------------
@@ -281,7 +405,19 @@ def _capture_history(
 
     mean_quality: dict[str, float] = {}
     thumbnails: dict[str, str] = {}
+    placed_counts: dict[str, int] = {}
     if session_ids:
+        placed_counts = {
+            sid: int(count)
+            for sid, count in db.execute(
+                select(CaptureFrame.session_id, func.count(CaptureFrame.id))
+                .where(
+                    CaptureFrame.session_id.in_(session_ids),
+                    CaptureFrame.location_id.is_not(None),
+                )
+                .group_by(CaptureFrame.session_id)
+            )
+        }
         for sid, mean in db.execute(
             select(CaptureFrame.session_id, func.avg(QualityResult.quality_score))
             .join(QualityResult, QualityResult.frame_id == CaptureFrame.id)
@@ -320,6 +456,10 @@ def _capture_history(
                 "files": session.file_count,
                 "status": str(session.status),
                 "mapping_confidence": str(session.mapping_confidence),
+                # How this capture reached the plan, per row: the provenance block says what
+                # happened across the report, and a reader looking at one line should not have
+                # to infer which of those applied to it.
+                "placement": _describe_placement(session, placed_counts.get(session.id, 0)),
                 "mean_quality_score": mean_quality.get(session.id),
                 "thumbnail_url": thumbnails.get(session.id),
             }

@@ -489,6 +489,15 @@ The computed payload is persisted, so the same figures can be re-rendered in ano
 without recomputing — two formats of one report cannot disagree. Every report carries a
 provenance section, and the CSV export preserves it as leading `#` comment lines.
 
+**The positions note is counted, not boilerplate.** A report is the artefact that leaves the
+building, and it reaches people who will never see the interface explaining what "estimated"
+means here — so `provenance.positions` describes *these* captures: how many were anchored by
+hand, how many recognised themselves against earlier captures of the same floor, how many were
+placed frame by frame, how many are not placed at all, and — when recognition was involved — how
+far the furthest point used sits from one a person placed. `capture_history` additionally names
+each capture's own route in a `placement` column, because the summary at the foot of a report is
+no help when reading one line of a table.
+
 Reports generate synchronously: they are database aggregations plus a layout pass — hundreds of
 milliseconds, not minutes — so queueing them would add a polling round trip for no benefit.
 

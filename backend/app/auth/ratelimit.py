@@ -244,6 +244,36 @@ def _record(operation: str, call: Callable[[], object]) -> None:
         logger.warning("Rate limiter failed during %s", operation)
 
 
+def _spend_address_budget(
+    request: Request,
+    *,
+    namespace: str,
+    limit: int,
+    window_seconds: int,
+    message: str,
+    what: str,
+) -> None:
+    """Spend one attempt against the caller's address in one named bucket.
+
+    ``namespace`` is not decoration. Two endpoints sharing a bucket share a fate: whichever is
+    busier spends the budget and the other starts refusing, which is how a public route can lock
+    people out of signing in. Every caller therefore names its own.
+    """
+    from app.core.errors import RateLimitedError
+
+    if limit <= 0:
+        return
+    decision = _decide(
+        f"{what} address check",
+        lambda: get_counter().hit(
+            f"ratelimit:{namespace}:addr:{client_key(request)}", limit, window_seconds
+        ),
+    )
+    if not decision.allowed:
+        logger.warning("Rate limited an address on a %s route", what)
+        raise RateLimitedError(message, retry_after=decision.retry_after)
+
+
 def check_address(request: Request) -> None:
     """Spend one attempt against the caller's address, before any expensive work.
 
@@ -251,24 +281,38 @@ def check_address(request: Request) -> None:
     the outcome is known because the cost this limit protects — the password hash — is incurred
     regardless of whether the attempt succeeds.
     """
-    from app.core.errors import RateLimitedError
-
-    if settings.auth_address_max_attempts <= 0:
-        return
-    decision = _decide(
-        "address check",
-        lambda: get_counter().hit(
-            f"ratelimit:auth:addr:{client_key(request)}",
-            settings.auth_address_max_attempts,
-            settings.auth_address_window_seconds,
-        ),
+    _spend_address_budget(
+        request,
+        namespace="auth",
+        limit=settings.auth_address_max_attempts,
+        window_seconds=settings.auth_address_window_seconds,
+        message="Too many sign-in attempts from this network. Wait a moment and try again.",
+        what="auth",
     )
-    if not decision.allowed:
-        logger.warning("Rate limited an address on an auth route")
-        raise RateLimitedError(
-            "Too many sign-in attempts from this network. Wait a moment and try again.",
-            retry_after=decision.retry_after,
-        )
+
+
+def check_share_address(request: Request) -> None:
+    """The same idea for opening share links, in a bucket of its own.
+
+    Deliberately **not** the auth bucket, which is what this used to spend. A share link is passed
+    around a site team who are all behind one address, so a handful of people opening a link they
+    were sent would quietly consume the sign-in allowance for everyone at that office — and be
+    told, if they hit it, that there had been "too many sign-in attempts", which is nonsense to
+    somebody who has no account and never tried to sign in.
+
+    The limits are looser than auth's because what they protect is different. There is no bcrypt
+    here and no secret to guess — the token is 256 bits — only an unauthenticated endpoint that
+    signs URLs and writes a row on every request, which is worth a ceiling whether or not anyone
+    is attacking it.
+    """
+    _spend_address_budget(
+        request,
+        namespace="share",
+        limit=settings.share_address_max_views,
+        window_seconds=settings.share_address_window_seconds,
+        message="This link has been opened too many times just now. Wait a moment and retry.",
+        what="share",
+    )
 
 
 def _account_key(email: str) -> str:

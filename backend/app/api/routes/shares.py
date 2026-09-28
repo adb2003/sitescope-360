@@ -5,9 +5,11 @@ authenticated, membership-scoped work. *Opening* one is the only route in this A
 project data with no account at all, and it is deliberately the smallest surface that can be
 useful: one frame, no navigation, no ids that work elsewhere.
 
-`GET /api/shared/{token}` is rate limited by address. The token is 256 bits, so this is not
-about guessing — it is about an unauthenticated endpoint that signs URLs and writes a row on
-every request, which is worth a ceiling whether or not anyone is attacking it.
+`GET /api/shared/{token}` is rate limited by address, **in its own bucket**. The token is 256
+bits, so this is not about guessing — it is about an unauthenticated endpoint that signs URLs and
+writes a row on every request, which is worth a ceiling whether or not anyone is attacking it.
+The bucket is separate from the sign-in limiter's on purpose: a link passed around one office
+would otherwise spend everybody's login allowance.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from sqlalchemy import select
 
 from app.api.deps import DbSession, RequireCaptureRead, get_frame_or_404
 from app.auth.membership import assert_member
-from app.auth.ratelimit import check_address
+from app.auth.ratelimit import check_share_address
 from app.core.errors import NotFoundError
 from app.models import (
     Building,
@@ -168,7 +170,7 @@ def open_shared_view(
     a guesser is looking for and no help at all to the person it was sent to, who has to ask for
     a new one either way.
     """
-    check_address(request)
+    check_share_address(request)
     share = sharing.resolve(db, token)
 
     # One query for the frame and the names around it. The join is the reason `share_links` keeps

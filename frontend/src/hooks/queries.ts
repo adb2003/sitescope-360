@@ -80,6 +80,7 @@ export const keys = {
   buildings: (projectId: string) => ['project', projectId, 'buildings'] as const,
   projectFloors: (projectId: string) => ['project', projectId, 'floors'] as const,
   projectMembers: (projectId: string) => ['project', projectId, 'members'] as const,
+  projectShares: (projectId: string) => ['project', projectId, 'shares'] as const,
   floors: (buildingId: string) => ['building', buildingId, 'floors'] as const,
   floor: (id: string) => ['floor', id] as const,
   zones: (floorId: string) => ['floor', floorId, 'zones'] as const,
@@ -739,6 +740,34 @@ export function useRevokeShareLink(frameId: string) {
     mutationFn: (shareId: string) => api.delete<Message>(`/shares/${shareId}`),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.frameShares(frameId) })
+    },
+  })
+}
+
+/**
+ * Every link into a project — the page someone opens after a link goes somewhere it should not.
+ *
+ * Separate from `useFrameShares` because the questions differ: that one answers "is this view
+ * shared", this one answers "what is out there for this job", and they invalidate different
+ * caches when a link is revoked.
+ */
+export function useProjectShares(projectId: string | null | undefined) {
+  return useQuery({
+    queryKey: keys.projectShares(projectId ?? ''),
+    queryFn: () => api.get<ShareLink[]>(`/projects/${projectId}/shares`),
+    enabled: Boolean(projectId),
+  })
+}
+
+export function useRevokeProjectShare(projectId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) => api.delete<Message>(`/shares/${shareId}`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.projectShares(projectId) })
+      // The viewer's per-frame list is now stale too, and the operator may well be heading there
+      // next to check what the link pointed at.
+      void queryClient.invalidateQueries({ queryKey: ['frame'] })
     },
   })
 }

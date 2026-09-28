@@ -63,6 +63,15 @@ class Settings(BaseSettings):
     auth_address_max_attempts: int = 60
     auth_address_window_seconds: int = 300
 
+    #: Share-link opens allowed per address per window, in a bucket of its own.
+    #:
+    #: Looser than the auth limit because it protects something cheaper — no password hash, and
+    #: nothing guessable behind a 256-bit token — and because a shared link is typically opened
+    #: by several people behind one office address at once. Separate from auth so that traffic
+    #: cannot spend the sign-in allowance; see `auth.ratelimit.check_share_address`.
+    share_address_max_views: int = 120
+    share_address_window_seconds: int = 300
+
     #: Failed sign-ins per account, per window. Set to 0 to disable.
     #:
     #: Counts failures only — someone signing in correctly all day is not attacking anything.

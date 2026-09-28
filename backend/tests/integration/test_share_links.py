@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import auth_headers, join_project
+from tests.conftest import PASSWORD, auth_headers, join_project
 from tests.integration.test_definition_of_done import _await_ready
 
 
@@ -310,3 +310,46 @@ def test_a_token_is_never_written_to_the_logs(client, admin_headers, shared_fram
     # An ordinary path is left alone: redaction that swallowed everything would make every other
     # error harder to diagnose for no gain.
     assert safe_path(_Request("/api/captures/CAP-1/frames")) == "/api/captures/CAP-1/frames"
+
+
+def test_opening_links_never_spends_the_sign_in_allowance(client, admin_headers) -> None:
+    """Two endpoints in one bucket share a fate, and this pair shared the wrong one.
+
+    Opening a shared view used to count against `ratelimit:auth:addr:` — the sign-in bucket. A
+    link passed around a site team, who are all behind one office address, would quietly consume
+    everybody's login allowance; and anyone who hit the limit was told there had been "too many
+    sign-in attempts", which is nonsense to a visitor with no account.
+
+    The loop runs past the auth limit deliberately. Under the old behaviour the login below
+    would have been refused.
+    """
+    from app.core.config import settings
+
+    for _ in range(settings.auth_address_max_attempts + 5):
+        # Invalid tokens: the limiter is spent before the token is looked at, which is the whole
+        # point — a refusal must not depend on whether the link was real.
+        assert client.get("/api/shared/not-a-real-token-but-long-enough").status_code == 404
+
+    signed_in = client.post(
+        "/api/auth/login",
+        json={"email": "admin@test.example.com", "password": PASSWORD},
+    )
+
+    assert signed_in.status_code == 200, signed_in.text
+
+
+def test_the_share_limit_does_not_talk_about_signing_in(client, monkeypatch) -> None:
+    """The message a visitor gets has to make sense to someone who has no account."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "share_address_max_views", 2)
+    for _ in range(2):
+        client.get("/api/shared/not-a-real-token-but-long-enough")
+
+    refused = client.get("/api/shared/not-a-real-token-but-long-enough")
+
+    assert refused.status_code == 429, refused.text
+    body = refused.json()
+    assert "sign-in" not in body["message"].lower()
+    assert "link" in body["message"].lower()
+    assert refused.headers["Retry-After"]

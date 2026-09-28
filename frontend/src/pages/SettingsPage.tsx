@@ -50,6 +50,7 @@ import {
   useUsers,
 } from '@/hooks/queries'
 import { ProjectAccessPanel } from '@/components/projects/ProjectAccessPanel'
+import { ProjectSharesPanel } from '@/components/projects/ProjectSharesPanel'
 import { Capability, useAuth } from '@/hooks/useAuth'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { ApiError } from '@/lib/api'
@@ -105,7 +106,17 @@ function AccessTab() {
       </Card>
     )
   }
-  return <ProjectAccessPanel projectId={projectId} />
+  return (
+    <div className="space-y-4">
+      <ProjectAccessPanel projectId={projectId} />
+      {/*
+        Beside access rather than on its own tab: both answer "who can see this project", and a
+        share link is the way somebody sees it *without* being on the members list — so reading
+        one without the other gives a false picture of who has access.
+      */}
+      <ProjectSharesPanel projectId={projectId} />
+    </div>
+  )
 }
 
 

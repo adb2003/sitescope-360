@@ -26,6 +26,7 @@ from app.models.project import (
     Zone,
 )
 from app.models.report import Report
+from app.models.share import ShareLink
 from app.models.user import RefreshToken, User
 
 __all__ = [
@@ -47,6 +48,7 @@ __all__ = [
     "QualityResult",
     "RefreshToken",
     "Report",
+    "ShareLink",
     "User",
     "Zone",
 ]

@@ -44,8 +44,8 @@ Two things happen immediately rather than at token expiry:
   (`"Your permissions changed — please sign in again"`).
 - Changing a password revokes every refresh token for that user.
 
-Only `GET /health`, `GET /api/system/health`, `POST /api/auth/login`, `POST /api/auth/refresh` and
-`GET /api/files/{key}` are reachable without a token. Authentication is checked **before** body
+Only `GET /health`, `GET /api/system/health`, `POST /api/auth/login`, `POST /api/auth/refresh`,
+`GET /api/files/{key}` and `GET /api/shared/{token}` are reachable without a token. Authentication is checked **before** body
 validation, so an unauthenticated caller learns nothing about whether their payload was
 acceptable.
 
@@ -533,6 +533,42 @@ no help when reading one line of a table.
 
 Reports generate synchronously: they are database aggregations plus a layout pass — hundreds of
 milliseconds, not minutes — so queueing them would add a polling round trip for no benefit.
+
+### Share links
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/frames/{id}/share` | Create a read-only link to this view. **The only response carrying the token.** |
+| GET | `/frames/{id}/shares` | Links to this frame, live or not. |
+| GET | `/projects/{id}/shares` | Every link into this project — the audit page. |
+| DELETE | `/shares/{id}` | Revoke now, whatever the expiry says. |
+| GET | `/shared/{token}` | Open a shared view. **No authentication.** |
+
+A share link exists so somebody without an account can see one capture — the client signing off a
+slab, the consultant asked whether a detail was built as drawn. The alternative people actually
+use is emailing a screenshot, which throws away the date, the floor, the location and the ability
+to look around.
+
+It is a **bearer credential**: whoever holds the link has the access. The design follows from
+admitting that rather than treating a long URL as a permission system.
+
+| | |
+| --- | --- |
+| Token | 256 bits from `secrets`, stored only as a SHA-256 hash |
+| Shown | Once, at creation. There is no way to retrieve it again |
+| Expiry | Mandatory; 7 days by default, 90 maximum |
+| Revocation | Immediate, independent of expiry, and by any project member |
+| Scope | One frame. No siblings, no other dates, no annotations, no usable ids |
+
+**Every refusal is the same refusal.** A wrong token, an expired one, a revoked one and a deleted
+frame all return the identical 404 body. Telling a visitor a link *has expired* confirms it was
+once real — the one fact useful to somebody probing, and no help to the person it was sent to,
+who must ask for a new link either way. A test asserts the three bodies are byte-identical.
+
+**Two limitations, stated rather than designed around.** A token in a URL reaches everywhere the
+URL reaches: the application redacts it from its own error logs, but a reverse proxy's access log
+records full paths, so a deployment that ships those should treat them as containing credentials.
+And a link cannot be password-protected — the token is the only factor.
 
 ### Cameras
 

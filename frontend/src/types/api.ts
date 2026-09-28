@@ -233,6 +233,32 @@ export interface ProjectMember {
   added_by_id: string | null
 }
 
+/**
+ * A read-only link to one view (§27), without its token.
+ *
+ * The token is absent from every response but the one that creates it: the server stores only a
+ * hash of it, so there is nothing to return here.
+ */
+export interface ShareLink {
+  id: string
+  frame_id: string
+  label: string | null
+  created_by_id: string | null
+  expires_at: string
+  revoked_at: string | null
+  /** Neither expired nor revoked. Computed by the server so clients cannot disagree about it. */
+  is_live: boolean
+  view_count: number
+  last_viewed_at: string | null
+  created_at: string
+}
+
+/** The one response carrying the token. `path` is relative — the API does not know our origin. */
+export interface ShareLinkCreated extends ShareLink {
+  token: string
+  path: string
+}
+
 export interface CaptureSchedule {
   id: string
   project_id: string

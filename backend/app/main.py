@@ -29,6 +29,7 @@ from app.api.routes import (
     monitoring,
     projects,
     reports,
+    shares,
     sync,
 )
 
@@ -69,6 +70,13 @@ TAGS_METADATA = [
     {"name": "files", "description": "Signed asset delivery for the local storage backend."},
     {"name": "sync", "description": "Reference-data delta sync for offline-first clients."},
     {"name": "events", "description": "WebSocket push for capture processing status."},
+    {
+        "name": "shares",
+        "description": (
+            "Read-only links to a single view. Opening one needs no account — the token is the "
+            "credential — so the shared payload is one frame with no navigation."
+        ),
+    },
 ]
 
 
@@ -183,10 +191,28 @@ async def correlation_middleware(
 
 
 # ---- error handling ----------------------------------------------------------
+#: Path segments that are credentials rather than identifiers.
+#:
+#: A share token lives in the URL, which is what makes a link pasteable and also means it reaches
+#: anywhere the path reaches. The two error handlers below log the path, so a 500 while opening a
+#: link would write a *live* token into logs that are shipped further and kept longer than the
+#: database is. The token is redacted before it gets there.
+_REDACTED_PREFIXES = (f"{settings.api_prefix}/shared/",)
+
+
+def safe_path(request: Request) -> str:
+    """The request path, with any credential in it replaced rather than logged."""
+    path = request.url.path
+    for prefix in _REDACTED_PREFIXES:
+        if path.startswith(prefix):
+            return f"{prefix}<redacted>"
+    return path
+
+
 @app.exception_handler(SiteScopeError)
 async def sitescope_error_handler(request: Request, exc: SiteScopeError) -> JSONResponse:
     if exc.status_code >= 500:
-        logger.exception("Unhandled domain error", extra={"path": request.url.path})
+        logger.exception("Unhandled domain error", extra={"path": safe_path(request)})
     # `Retry-After` is the standard way to say "wait this long", and the only one a generic HTTP
     # client will act on. The same number is in the body for a browser fetch, which cannot read
     # the header cross-origin unless it is explicitly exposed.
@@ -218,7 +244,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 @app.exception_handler(Exception)
 async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
     logger.exception(
-        "Unhandled exception", extra={"path": request.url.path, "method": request.method}
+        "Unhandled exception", extra={"path": safe_path(request), "method": request.method}
     )
     # Never leak internals to a client; the correlation id ties the response to the log entry.
     cid = getattr(request.state, "correlation_id", None) or correlation_id.get()
@@ -245,6 +271,7 @@ app.include_router(reports.router, prefix=prefix)
 app.include_router(cameras.router, prefix=prefix)
 app.include_router(admin.router, prefix=prefix)
 app.include_router(sync.router, prefix=prefix)
+app.include_router(shares.router, prefix=prefix)
 app.include_router(events.router, prefix=prefix)
 app.include_router(files.router, prefix=prefix)
 

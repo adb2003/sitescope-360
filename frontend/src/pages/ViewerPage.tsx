@@ -10,6 +10,7 @@ import { MappingConfidenceNote } from '@/components/status'
 import { PlanMinimap, type MinimapOrientation } from '@/components/viewer/PlanMinimap'
 import { AnchorPlacement, type PendingAnchor } from '@/components/viewer/AnchorPlacement'
 import { RecognisePlacement } from '@/components/viewer/RecognisePlacement'
+import { ShareFrame } from '@/components/viewer/ShareFrame'
 import { TimeTravelPanel } from '@/components/viewer/TimeTravelPanel'
 import { FrameFilmstrip, QualityPanel, Viewer360 } from '@/components/viewer/Viewer360'
 import {
@@ -412,6 +413,14 @@ export function ViewerPage() {
                           }}
                         />
                       ) : null}
+
+                      {/*
+                        Sharing sits with the plan tools rather than in the page header: it is
+                        about this frame at this date, which is exactly what the surrounding
+                        panel is about, and a header button would invite sharing whatever
+                        happened to be open.
+                      */}
+                      <ShareFrame frameId={frameId} />
 
                       {canPlace && orderedFrames.length >= 2 ? (
                         <RecognisePlacement

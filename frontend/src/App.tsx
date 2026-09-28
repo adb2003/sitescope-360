@@ -4,6 +4,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { AppShell } from '@/components/layout/AppShell'
 import { Spinner } from '@/components/ui'
 import { LoginPage } from '@/pages/LoginPage'
+import { SharedViewPage } from '@/pages/SharedViewPage'
 import { PortfolioPage } from '@/pages/PortfolioPage'
 import { ProjectsPage } from '@/pages/ProjectsPage'
 import { ProjectDashboardPage } from '@/pages/ProjectDashboardPage'
@@ -49,6 +50,13 @@ export function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+
+      {/*
+        Outside AppShell, and outside the auth guard. A visitor holding a share link has no
+        account and no project — a page wrapped in the application's sidebar would offer them
+        navigation they cannot use and read as a failed sign-in.
+      */}
+      <Route path="/s/:token" element={<SharedViewPage />} />
 
       <Route element={<AppShell />}>
         <Route index element={<PortfolioPage />} />

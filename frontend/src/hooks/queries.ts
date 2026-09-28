@@ -53,6 +53,8 @@ import type {
   ProjectDashboard,
   ProjectMember,
   ProjectSummary,
+  ShareLink,
+  ShareLinkCreated,
   Report,
   ReportCatalogue,
   StaleAreas,
@@ -97,6 +99,7 @@ export const keys = {
   frame: (id: string) => ['frame', id] as const,
   viewer: (id: string) => ['frame', id, 'viewer'] as const,
   frameAnnotations: (id: string) => ['frame', id, 'annotations'] as const,
+  frameShares: (id: string) => ['frame', id, 'shares'] as const,
   locationFrames: (id: string) => ['location', id, 'frames'] as const,
   compareLocation: (id: string, a?: string, b?: string) =>
     ['compare', 'location', id, a ?? '', b ?? ''] as const,
@@ -699,6 +702,43 @@ export function useClearPlacement(sessionId: string, floorId: string | null | un
         void queryClient.invalidateQueries({ queryKey: keys.locations(floorId) })
         void queryClient.invalidateQueries({ queryKey: keys.floorPaths(floorId) })
       }
+    },
+  })
+}
+
+// ---- share links ------------------------------------------------------------
+export function useFrameShares(frameId: string | null | undefined) {
+  return useQuery({
+    queryKey: keys.frameShares(frameId ?? ''),
+    queryFn: () => api.get<ShareLink[]>(`/frames/${frameId}/shares`),
+    enabled: Boolean(frameId),
+  })
+}
+
+/**
+ * Create a link to one view.
+ *
+ * The response is the only place the token exists — it is not cached anywhere, deliberately, so
+ * it cannot be recovered from a query cache after the component showing it unmounts. Losing it
+ * is meant to cost a new link.
+ */
+export function useCreateShareLink(frameId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { label?: string; expires_in_days?: number }) =>
+      api.post<ShareLinkCreated>(`/frames/${frameId}/share`, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.frameShares(frameId) })
+    },
+  })
+}
+
+export function useRevokeShareLink(frameId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (shareId: string) => api.delete<Message>(`/shares/${shareId}`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.frameShares(frameId) })
     },
   })
 }

@@ -257,6 +257,72 @@ class LocalizeResult(BaseModel):
     matches: list[LocalizeMatchOut] = Field(default_factory=list)
 
 
+class ShareLinkCreate(BaseModel):
+    """Ask for a link to this frame."""
+
+    expires_in_days: Annotated[int, Field(ge=1, le=90)] | None = None
+    #: What to call it in the list — "for Meridian's QS", "slab query 14/9". Revoking the right
+    #: one should not mean guessing from timestamps.
+    label: str | None = Field(default=None, max_length=200)
+
+
+class ShareLinkOut(BaseModel):
+    """A link, without its token.
+
+    The token is absent from every response but the one that creates it: only its hash is
+    stored, so there is nothing to return here even if it were wise to.
+    """
+
+    id: str
+    frame_id: str
+    label: str | None
+    created_by_id: str | None
+    expires_at: datetime
+    revoked_at: datetime | None
+    is_live: bool
+    view_count: int
+    last_viewed_at: datetime | None
+    created_at: datetime
+
+
+class ShareLinkCreated(ShareLinkOut):
+    """The one response that carries the token.
+
+    ``url`` is the path a visitor opens, relative to the web app's origin — the API does not know
+    what that origin is, and guessing it from a `Host` header is how a share link ends up
+    pointing at whatever hostname the last proxy used.
+    """
+
+    token: str
+    path: str
+
+
+class SharedFrameView(BaseModel):
+    """What someone without an account sees: one frame, and enough context to read it.
+
+    Deliberately not a viewer manifest. No sibling frames, no other dates, no annotations, no
+    capture path and no ids that would work anywhere else — a link to one view should not be a
+    map of the project it came from. Names are included because an image with no floor, date or
+    location is not worth sharing.
+    """
+
+    captured_at: datetime
+    project_name: str | None
+    building_name: str | None
+    floor_name: str | None
+    location_code: str | None
+    width_px: int
+    height_px: int
+    projection: ProjectionType
+    initial_yaw_deg: float
+    full: SignedAsset | None
+    preview: SignedAsset | None
+    expires_at: datetime
+    #: Said in the payload, not only in the UI, so any client rendering this cannot present it as
+    #: a measurement or as a live view of the project.
+    notice: str
+
+
 class ClearPlacementResult(BaseModel):
     """What undoing a capture's placement removed.
 

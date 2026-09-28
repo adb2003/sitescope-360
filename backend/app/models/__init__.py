@@ -22,6 +22,7 @@ from app.models.project import (
     Floor,
     FloorPlan,
     Project,
+    ProjectMember,
     Zone,
 )
 from app.models.report import Report
@@ -42,6 +43,7 @@ __all__ = [
     "FloorPlan",
     "ProcessingJob",
     "Project",
+    "ProjectMember",
     "QualityResult",
     "RefreshToken",
     "Report",

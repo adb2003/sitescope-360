@@ -16,12 +16,13 @@ from app.api.deps import (
     RequireProjectRead,
     RequireReportGenerate,
     get_project_or_404,
+    get_report_or_404,
 )
 from app.core.enums import ReportFormat, ReportStatus, ReportType
 from app.core.errors import NotFoundError, SiteScopeError
 from app.core.ids import new_id
 from app.core.logging import get_logger, log_event
-from app.models import Report
+from app.models import Report, User
 from app.reports.builders import build_report
 from app.reports.render import render
 from app.schemas.common import Message, Page
@@ -56,7 +57,7 @@ def generate_report(
     so queueing them would add a polling round trip for no benefit. The pipeline's queue exists
     for work that decodes video; this is not that.
     """
-    project = get_project_or_404(db, project_id)
+    project = get_project_or_404(db, project_id, user)
 
     record = Report(
         id=new_id(),
@@ -126,10 +127,10 @@ def list_reports(
     project_id: str,
     db: DbSession,
     page: Pagination,
-    _: RequireProjectRead,
+    user: RequireProjectRead,
     report_type: Annotated[ReportType | None, Query()] = None,
 ) -> Page[ReportOut]:
-    get_project_or_404(db, project_id)
+    get_project_or_404(db, project_id, user)
     query = select(Report).where(Report.project_id == project_id)
     if report_type:
         query = query.where(Report.report_type == report_type)
@@ -147,14 +148,14 @@ def list_reports(
 
 
 @router.get("/reports/{report_id}", response_model=ReportDetail)
-def get_report(report_id: str, db: DbSession, _: RequireProjectRead) -> ReportDetail:
-    return _detail(_get_or_404(db, report_id), include_payload=True)
+def get_report(report_id: str, db: DbSession, user: RequireProjectRead) -> ReportDetail:
+    return _detail(_get_or_404(db, report_id, user), include_payload=True)
 
 
 @router.get("/reports/{report_id}/download")
-def download_report(report_id: str, db: DbSession, _: RequireProjectRead) -> Response:
+def download_report(report_id: str, db: DbSession, user: RequireProjectRead) -> Response:
     """Stream the rendered report with a filename, for a browser download."""
-    record = _get_or_404(db, report_id)
+    record = _get_or_404(db, report_id, user)
     if record.status is not ReportStatus.READY or not record.storage_key:
         raise NotFoundError(f"Report is {record.status} and has no file to download")
 
@@ -182,8 +183,8 @@ def download_report(report_id: str, db: DbSession, _: RequireProjectRead) -> Res
 
 
 @router.delete("/reports/{report_id}", response_model=Message)
-def delete_report(report_id: str, db: DbSession, _: RequireReportGenerate) -> Message:
-    record = _get_or_404(db, report_id)
+def delete_report(report_id: str, db: DbSession, user: RequireReportGenerate) -> Message:
+    record = _get_or_404(db, report_id, user)
     if record.storage_key:
         with contextlib.suppress(Exception):
             get_storage().delete(record.storage_key)
@@ -228,11 +229,14 @@ def list_report_types(_: RequireProjectRead) -> dict:
     }
 
 
-def _get_or_404(db: DbSession, report_id: str) -> Report:
-    record = db.get(Report, report_id)
-    if record is None:
-        raise NotFoundError(f"Report {report_id} not found")
-    return record
+def _get_or_404(db: DbSession, report_id: str, user: User) -> Report:
+    """Load a report and check the caller can reach its project (§27).
+
+    A report is addressed by its own id, so nothing on the path resolves a project. It also
+    carries the numbers rather than pointing at them — a leaked report id is the figures, not a
+    route to them.
+    """
+    return get_report_or_404(db, report_id, user)
 
 
 def _out(record: Report) -> ReportOut:

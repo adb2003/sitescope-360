@@ -204,3 +204,20 @@ def panorama_factory(demo_room: object):
         return cache[key]
 
     return factory
+
+
+def join_project(client: TestClient, admin_headers: dict[str, str], project_id: str, user_id: str):
+    """Give a non-admin user access to a project (§27).
+
+    Explicit, and deliberately not an autouse fixture. Membership is enforced in tests exactly as
+    it is in production — granting it automatically everywhere would mean no test could ever
+    catch a scoping regression, which is most of the value of having the check at all. A test
+    that needs a viewer to see an admin's project says so on the line that makes it true.
+    """
+    response = client.post(
+        f"/api/projects/{project_id}/members",
+        json={"user_id": user_id},
+        headers=admin_headers,
+    )
+    assert response.status_code in {200, 201}, response.text
+    return response.json()

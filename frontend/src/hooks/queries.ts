@@ -51,6 +51,7 @@ import type {
   ProcessingStatus,
   Project,
   ProjectDashboard,
+  ProjectMember,
   ProjectSummary,
   Report,
   ReportCatalogue,
@@ -76,6 +77,7 @@ export const keys = {
   staleAreas: (id: string, days: number) => ['project', id, 'stale', days] as const,
   buildings: (projectId: string) => ['project', projectId, 'buildings'] as const,
   projectFloors: (projectId: string) => ['project', projectId, 'floors'] as const,
+  projectMembers: (projectId: string) => ['project', projectId, 'members'] as const,
   floors: (buildingId: string) => ['building', buildingId, 'floors'] as const,
   floor: (id: string) => ['floor', id] as const,
   zones: (floorId: string) => ['floor', floorId, 'zones'] as const,
@@ -697,6 +699,45 @@ export function useClearPlacement(sessionId: string, floorId: string | null | un
         void queryClient.invalidateQueries({ queryKey: keys.locations(floorId) })
         void queryClient.invalidateQueries({ queryKey: keys.floorPaths(floorId) })
       }
+    },
+  })
+}
+
+// ---- project membership -----------------------------------------------------
+export function useProjectMembers(projectId: string | null | undefined) {
+  return useQuery({
+    queryKey: keys.projectMembers(projectId ?? ''),
+    queryFn: () => api.get<ProjectMember[]>(`/projects/${projectId}/members`),
+    enabled: Boolean(projectId),
+  })
+}
+
+/**
+ * Grant someone access to a project.
+ *
+ * Invalidates the project list as well as the member list: adding yourself to a project you
+ * could not see is exactly the case where the sidebar is now wrong.
+ */
+export function useAddProjectMember(projectId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { email?: string; user_id?: string }) =>
+      api.post<ProjectMember>(`/projects/${projectId}/members`, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.projectMembers(projectId) })
+      void queryClient.invalidateQueries({ queryKey: keys.projects() })
+    },
+  })
+}
+
+export function useRemoveProjectMember(projectId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (userId: string) =>
+      api.delete<Message>(`/projects/${projectId}/members/${userId}`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.projectMembers(projectId) })
+      void queryClient.invalidateQueries({ queryKey: keys.projects() })
     },
   })
 }

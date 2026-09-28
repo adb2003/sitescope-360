@@ -128,7 +128,9 @@ def enqueue_pipeline(
     # The first notification, and the one that makes the status page useful immediately: the
     # operator pressed "process" in one tab and the capture list in another now says so without
     # waiting out a poll interval.
-    publish_capture_status(session.id, str(session.status), progress=0.0)
+    publish_capture_status(
+        session.id, str(session.status), project_id=session.project_id, progress=0.0
+    )
     return jobs
 
 

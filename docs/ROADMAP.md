@@ -250,4 +250,9 @@ Collected in one place, all documented at their source:
    real. The API warns at startup and the API reports `"durable": false`.
 11. **Two adapters are unverified against hardware** (OSC, Insta360) and report
    `implemented: false`.
-12. **No progress, defect, object or BIM analysis.** Phase 3.
+12. **One role per user, everywhere.** `project_members` decides which projects a user reaches
+   and their global role decides what they may do once there, so somebody who manages one job and
+   merely views another cannot be expressed: they are a project manager on both. Per-project
+   roles are a redesign of the §27 matrix rather than an addition to it — every capability check
+   would need a project in hand — and were deliberately not attempted alongside the scoping.
+13. **No progress, defect, object or BIM analysis.** Phase 3.

@@ -22,7 +22,9 @@ import sys
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
+from app.auth.membership import grant
 from app.core.config import settings
 from app.core.enums import (
     AnnotationPriority,
@@ -130,6 +132,8 @@ def seed_demo(db, *, quick: bool = False) -> dict[str, object]:
             expected_captures_per_week=2,
         )
         db.add(project)
+        db.flush()
+        _staff(db, project, users, added_by_id=admin.id)
         db.commit()
         logger.info("Created project %s", project.code)
 
@@ -300,7 +304,7 @@ def seed_demo(db, *, quick: bool = False) -> dict[str, object]:
         db.commit()
 
     # ---- a second, overdue project so the portfolio view has contrast ----
-    _seed_overdue_project(db, admin, manager)
+    _seed_overdue_project(db, admin, manager, users)
 
     return {
         "project_id": project.id,
@@ -537,7 +541,7 @@ def _seed_annotations(
     logger.info("Seeded %d annotations", len(samples))
 
 
-def _seed_overdue_project(db, admin: User, manager: User) -> None:
+def _seed_overdue_project(db, admin: User, manager: User, users: dict) -> None:
     """A project whose last capture is well past due, so the portfolio view has real contrast."""
     project = db.scalar(select(Project).where(Project.code == "DEMO-002"))
     if project is not None:
@@ -555,6 +559,8 @@ def _seed_overdue_project(db, admin: User, manager: User) -> None:
         expected_captures_per_week=2,
     )
     db.add(project)
+    db.flush()
+    _staff(db, project, users, added_by_id=admin.id)
     db.commit()
 
     building = _get_or_create_building(db, project, "Warehouse")
@@ -565,6 +571,19 @@ def _seed_overdue_project(db, admin: User, manager: User) -> None:
     logger.info(
         "Created %s with no captures — it will report as never captured / overdue", project.code
     )
+
+
+def _staff(db: Session, project: Project, users: dict, *, added_by_id: str) -> None:
+    """Put every demo account on a demo project (§27).
+
+    Projects are only visible to their members now, and the demo exists to be opened by whichever
+    role the reader signs in as — a seeded dataset that shows nothing to three of its four
+    accounts would look like a broken deployment rather than a working permission model. The
+    scoping itself is demonstrated by `tests/integration/test_project_scoping.py`, which is the
+    right place for it: a demo should show the product, not its access-control edge cases.
+    """
+    for account in users.values():
+        grant(db, project.id, account.id, added_by_id=added_by_id)
 
 
 # ---- entrypoint --------------------------------------------------------------

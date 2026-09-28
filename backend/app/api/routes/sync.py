@@ -8,6 +8,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Query
 
 from app.api.deps import DbSession, RequireProjectRead
+from app.auth.membership import member_floor_ids, visible_project_ids
 from app.schemas.project import (
     BuildingOut,
     FloorOut,
@@ -34,7 +35,7 @@ def _collection(collection: sync_service.SyncCollection, model: type[Any]) -> An
 @router.get("/sync", response_model=SyncResponse)
 def sync_reference_data(
     db: DbSession,
-    _: RequireProjectRead,
+    user: RequireProjectRead,
     since: Annotated[
         datetime | None,
         Query(description="The `cursor` from the previous sync. Omit for a full one."),
@@ -58,7 +59,12 @@ def sync_reference_data(
     them offline fetches those while it still has a connection; inlining raster bytes would make
     the response the thing it exists to avoid.
     """
-    result = sync_service.reference_delta(db, since)
+    result = sync_service.reference_delta(
+        db,
+        since,
+        project_ids=visible_project_ids(db, user),
+        floor_ids=member_floor_ids(db, user),
+    )
 
     plans = _collection(result.floor_plans, FloorPlanOut)
     for plan, row in zip(plans.changed, result.floor_plans.changed, strict=True):

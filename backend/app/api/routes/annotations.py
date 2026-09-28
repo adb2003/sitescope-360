@@ -16,6 +16,7 @@ from app.api.deps import (
     get_frame_or_404,
     get_session_or_404,
 )
+from app.auth.membership import assert_member
 from app.auth.rbac import Capability, has_capability
 from app.core.enums import AnnotationPriority, AnnotationStatus
 from app.core.errors import NotFoundError, PermissionDeniedError
@@ -40,8 +41,8 @@ router = APIRouter(tags=["annotations"])
 def create_annotation(
     frame_id: str, payload: AnnotationCreate, db: DbSession, user: RequireAnnotate
 ) -> AnnotationDetail:
-    frame = get_frame_or_404(db, frame_id)
-    session = get_session_or_404(db, frame.session_id)
+    frame = get_frame_or_404(db, frame_id, user)
+    session = get_session_or_404(db, frame.session_id, user)
 
     annotation = Annotation(
         frame_id=frame.id,
@@ -70,9 +71,9 @@ def create_annotation(
 
 @router.get("/frames/{frame_id}/annotations", response_model=list[AnnotationDetail])
 def list_frame_annotations(
-    frame_id: str, db: DbSession, _: RequireCaptureRead
+    frame_id: str, db: DbSession, user: RequireCaptureRead
 ) -> list[AnnotationDetail]:
-    get_frame_or_404(db, frame_id)
+    get_frame_or_404(db, frame_id, user)
     rows = db.scalars(
         select(Annotation).where(Annotation.frame_id == frame_id).order_by(Annotation.created_at)
     )
@@ -112,15 +113,15 @@ def list_project_annotations(
 
 
 @router.get("/annotations/{annotation_id}", response_model=AnnotationDetail)
-def get_annotation(annotation_id: str, db: DbSession, _: RequireCaptureRead) -> AnnotationDetail:
-    return _detail(db, _get_or_404(db, annotation_id))
+def get_annotation(annotation_id: str, db: DbSession, user: RequireCaptureRead) -> AnnotationDetail:
+    return _detail(db, _get_or_404(db, annotation_id, user))
 
 
 @router.patch("/annotations/{annotation_id}", response_model=AnnotationDetail)
 def update_annotation(
     annotation_id: str, payload: AnnotationUpdate, db: DbSession, user: RequireAnnotate
 ) -> AnnotationDetail:
-    annotation = _get_or_404(db, annotation_id)
+    annotation = _get_or_404(db, annotation_id, user)
     updates = payload.model_dump(exclude_unset=True)
 
     # Anyone who can annotate may edit their own note; resolving someone else's finding is a
@@ -152,7 +153,7 @@ def update_annotation(
 
 @router.delete("/annotations/{annotation_id}", response_model=Message)
 def delete_annotation(annotation_id: str, db: DbSession, user: RequireAnnotate) -> Message:
-    annotation = _get_or_404(db, annotation_id)
+    annotation = _get_or_404(db, annotation_id, user)
     if annotation.created_by_id != user.id and not has_capability(
         user.role, Capability.ANNOTATION_RESOLVE
     ):
@@ -162,10 +163,26 @@ def delete_annotation(annotation_id: str, db: DbSession, user: RequireAnnotate) 
     return Message(message="Annotation deleted")
 
 
-def _get_or_404(db: DbSession, annotation_id: str) -> Annotation:
+def _get_or_404(db: DbSession, annotation_id: str, user: User) -> Annotation:
+    """Load an annotation and check the caller can reach its project (§27).
+
+    These three routes address an annotation directly, so nothing on the path resolves a frame or
+    a session and the membership check in `deps` never runs — an annotation id was enough to read,
+    edit or delete a finding on any project in the deployment. Annotation ids are opaque, which
+    is obscurity rather than access control.
+
+    The walk up to the project is done here rather than by passing the frame in, because the
+    caller of these routes has an annotation id and nothing else.
+    """
     annotation = db.get(Annotation, annotation_id)
     if annotation is None:
         raise NotFoundError(f"Annotation {annotation_id} not found")
+
+    frame = db.get(CaptureFrame, annotation.frame_id)
+    session = db.get(CaptureSession, frame.session_id) if frame is not None else None
+    if session is None:
+        raise NotFoundError(f"Annotation {annotation_id} not found")
+    assert_member(db, user, session.project_id, what=f"Annotation {annotation_id}")
     return annotation
 
 

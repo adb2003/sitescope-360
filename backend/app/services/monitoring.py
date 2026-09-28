@@ -608,9 +608,20 @@ def _recent_captures(db: Session, project_id: str, *, limit: int) -> list[Recent
 
 
 # ---- portfolio ---------------------------------------------------------------
-def build_portfolio(db: Session, *, limit: int = 100) -> PortfolioOut:
-    """Cross-project overview for the top-level dashboard."""
-    projects = list(db.scalars(select(Project).order_by(Project.name).limit(limit)))
+def build_portfolio(
+    db: Session, *, limit: int = 100, project_ids: list[str] | None = None
+) -> PortfolioOut:
+    """Cross-project overview for the top-level dashboard.
+
+    ``project_ids`` restricts it to the caller's projects; ``None`` means no restriction, which is
+    what an administrator gets. Passed in rather than resolved here so this service keeps knowing
+    nothing about authentication — the route decides who is asking, and this counts what it is
+    told to count.
+    """
+    query = select(Project)
+    if project_ids is not None:
+        query = query.where(Project.id.in_(project_ids))
+    projects = list(db.scalars(query.order_by(Project.name).limit(limit)))
     rows: list[PortfolioRow] = []
     overdue = 0
     total_sessions = 0

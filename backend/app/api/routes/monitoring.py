@@ -7,6 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from app.api.deps import DbSession, RequireProjectRead, get_project_or_404
+from app.auth.membership import visible_project_ids
 from app.schemas.monitoring import (
     CoverageOut,
     FrequencyStatusOut,
@@ -23,17 +24,22 @@ router = APIRouter(tags=["monitoring"])
 @router.get("/dashboard", response_model=PortfolioOut)
 def portfolio_dashboard(
     db: DbSession,
-    _: RequireProjectRead,
+    user: RequireProjectRead,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ) -> PortfolioOut:
-    """Cross-project overview: coverage, activity and overdue count."""
-    return monitoring.build_portfolio(db, limit=limit)
+    """Cross-project overview: coverage, activity and overdue count.
+
+    "Cross-project" means across *this caller's* projects (§27). The counts here are totals — a
+    portfolio that summed every job in the deployment would tell a subcontractor's viewer how
+    much work the main contractor has on, without naming a single project.
+    """
+    return monitoring.build_portfolio(db, limit=limit, project_ids=visible_project_ids(db, user))
 
 
 @router.get("/projects/{project_id}/dashboard", response_model=ProjectDashboard)
-def project_dashboard(project_id: str, db: DbSession, _: RequireProjectRead) -> ProjectDashboard:
+def project_dashboard(project_id: str, db: DbSession, user: RequireProjectRead) -> ProjectDashboard:
     """Everything the project dashboard shows, in one request (§21)."""
-    get_project_or_404(db, project_id)
+    get_project_or_404(db, project_id, user)
     return monitoring.build_dashboard(db, project_id)
 
 

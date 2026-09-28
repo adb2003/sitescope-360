@@ -18,6 +18,8 @@ from app.api.deps import (
     RequireLocationEdit,
     RequireProjectRead,
     get_floor_or_404,
+    get_location_or_404,
+    get_plan_or_404,
     project_id_for_floor,
 )
 from app.core.config import settings
@@ -74,8 +76,8 @@ def upload_floor_plan(
     ] = 1,
 ) -> FloorPlanOut:
     # Existence check only: a 404 here is the point, the row itself is not needed.
-    get_floor_or_404(db, floor_id)
-    project_id = project_id_for_floor(db, floor_id)
+    get_floor_or_404(db, floor_id, user)
+    project_id = project_id_for_floor(db, floor_id, user)
 
     filename = (file.filename or "floorplan").strip()
     extension = extension_of(filename)
@@ -176,8 +178,8 @@ def upload_floor_plan(
 
 
 @router.get("/floors/{floor_id}/floorplans", response_model=list[FloorPlanOut])
-def list_floor_plans(floor_id: str, db: DbSession, _: RequireProjectRead) -> list[FloorPlanOut]:
-    get_floor_or_404(db, floor_id)
+def list_floor_plans(floor_id: str, db: DbSession, user: RequireProjectRead) -> list[FloorPlanOut]:
+    get_floor_or_404(db, floor_id, user)
     rows = db.scalars(
         select(FloorPlan)
         .where(FloorPlan.floor_id == floor_id)
@@ -187,8 +189,8 @@ def list_floor_plans(floor_id: str, db: DbSession, _: RequireProjectRead) -> lis
 
 
 @router.get("/floors/{floor_id}/floorplan", response_model=FloorPlanOut)
-def get_active_floor_plan(floor_id: str, db: DbSession, _: RequireProjectRead) -> FloorPlanOut:
-    get_floor_or_404(db, floor_id)
+def get_active_floor_plan(floor_id: str, db: DbSession, user: RequireProjectRead) -> FloorPlanOut:
+    get_floor_or_404(db, floor_id, user)
     plan = db.scalar(
         select(FloorPlan)
         .where(FloorPlan.floor_id == floor_id, FloorPlan.is_active.is_(True))
@@ -201,10 +203,8 @@ def get_active_floor_plan(floor_id: str, db: DbSession, _: RequireProjectRead) -
 
 
 @router.post("/floorplans/{plan_id}/activate", response_model=FloorPlanOut)
-def activate_floor_plan(plan_id: str, db: DbSession, _: RequireFloorPlanEdit) -> FloorPlanOut:
-    plan = db.get(FloorPlan, plan_id)
-    if plan is None:
-        raise NotFoundError(f"Floor plan {plan_id} not found")
+def activate_floor_plan(plan_id: str, db: DbSession, user: RequireFloorPlanEdit) -> FloorPlanOut:
+    plan = get_plan_or_404(db, plan_id, user)
     for other in db.scalars(select(FloorPlan).where(FloorPlan.floor_id == plan.floor_id)):
         other.is_active = other.id == plan.id
     db.commit()
@@ -216,7 +216,7 @@ def calibrate_floor_plan(
     plan_id: str,
     payload: FloorPlanCalibration,
     db: DbSession,
-    _: RequireFloorPlanEdit,
+    user: RequireFloorPlanEdit,
 ) -> FloorPlanOut:
     """Set the pixel-to-metre scale from two known points (§12, §30).
 
@@ -224,9 +224,7 @@ def calibrate_floor_plan(
     alignment will build on — so it is entered by a human against a dimension printed on the
     drawing, and stored as ``manual``. Nothing infers it.
     """
-    plan = db.get(FloorPlan, plan_id)
-    if plan is None:
-        raise NotFoundError(f"Floor plan {plan_id} not found")
+    plan = get_plan_or_404(db, plan_id, user)
 
     pixel_distance = math.hypot(payload.x2 - payload.x1, payload.y2 - payload.y1)
     if pixel_distance < 1.0:
@@ -247,10 +245,8 @@ def calibrate_floor_plan(
 
 
 @router.delete("/floorplans/{plan_id}", response_model=Message)
-def delete_floor_plan(plan_id: str, db: DbSession, _: RequireFloorPlanEdit) -> Message:
-    plan = db.get(FloorPlan, plan_id)
-    if plan is None:
-        raise NotFoundError(f"Floor plan {plan_id} not found")
+def delete_floor_plan(plan_id: str, db: DbSession, user: RequireFloorPlanEdit) -> Message:
+    plan = get_plan_or_404(db, plan_id, user)
     located = db.scalar(
         select(CaptureLocation.id).where(CaptureLocation.floor_plan_id == plan.id).limit(1)
     )
@@ -307,7 +303,7 @@ def create_capture_location(
     db: DbSession,
     user: RequireLocationEdit,
 ) -> CaptureLocationOut:
-    floor = get_floor_or_404(db, floor_id)
+    floor = get_floor_or_404(db, floor_id, user)
     location = capture_service.create_location(
         db,
         floor,
@@ -328,10 +324,10 @@ def create_capture_location(
 def list_capture_locations(
     floor_id: str,
     db: DbSession,
-    _: RequireCaptureRead,
+    user: RequireCaptureRead,
     zone_id: Annotated[str | None, Query()] = None,
 ) -> list[CaptureLocationOut]:
-    get_floor_or_404(db, floor_id)
+    get_floor_or_404(db, floor_id, user)
     query = select(CaptureLocation).where(CaptureLocation.floor_id == floor_id)
     if zone_id:
         query = query.where(CaptureLocation.zone_id == zone_id)
@@ -347,7 +343,7 @@ def list_capture_locations(
 def find_nearest_capture_locations(
     floor_id: str,
     db: DbSession,
-    _: RequireCaptureRead,
+    user: RequireCaptureRead,
     x: Annotated[float, Query(description="Floor-plan x in plan pixels")],
     y: Annotated[float, Query(description="Floor-plan y in plan pixels")],
     limit: Annotated[int, Query(ge=1, le=MAX_RESULTS)] = 1,
@@ -361,7 +357,7 @@ def find_nearest_capture_locations(
     date's click against another date's points, or any client that should not have to download
     every location to find one.
     """
-    get_floor_or_404(db, floor_id)
+    get_floor_or_404(db, floor_id, user)
     found = nearest_locations(db, floor_id, x, y, limit=limit, within_px=within_px)
     if not found:
         return []
@@ -383,7 +379,7 @@ def find_nearest_capture_locations(
 def find_captures_near_point(
     floor_id: str,
     db: DbSession,
-    _: RequireCaptureRead,
+    user: RequireCaptureRead,
     x: Annotated[float, Query(description="Floor-plan x in plan pixels")],
     y: Annotated[float, Query(description="Floor-plan y in plan pixels")],
     within_px: Annotated[float, Query(gt=0, description="Search radius in plan pixels")] = 60.0,
@@ -400,7 +396,7 @@ def find_captures_near_point(
     resolves a click instantly from points it has already loaded, and this fills the history
     panel beside it.
     """
-    get_floor_or_404(db, floor_id)
+    get_floor_or_404(db, floor_id, user)
     found = captures_near(db, floor_id, x, y, within_px=within_px, max_points=max_points)
     if not found:
         return []
@@ -430,12 +426,10 @@ def update_capture_location(
     location_id: str,
     payload: CaptureLocationUpdate,
     db: DbSession,
-    _: RequireLocationEdit,
+    user: RequireLocationEdit,
 ) -> CaptureLocationOut:
     """Move or relabel a capture point — the drag interaction in the floor-plan editor."""
-    location = db.get(CaptureLocation, location_id)
-    if location is None:
-        raise NotFoundError(f"Location {location_id} not found")
+    location = get_location_or_404(db, location_id, user)
 
     updates = payload.model_dump(exclude_unset=True)
     if "x" in updates or "y" in updates:
@@ -465,10 +459,8 @@ def update_capture_location(
 
 
 @router.delete("/locations/{location_id}", response_model=Message)
-def delete_capture_location(location_id: str, db: DbSession, _: RequireLocationEdit) -> Message:
-    location = db.get(CaptureLocation, location_id)
-    if location is None:
-        raise NotFoundError(f"Location {location_id} not found")
+def delete_capture_location(location_id: str, db: DbSession, user: RequireLocationEdit) -> Message:
+    location = get_location_or_404(db, location_id, user)
 
     # Frames keep existing; they simply become unplaced (ON DELETE SET NULL).
     affected = list(db.scalars(select(CaptureFrame).where(CaptureFrame.location_id == location.id)))

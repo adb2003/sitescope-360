@@ -216,6 +216,23 @@ export interface CaptureLocation {
   latest_captured_at: string | null
 }
 
+/**
+ * One person who can see a project (§27).
+ *
+ * `role` is their *global* role, which decides what they may do here. Membership decides only
+ * whether they reach this project at all — the two are separate, and showing the role alongside
+ * the membership is what keeps the UI from implying they are one thing.
+ */
+export interface ProjectMember {
+  user_id: string
+  email: string
+  full_name: string
+  role: Role
+  is_active: boolean
+  added_at: string
+  added_by_id: string | null
+}
+
 export interface CaptureSchedule {
   id: string
   project_id: string

@@ -609,6 +609,50 @@ the evidence — every match with its inlier count and residual parallax, everyt
 why, and the fitted transform. The coordinates from the two paths are indistinguishable; how much
 they should be trusted is not (§46).
 
+#### Project membership: which projects a role reaches
+
+Roles answered what a user may do and nothing answered which projects they may do it to, so every
+authenticated account could read every project in the deployment. `project_members` closes that,
+and the shape of the fix matters more than the table:
+
+**Enforced in the resource resolvers, not route by route.** `api/deps.py` already loads the
+project behind every path — a frame resolves to a session, a session to a project — so the
+membership check lives there and a new route that loads a frame cannot forget it. The `user`
+argument on those resolvers is **required**, which is the whole trick: adding the parameter turned
+66 call sites into type errors, and a missed one is a failed build rather than a silent hole.
+
+That covered most of the API and not all of it, and the gap was instructive. Routes that address
+a resource by *its own* id — `/annotations/{id}`, `/reports/{id}`, `/locations/{id}`,
+`/floorplans/{id}`, `/zones/{id}` — resolve no parent, so they had no resolver to check. Each got
+one. `POST /captures` was the same shape in reverse: the service loaded the floor itself to find
+the project, which answers no authorization question, so an engineer could start a capture on any
+floor id in the deployment. That is a write into another company's job, and a scoping test caught
+it rather than a reading of the code.
+
+**List endpoints narrow rather than refuse,** and their totals narrow with them — a count that
+included projects whose rows were filtered out would report how much other work exists. `/sync`
+matters most here: it is the widest read in the API and a phone keeps its copy offline.
+
+**The event socket filters too.** Every authenticated socket used to receive every capture-status
+event in the deployment. `publish_capture_status` now requires a `project_id` — required, not
+optional, because an event with no project is an event nobody can filter — and the socket resolves
+its visible set once at authentication rather than per event, since the bus fans out to every
+listener and a query per listener per event would cost more than the polling it replaced. Access
+revoked mid-connection is therefore honoured on reconnect; acceptable, because an event is a hint
+to refetch and the refetch is checked.
+
+**404, not 403.** A 403 on a project a stranger was never told about confirms it exists, and
+codes are guessable. Administrators are exempt from membership entirely: they hold
+`settings:system`, and a deployment where the admin could be locked out of a project would have
+nobody able to fix it but the person locked out.
+
+**The migration grants everyone access to everything.** That reads like a defeat and is the only
+honest option: nobody ever recorded who should see what, because there was nowhere to record it,
+so any narrower rule would be a migration inventing an access policy and enforcing it on a live
+deployment. It preserves exactly today's access and changes nothing for anyone; enforcement is
+real from that point on, and an administrator removes the backfilled rows once they know who
+belongs where.
+
 #### Spatial data: PostGIS, on PostgreSQL only
 
 `capture_locations.geom` is a `geometry(Point, 0)` column, `GENERATED ALWAYS AS

@@ -8,6 +8,7 @@
  */
 
 import {
+  Building2,
   Camera,
   CircleSlash,
   Cpu,
@@ -48,12 +49,13 @@ import {
   useUpsertSchedule,
   useUsers,
 } from '@/hooks/queries'
+import { ProjectAccessPanel } from '@/components/projects/ProjectAccessPanel'
 import { Capability, useAuth } from '@/hooks/useAuth'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { ApiError } from '@/lib/api'
 import { formatBytes, formatDateTime, formatDuration, humanize } from '@/lib/utils'
 
-type Tab = 'schedule' | 'cameras' | 'jobs' | 'capabilities' | 'users'
+type Tab = 'schedule' | 'access' | 'cameras' | 'jobs' | 'capabilities' | 'users'
 
 export function SettingsPage() {
   const { can } = useAuth()
@@ -61,6 +63,7 @@ export function SettingsPage() {
 
   const tabs: Array<{ value: Tab; label: string }> = [
     { value: 'schedule', label: 'Capture schedule' },
+    { value: 'access', label: 'Project access' },
     { value: 'cameras', label: 'Cameras' },
     { value: 'capabilities', label: 'Capabilities' },
     ...(can(Capability.JobAdmin) ? ([{ value: 'jobs' as Tab, label: 'Processing' }]) : []),
@@ -78,6 +81,7 @@ export function SettingsPage() {
         <Tabs value={tab} onChange={setTab} options={tabs} className="w-fit" />
 
         {tab === 'schedule' ? <ScheduleTab /> : null}
+        {tab === 'access' ? <AccessTab /> : null}
         {tab === 'cameras' ? <CamerasTab /> : null}
         {tab === 'capabilities' ? <CapabilitiesTab /> : null}
         {tab === 'jobs' ? <JobsTab /> : null}
@@ -86,6 +90,24 @@ export function SettingsPage() {
     </>
   )
 }
+
+// ---- project access ---------------------------------------------------------
+function AccessTab() {
+  const { projectId } = useProjectContext()
+  if (!projectId) {
+    return (
+      <Card>
+        <EmptyState
+          icon={Building2}
+          title="No project selected"
+          description="Access is granted per project. Choose one from the sidebar."
+        />
+      </Card>
+    )
+  }
+  return <ProjectAccessPanel projectId={projectId} />
+}
+
 
 // ---- schedule ---------------------------------------------------------------
 function ScheduleTab() {

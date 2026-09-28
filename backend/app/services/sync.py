@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, and_, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import ValidationError
@@ -160,8 +160,24 @@ def _collection(
     return SyncCollection(changed=changed, manifest=manifest)
 
 
-def reference_delta(db: Session, since: datetime | None = None) -> SyncResult:
+def reference_delta(
+    db: Session,
+    since: datetime | None = None,
+    *,
+    project_ids: list[str] | None = None,
+    floor_ids: list[str] | None = None,
+) -> SyncResult:
     """Everything a client needs to run offline, changed since ``since``.
+
+    ``project_ids`` and ``floor_ids`` restrict the response to what the caller may see (§27);
+    ``None`` for either means no restriction, which is what an administrator gets. Both are
+    passed in rather than derived here, so this service stays a plain database read that knows
+    nothing about who is asking.
+
+    This is the widest read in the API — every project, building, floor, zone and plan in one
+    response — so it is also where forgetting to scope would leak the most. A phone that has
+    synced keeps the copy offline, which is why the restriction belongs in the query rather than
+    in a filter applied to the response.
 
     The cursor is deliberately :data:`CURSOR_LAG` behind the present, so the next call's window
     overlaps this one. A row can carry a timestamp earlier than the moment it became visible —
@@ -178,14 +194,22 @@ def reference_delta(db: Session, since: datetime | None = None) -> SyncResult:
 
     cursor = datetime.now(UTC) - CURSOR_LAG
 
-    projects = _collection(db, model=Project, since=since)
-    buildings = _collection(db, model=Building, since=since)
-    floors = _collection(db, model=Floor, since=since)
-    zones = _collection(db, model=Zone, since=since)
+    project_scope = None if project_ids is None else Project.id.in_(project_ids)
+    building_scope = None if project_ids is None else Building.project_id.in_(project_ids)
+    floor_scope = None if floor_ids is None else Floor.id.in_(floor_ids)
+    zone_scope = None if floor_ids is None else Zone.floor_id.in_(floor_ids)
+    plan_scope: Any = FloorPlan.is_active.is_(True)
+    if floor_ids is not None:
+        plan_scope = and_(plan_scope, FloorPlan.floor_id.in_(floor_ids))
+
+    projects = _collection(db, model=Project, since=since, scope=project_scope)
+    buildings = _collection(db, model=Building, since=since, scope=building_scope)
+    floors = _collection(db, model=Floor, since=since, scope=floor_scope)
+    zones = _collection(db, model=Zone, since=since, scope=zone_scope)
     # Superseded plans are excluded from both halves, so a plan being replaced leaves the
     # manifest and the client deletes its copy -- the same path a deletion takes. An operator
     # must not be looking at last month's plan because it is still on the device.
-    plans = _collection(db, model=FloorPlan, since=since, scope=FloorPlan.is_active.is_(True))
+    plans = _collection(db, model=FloorPlan, since=since, scope=plan_scope)
 
     total = sum(
         len(collection.manifest) for collection in (projects, buildings, floors, zones, plans)

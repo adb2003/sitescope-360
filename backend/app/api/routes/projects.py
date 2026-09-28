@@ -17,8 +17,10 @@ from app.api.deps import (
     get_building_or_404,
     get_floor_or_404,
     get_project_or_404,
+    get_zone_or_404,
     project_id_for_floor,
 )
+from app.auth.membership import grant, restrict_to_member_projects
 from app.core.enums import ProjectStatus
 from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.logging import log_event
@@ -31,6 +33,8 @@ from app.models import (
     Floor,
     FloorPlan,
     Project,
+    ProjectMember,
+    User,
     Zone,
 )
 from app.schemas.common import Message, Page
@@ -45,6 +49,8 @@ from app.schemas.project import (
     FloorOut,
     FloorUpdate,
     ProjectCreate,
+    ProjectMemberAdd,
+    ProjectMemberOut,
     ProjectOut,
     ProjectSummary,
     ProjectUpdate,
@@ -75,6 +81,14 @@ def create_project(payload: ProjectCreate, db: DbSession, user: RequireProjectWr
         created_by_id=user.id,
     )
     db.add(project)
+    db.flush()
+    # The creator becomes a member of what they just created. Without this the project vanishes
+    # from their own list the moment it is saved — membership is what makes it visible, and a
+    # project manager creating a job for their team would be the first person shut out of it.
+    grant(db, project.id, user.id, added_by_id=user.id)
+    if project.project_manager_id and project.project_manager_id != user.id:
+        # Naming someone as the manager is a statement that they are on this job.
+        grant(db, project.id, project.project_manager_id, added_by_id=user.id)
     db.commit()
     log_event("project.created", project_id=project.id, code=project.code, user_id=user.id)
     return ProjectOut.model_validate(project)
@@ -84,11 +98,14 @@ def create_project(payload: ProjectCreate, db: DbSession, user: RequireProjectWr
 def list_projects(
     db: DbSession,
     page: Pagination,
-    _: RequireProjectRead,
+    user: RequireProjectRead,
     q: Annotated[str | None, Query(description="Search name, code or client")] = None,
     project_status: Annotated[ProjectStatus | None, Query(alias="status")] = None,
 ) -> Page[ProjectSummary]:
-    query = select(Project)
+    # Narrowed to the caller's projects (§27). A list endpoint resolves no single resource, so
+    # the membership check in `deps` has nothing to hook into and the filter has to be here,
+    # where it is visible in the query rather than implied.
+    query = restrict_to_member_projects(select(Project), Project.id, db, user)
     if q:
         pattern = f"%{q.strip()}%"
         query = query.where(
@@ -110,15 +127,15 @@ def list_projects(
 
 
 @router.get("/projects/{project_id}", response_model=ProjectSummary)
-def get_project(project_id: str, db: DbSession, _: RequireProjectRead) -> ProjectSummary:
-    return _summarize(db, get_project_or_404(db, project_id))
+def get_project(project_id: str, db: DbSession, user: RequireProjectRead) -> ProjectSummary:
+    return _summarize(db, get_project_or_404(db, project_id, user))
 
 
 @router.patch("/projects/{project_id}", response_model=ProjectOut)
 def update_project(
-    project_id: str, payload: ProjectUpdate, db: DbSession, _: RequireProjectWrite
+    project_id: str, payload: ProjectUpdate, db: DbSession, user: RequireProjectWrite
 ) -> ProjectOut:
-    project = get_project_or_404(db, project_id)
+    project = get_project_or_404(db, project_id, user)
     updates = payload.model_dump(exclude_unset=True)
 
     start = updates.get("start_date", project.start_date)
@@ -136,7 +153,7 @@ def update_project(
 def delete_project(
     project_id: str,
     db: DbSession,
-    _: RequireProjectDelete,
+    user: RequireProjectDelete,
     confirm_code: Annotated[
         str, Query(description="Repeat the project code to confirm this destructive action")
     ],
@@ -146,7 +163,7 @@ def delete_project(
     The project code must be repeated in the query string. That is not ceremony: this endpoint
     destroys an entire site's capture history, and a mistyped id should not be enough to do it.
     """
-    project = get_project_or_404(db, project_id)
+    project = get_project_or_404(db, project_id, user)
     if confirm_code.strip() != project.code:
         raise ValidationError(
             "confirm_code does not match this project's code",
@@ -228,9 +245,9 @@ def _summarize(db: DbSession, project: Project) -> ProjectSummary:
     status_code=status.HTTP_201_CREATED,
 )
 def create_building(
-    project_id: str, payload: BuildingCreate, db: DbSession, _: RequireProjectWrite
+    project_id: str, payload: BuildingCreate, db: DbSession, user: RequireProjectWrite
 ) -> BuildingOut:
-    project = get_project_or_404(db, project_id)
+    project = get_project_or_404(db, project_id, user)
     if db.scalar(
         select(Building.id).where(Building.project_id == project.id, Building.name == payload.name)
     ):
@@ -242,8 +259,8 @@ def create_building(
 
 
 @router.get("/projects/{project_id}/buildings", response_model=list[BuildingOut])
-def list_buildings(project_id: str, db: DbSession, _: RequireProjectRead) -> list[BuildingOut]:
-    get_project_or_404(db, project_id)
+def list_buildings(project_id: str, db: DbSession, user: RequireProjectRead) -> list[BuildingOut]:
+    get_project_or_404(db, project_id, user)
     rows = db.scalars(
         select(Building).where(Building.project_id == project_id).order_by(Building.name)
     )
@@ -251,15 +268,15 @@ def list_buildings(project_id: str, db: DbSession, _: RequireProjectRead) -> lis
 
 
 @router.get("/buildings/{building_id}", response_model=BuildingOut)
-def get_building(building_id: str, db: DbSession, _: RequireProjectRead) -> BuildingOut:
-    return BuildingOut.model_validate(get_building_or_404(db, building_id))
+def get_building(building_id: str, db: DbSession, user: RequireProjectRead) -> BuildingOut:
+    return BuildingOut.model_validate(get_building_or_404(db, building_id, user))
 
 
 @router.patch("/buildings/{building_id}", response_model=BuildingOut)
 def update_building(
-    building_id: str, payload: BuildingUpdate, db: DbSession, _: RequireProjectWrite
+    building_id: str, payload: BuildingUpdate, db: DbSession, user: RequireProjectWrite
 ) -> BuildingOut:
-    building = get_building_or_404(db, building_id)
+    building = get_building_or_404(db, building_id, user)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(building, field, value)
     db.commit()
@@ -267,8 +284,8 @@ def update_building(
 
 
 @router.delete("/buildings/{building_id}", response_model=Message)
-def delete_building(building_id: str, db: DbSession, _: RequireProjectDelete) -> Message:
-    building = get_building_or_404(db, building_id)
+def delete_building(building_id: str, db: DbSession, user: RequireProjectDelete) -> Message:
+    building = get_building_or_404(db, building_id, user)
     db.delete(building)
     db.commit()
     return Message(message=f"Building {building.name} deleted")
@@ -281,9 +298,9 @@ def delete_building(building_id: str, db: DbSession, _: RequireProjectDelete) ->
     status_code=status.HTTP_201_CREATED,
 )
 def create_floor(
-    building_id: str, payload: FloorCreate, db: DbSession, _: RequireProjectWrite
+    building_id: str, payload: FloorCreate, db: DbSession, user: RequireProjectWrite
 ) -> FloorOut:
-    building = get_building_or_404(db, building_id)
+    building = get_building_or_404(db, building_id, user)
     if db.scalar(
         select(Floor.id).where(Floor.building_id == building.id, Floor.name == payload.name)
     ):
@@ -296,16 +313,18 @@ def create_floor(
 
 
 @router.get("/buildings/{building_id}/floors", response_model=list[FloorOut])
-def list_floors(building_id: str, db: DbSession, _: RequireProjectRead) -> list[FloorOut]:
-    get_building_or_404(db, building_id)
+def list_floors(building_id: str, db: DbSession, user: RequireProjectRead) -> list[FloorOut]:
+    get_building_or_404(db, building_id, user)
     rows = db.scalars(select(Floor).where(Floor.building_id == building_id).order_by(Floor.level))
     return [FloorOut.model_validate(row) for row in rows]
 
 
 @router.get("/projects/{project_id}/floors", response_model=list[FloorDetail])
-def list_project_floors(project_id: str, db: DbSession, _: RequireProjectRead) -> list[FloorDetail]:
+def list_project_floors(
+    project_id: str, db: DbSession, user: RequireProjectRead
+) -> list[FloorDetail]:
     """Every floor in a project with its roll-ups — what the floor-plan picker needs."""
-    get_project_or_404(db, project_id)
+    get_project_or_404(db, project_id, user)
     rows = db.execute(
         select(Floor, Building.name)
         .join(Building, Building.id == Floor.building_id)
@@ -316,17 +335,17 @@ def list_project_floors(project_id: str, db: DbSession, _: RequireProjectRead) -
 
 
 @router.get("/floors/{floor_id}", response_model=FloorDetail)
-def get_floor(floor_id: str, db: DbSession, _: RequireProjectRead) -> FloorDetail:
-    floor = get_floor_or_404(db, floor_id)
-    building = get_building_or_404(db, floor.building_id)
+def get_floor(floor_id: str, db: DbSession, user: RequireProjectRead) -> FloorDetail:
+    floor = get_floor_or_404(db, floor_id, user)
+    building = get_building_or_404(db, floor.building_id, user)
     return _floor_detail(db, floor, building.project_id, building.name)
 
 
 @router.patch("/floors/{floor_id}", response_model=FloorOut)
 def update_floor(
-    floor_id: str, payload: FloorUpdate, db: DbSession, _: RequireProjectWrite
+    floor_id: str, payload: FloorUpdate, db: DbSession, user: RequireProjectWrite
 ) -> FloorOut:
-    floor = get_floor_or_404(db, floor_id)
+    floor = get_floor_or_404(db, floor_id, user)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(floor, field, value)
     db.commit()
@@ -334,8 +353,8 @@ def update_floor(
 
 
 @router.delete("/floors/{floor_id}", response_model=Message)
-def delete_floor(floor_id: str, db: DbSession, _: RequireProjectDelete) -> Message:
-    floor = get_floor_or_404(db, floor_id)
+def delete_floor(floor_id: str, db: DbSession, user: RequireProjectDelete) -> Message:
+    floor = get_floor_or_404(db, floor_id, user)
     db.delete(floor)
     db.commit()
     return Message(message=f"Floor {floor.name} deleted")
@@ -379,9 +398,9 @@ def _floor_detail(db: DbSession, floor: Floor, project_id: str, building_name: s
     "/floors/{floor_id}/zones", response_model=ZoneOut, status_code=status.HTTP_201_CREATED
 )
 def create_zone(
-    floor_id: str, payload: ZoneCreate, db: DbSession, _: RequireProjectWrite
+    floor_id: str, payload: ZoneCreate, db: DbSession, user: RequireProjectWrite
 ) -> ZoneOut:
-    floor = get_floor_or_404(db, floor_id)
+    floor = get_floor_or_404(db, floor_id, user)
     if db.scalar(select(Zone.id).where(Zone.floor_id == floor.id, Zone.name == payload.name)):
         raise ConflictError(f"{floor.name} already has a zone named {payload.name!r}")
     zone = Zone(floor_id=floor.id, **payload.model_dump())
@@ -391,19 +410,17 @@ def create_zone(
 
 
 @router.get("/floors/{floor_id}/zones", response_model=list[ZoneOut])
-def list_zones(floor_id: str, db: DbSession, _: RequireProjectRead) -> list[ZoneOut]:
-    get_floor_or_404(db, floor_id)
+def list_zones(floor_id: str, db: DbSession, user: RequireProjectRead) -> list[ZoneOut]:
+    get_floor_or_404(db, floor_id, user)
     rows = db.scalars(select(Zone).where(Zone.floor_id == floor_id).order_by(Zone.name))
     return [ZoneOut.model_validate(row) for row in rows]
 
 
 @router.patch("/zones/{zone_id}", response_model=ZoneOut)
 def update_zone(
-    zone_id: str, payload: ZoneUpdate, db: DbSession, _: RequireProjectWrite
+    zone_id: str, payload: ZoneUpdate, db: DbSession, user: RequireProjectWrite
 ) -> ZoneOut:
-    zone = db.get(Zone, zone_id)
-    if zone is None:
-        raise NotFoundError(f"Zone {zone_id} not found")
+    zone = get_zone_or_404(db, zone_id, user)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(zone, field, value)
     db.commit()
@@ -411,10 +428,8 @@ def update_zone(
 
 
 @router.delete("/zones/{zone_id}", response_model=Message)
-def delete_zone(zone_id: str, db: DbSession, _: RequireProjectDelete) -> Message:
-    zone = db.get(Zone, zone_id)
-    if zone is None:
-        raise NotFoundError(f"Zone {zone_id} not found")
+def delete_zone(zone_id: str, db: DbSession, user: RequireProjectDelete) -> Message:
+    zone = get_zone_or_404(db, zone_id, user)
     db.delete(zone)
     db.commit()
     return Message(message=f"Zone {zone.name} deleted")
@@ -423,10 +438,10 @@ def delete_zone(zone_id: str, db: DbSession, _: RequireProjectDelete) -> Message
 # ---- capture schedule (§20) --------------------------------------------------
 @router.put("/projects/{project_id}/schedule", response_model=CaptureScheduleOut)
 def upsert_schedule(
-    project_id: str, payload: CaptureScheduleIn, db: DbSession, _: RequireProjectSettings
+    project_id: str, payload: CaptureScheduleIn, db: DbSession, user: RequireProjectSettings
 ) -> CaptureScheduleOut:
-    project = get_project_or_404(db, project_id)
-    if payload.floor_id and project_id_for_floor(db, payload.floor_id) != project.id:
+    project = get_project_or_404(db, project_id, user)
+    if payload.floor_id and project_id_for_floor(db, payload.floor_id, user) != project.id:
         raise ValidationError("That floor does not belong to this project")
 
     schedule = db.scalar(
@@ -451,8 +466,119 @@ def upsert_schedule(
 
 @router.get("/projects/{project_id}/schedule", response_model=list[CaptureScheduleOut])
 def list_schedules(
-    project_id: str, db: DbSession, _: RequireProjectRead
+    project_id: str, db: DbSession, user: RequireProjectRead
 ) -> list[CaptureScheduleOut]:
-    get_project_or_404(db, project_id)
+    get_project_or_404(db, project_id, user)
     rows = db.scalars(select(CaptureSchedule).where(CaptureSchedule.project_id == project_id))
     return [CaptureScheduleOut.model_validate(row) for row in rows]
+
+
+# ---- membership --------------------------------------------------------------
+@router.get("/projects/{project_id}/members", response_model=list[ProjectMemberOut])
+def list_project_members(
+    project_id: str, db: DbSession, user: RequireProjectRead
+) -> list[ProjectMemberOut]:
+    """Who can see this project (§27).
+
+    Readable by any member, not only by whoever can change it: a site engineer wondering why a
+    colleague cannot open the job should be able to answer that without an administrator, and the
+    list is people already working together on it.
+    """
+    get_project_or_404(db, project_id, user)
+    rows = db.execute(
+        select(ProjectMember, User)
+        .join(User, User.id == ProjectMember.user_id)
+        .where(ProjectMember.project_id == project_id)
+        .order_by(User.full_name)
+    ).all()
+    return [
+        ProjectMemberOut(
+            user_id=member.user_id,
+            email=account.email,
+            full_name=account.full_name,
+            role=account.role,
+            is_active=account.is_active,
+            added_at=member.created_at,
+            added_by_id=member.added_by_id,
+        )
+        for member, account in rows
+    ]
+
+
+@router.post(
+    "/projects/{project_id}/members",
+    response_model=ProjectMemberOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_project_member(
+    project_id: str,
+    payload: ProjectMemberAdd,
+    db: DbSession,
+    user: RequireProjectSettings,
+) -> ProjectMemberOut:
+    """Give someone access to this project.
+
+    Gated on `settings:project` *and* on the actor's own membership, which `get_project_or_404`
+    enforces. A project manager can therefore staff their own jobs without an administrator, and
+    cannot add themselves to somebody else's — the capability says they may manage a project, and
+    membership says which.
+    """
+    get_project_or_404(db, project_id, user)
+    if payload.user_id:
+        account = db.get(User, payload.user_id)
+    else:
+        account = db.scalar(select(User).where(User.email == str(payload.email)))
+    if account is None:
+        raise NotFoundError("No such user")
+
+    created = grant(db, project_id, account.id, added_by_id=user.id)
+    db.commit()
+    if created:
+        log_event(
+            "project.member_added",
+            project_id=project_id,
+            member_id=account.id,
+            added_by=user.id,
+        )
+    member = db.scalar(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id, ProjectMember.user_id == account.id
+        )
+    )
+    assert member is not None  # just granted, or already present
+    return ProjectMemberOut(
+        user_id=account.id,
+        email=account.email,
+        full_name=account.full_name,
+        role=account.role,
+        is_active=account.is_active,
+        added_at=member.created_at,
+        added_by_id=member.added_by_id,
+    )
+
+
+@router.delete("/projects/{project_id}/members/{user_id}", response_model=Message)
+def remove_project_member(
+    project_id: str, user_id: str, db: DbSession, user: RequireProjectSettings
+) -> Message:
+    """Take away someone's access to this project.
+
+    Removing the last member is allowed. It does not orphan the project — administrators see
+    every project regardless of membership — and refusing would mean a job could never be handed
+    over in the obvious order of adding the new team and removing the old one.
+    """
+    get_project_or_404(db, project_id, user)
+    member = db.scalar(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id, ProjectMember.user_id == user_id
+        )
+    )
+    if member is None:
+        raise NotFoundError("That user is not a member of this project")
+
+    db.delete(member)
+    db.commit()
+    log_event(
+        "project.member_removed", project_id=project_id, member_id=user_id, removed_by=user.id
+    )
+    return Message(message="Access removed")

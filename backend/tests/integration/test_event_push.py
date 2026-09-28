@@ -183,7 +183,7 @@ def test_publishing_never_raises_even_with_a_broken_bus(monkeypatch) -> None:
             raise RuntimeError("no broker")
 
     monkeypatch.setattr("app.events._bus", Broken())
-    publish_capture_status("CAP-4", "ready")  # must not raise
+    publish_capture_status("CAP-4", "ready", project_id="P-4")  # must not raise
 
 
 # ---- the socket ------------------------------------------------------------------------------
@@ -205,7 +205,7 @@ def test_an_authenticated_socket_receives_a_published_event(client: TestClient, 
         socket.send_text(json.dumps({"type": "auth", "token": token}))
         assert json.loads(socket.receive_text())["type"] == "ready"
 
-        publish_capture_status("CAP-20260916-EVT", "ready", progress=1.0)
+        publish_capture_status("CAP-20260916-EVT", "ready", project_id="P-EVT", progress=1.0)
 
         message = json.loads(socket.receive_text())
         assert message["type"] == CAPTURE_STATUS
@@ -260,7 +260,56 @@ def test_a_rejected_socket_never_receives_an_event(client: TestClient, admin) ->
         client.websocket_connect("/api/events") as socket,
     ):
         socket.send_text(json.dumps({"type": "auth", "token": "nope"}))
-        publish_capture_status("CAP-SECRET", "ready")
+        publish_capture_status("CAP-SECRET", "ready", project_id="P-SECRET")
         # Whatever comes back must be the close, never the event.
         received = socket.receive_text()
         assert "CAP-SECRET" not in received
+
+
+def test_a_socket_hears_nothing_about_projects_its_owner_cannot_open(
+    client: TestClient, admin, admin_headers, viewer
+) -> None:
+    """The leak this filter closes (§27).
+
+    Every authenticated socket used to receive every event in the deployment — a session id, its
+    status and its stage. A subcontractor's viewer could watch the main contractor's captures
+    being processed without being able to open one, and the event payload is enough to infer how
+    much work is going on and when.
+    """
+    from tests.conftest import join_project
+
+    reset_event_bus()
+    mine = client.post(
+        "/api/projects", json={"name": "Heard", "code": "EVT-MINE"}, headers=admin_headers
+    ).json()
+    join_project(client, admin_headers, mine["id"], viewer.id)
+    token = _token(client, viewer.email)
+
+    with client.websocket_connect("/api/events") as socket:
+        socket.send_text(json.dumps({"type": "auth", "token": token}))
+        assert json.loads(socket.receive_text())["type"] == "ready"
+
+        # Another project's capture first, then one of theirs. The first must be skipped rather
+        # than queued: if it were merely delayed, the assertion below would pass by accident.
+        publish_capture_status("CAP-THEIRS", "ready", project_id="some-other-project")
+        publish_capture_status("CAP-MINE", "ready", project_id=mine["id"])
+
+        message = json.loads(socket.receive_text())
+        assert message["session_id"] == "CAP-MINE"
+        assert message["project_id"] == mine["id"]
+
+
+def test_an_administrators_socket_hears_everything(
+    client: TestClient, admin, admin_headers
+) -> None:
+    """The same exemption the HTTP routes make, for the same reason."""
+    reset_event_bus()
+    token = _token(client, admin.email)
+
+    with client.websocket_connect("/api/events") as socket:
+        socket.send_text(json.dumps({"type": "auth", "token": token}))
+        assert json.loads(socket.receive_text())["type"] == "ready"
+
+        publish_capture_status("CAP-ANY", "ready", project_id="a-project-nobody-added-them-to")
+
+        assert json.loads(socket.receive_text())["session_id"] == "CAP-ANY"

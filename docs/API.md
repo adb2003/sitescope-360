@@ -148,6 +148,39 @@ than re-deriving the role table.
 A test asserts capabilities grow monotonically with role — a more privileged role can never lose
 one a lesser role has.
 
+#### Projects are scoped to their members
+
+The role matrix says *what* a user may do. `project_members` says *which projects* they may do it
+to, and the two are separate on purpose: membership is not a second role, and a user has one
+global role everywhere. (Per-project roles — project manager on one job, viewer on another —
+would be a redesign of the matrix rather than an addition to it, and are not implemented.)
+
+| | |
+| --- | --- |
+| `GET /projects/{id}/members` | Who can see this project. Readable by any member. |
+| `POST /projects/{id}/members` | Grant access. Needs `settings:project` **and** membership. |
+| `DELETE /projects/{id}/members/{user_id}` | Take it away. |
+
+Three things worth knowing:
+
+**A non-member gets 404, not 403.** A 403 on a project a stranger was never told about confirms
+that it exists, and project codes are short and guessable. A member who has genuinely lost access
+sees the same 404 — worse for them, and the right trade, because they can ask a person and an
+enumerator cannot.
+
+**Administrators are exempt.** They hold `settings:system` and `user:manage`, so a deployment
+where an admin could be locked out of a project would have nobody able to fix it except the
+person locked out.
+
+**Whoever creates a project is added to it,** along with anyone named as its project manager.
+Otherwise a manager creating a job for their team would be the first person shut out of it.
+
+List endpoints narrow rather than refuse: `GET /projects`, `GET /captures`, `GET /dashboard` and
+`GET /sync` return only the caller's projects, and their totals narrow with them — a count that
+included projects the rows omit would report how much other work exists. The `/api/events`
+socket filters the same way, so a capture's processing status is only pushed to people who can
+open it.
+
 ### Errors
 
 Every failure uses one envelope:

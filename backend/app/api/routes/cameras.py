@@ -136,7 +136,7 @@ def discover_camera_files(device_id: str, db: DbSession, _: RequireUpload) -> di
 def import_from_camera(
     session_id: str,
     db: DbSession,
-    _: RequireUpload,
+    user: RequireUpload,
     device_id: Annotated[str, Query(description="Registered camera device to import from")],
     filenames: Annotated[
         list[str] | None, Query(description="Specific files; omit to import everything found")
@@ -148,7 +148,7 @@ def import_from_camera(
     sniffing, size limits, checksums and de-duplication behave identically no matter how the
     bytes arrived.
     """
-    session = get_session_or_404(db, session_id)
+    session = get_session_or_404(db, session_id, user)
     device = _get_or_404(db, device_id)
     provider = get_provider(device.provider_key)
     config = device.config or {}

@@ -23,6 +23,7 @@ import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
+from app.auth.membership import visible_project_ids
 from app.auth.security import decode_access_token
 from app.core.logging import get_logger
 from app.database.session import SessionLocal
@@ -43,13 +44,17 @@ AUTH_TIMEOUT_SECONDS = 10.0
 CLOSE_POLICY_VIOLATION = 1008
 
 
-def _authenticate(token: str) -> User | None:
+def _authenticate(token: str) -> tuple[User, list[str] | None] | None:
     """The same checks `get_current_user` makes, against a token from a socket frame.
 
     Deliberately re-stated rather than shared: the HTTP dependency raises to produce a 401
     response, which is not a thing a WebSocket can send once it is open. Both must stay in step —
     in particular the role check, without which a demoted user keeps their old permissions on an
     open socket until the token expires.
+
+    Returns the caller's visible project ids alongside the user (``None`` meaning unrestricted),
+    resolved here because this is the only place with a live session: the user handed back is
+    detached, and reading a relationship off it later would raise rather than query.
     """
     try:
         claims = decode_access_token(token)
@@ -61,12 +66,12 @@ def _authenticate(token: str) -> User | None:
         user = db.get(User, claims.subject)
         if user is None or not user.is_active or user.role != claims.role:
             return None
-        return user
+        return user, visible_project_ids(db, user)
     finally:
         db.close()
 
 
-async def _await_token(websocket: WebSocket) -> User | None:
+async def _await_token(websocket: WebSocket) -> tuple[User, list[str] | None] | None:
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=AUTH_TIMEOUT_SECONDS)
     except (TimeoutError, WebSocketDisconnect):
@@ -98,23 +103,34 @@ async def capture_events(websocket: WebSocket) -> None:
     """
     await websocket.accept()
 
-    user = await _await_token(websocket)
-    if user is None:
+    authenticated = await _await_token(websocket)
+    if authenticated is None:
         with contextlib.suppress(Exception):
             await websocket.close(code=CLOSE_POLICY_VIOLATION, reason="Authentication required")
         return
 
+    user, visible = authenticated
     await websocket.send_text(json.dumps({"type": "ready"}))
     logger.info("Event socket open", extra={"user_id": user.id})
 
     # Subscribing only now is what makes the auth step meaningful; a subscription opened before
     # the token arrived would have to be discarded, and forgetting to discard it is the whole
     # class of bug this ordering removes.
+    # `visible` was resolved at authentication (§27) rather than per event: the bus fans out to
+    # every socket, and a database round trip per listener per event would make the push more
+    # expensive than the polling it replaces. The cost is that access revoked mid-connection is
+    # honoured only on reconnect — acceptable because an event is a hint to refetch and the
+    # refetch is checked, so the worst case is a client told to look at something it is then
+    # refused.
     events = await get_event_bus().subscribe()
     try:
         async for event in events:
             if websocket.client_state is not WebSocketState.CONNECTED:
                 break
+            if visible is not None and event.data.get("project_id") not in visible:
+                # Not this socket's project. Silently skipped: telling a client that an event
+                # exists but is not for them is the leak the filter exists to close.
+                continue
             await websocket.send_text(event.to_json())
     except WebSocketDisconnect:
         pass

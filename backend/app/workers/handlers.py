@@ -76,7 +76,12 @@ def handle_job(spec: JobSpec) -> dict[str, Any]:
         # status the database has not yet been told about sends the client to read the previous
         # one -- and then nothing arrives to correct it until the next poll, which is precisely
         # the delay the push exists to remove.
-        publish_capture_status(session.id, str(session.status), stage=str(spec.job_type))
+        publish_capture_status(
+            session.id,
+            str(session.status),
+            project_id=session.project_id,
+            stage=str(spec.job_type),
+        )
 
         result = handler(db, session, spec)
 
@@ -98,7 +103,11 @@ def handle_job(spec: JobSpec) -> dict[str, Any]:
             duration_seconds=job.duration_seconds,
         )
         publish_capture_status(
-            session.id, str(session.status), stage=str(spec.job_type), progress=1.0
+            session.id,
+            str(session.status),
+            project_id=session.project_id,
+            stage=str(spec.job_type),
+            progress=1.0,
         )
         return result
 
@@ -120,12 +129,21 @@ def handle_job(spec: JobSpec) -> dict[str, Any]:
         )
         # The failure is the notification that matters most: it is the one the operator would
         # otherwise sit and wait through, watching a progress bar that has stopped moving.
-        publish_capture_status(
-            spec.session_id,
-            str(CaptureSessionStatus.FAILED),
-            stage=str(spec.job_type),
-            error=message,
+        #
+        # The project is looked up rather than read off `session`, which may never have been
+        # bound — the first thing this handler does is fail if the capture is gone. A capture
+        # that no longer exists has nobody to notify, so no event is published at all.
+        failed_project_id = db.scalar(
+            select(CaptureSession.project_id).where(CaptureSession.id == spec.session_id)
         )
+        if failed_project_id:
+            publish_capture_status(
+                spec.session_id,
+                str(CaptureSessionStatus.FAILED),
+                project_id=str(failed_project_id),
+                stage=str(spec.job_type),
+                error=message,
+            )
         raise
     finally:
         db.close()

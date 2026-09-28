@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from tests.conftest import auth_headers, make_user
+from tests.conftest import auth_headers, join_project, make_user
 
 
 def _project(client: TestClient, headers: dict[str, str], code: str = "PERM-1") -> str:
@@ -47,9 +47,12 @@ def test_malformed_bearer_token_is_refused(client: TestClient) -> None:
 
 
 def test_viewer_can_read_but_not_write(
-    client: TestClient, admin_headers: dict[str, str], viewer_headers: dict[str, str]
+    client: TestClient, admin_headers: dict[str, str], viewer_headers: dict[str, str], viewer
 ) -> None:
     project_id = _project(client, admin_headers)
+    # This test is about what a role may do, not which projects it can reach, so the viewer is
+    # put on the project explicitly. Membership is enforced in tests as in production (§27).
+    join_project(client, admin_headers, project_id, viewer.id)
 
     # Reads succeed.
     assert client.get("/api/projects", headers=viewer_headers).status_code == 200
@@ -83,8 +86,12 @@ def test_site_engineer_can_capture_but_not_manage_projects(
     db,
     admin_headers: dict[str, str],
     engineer_headers: dict[str, str],
+    engineer,
 ) -> None:
     project_id = _project(client, admin_headers, "PERM-2")
+    # About what the role may do, not which projects it reaches, so the engineer is put on this
+    # one explicitly — membership is enforced in tests as in production (§27).
+    join_project(client, admin_headers, project_id, engineer.id)
     building_id = client.post(
         f"/api/projects/{project_id}/buildings", headers=admin_headers, json={"name": "B"}
     ).json()["id"]
@@ -164,11 +171,13 @@ def test_only_a_manager_can_resolve_someone_elses_annotation(
     db,
     admin_headers: dict[str, str],
     engineer_headers: dict[str, str],
+    engineer,
     panorama_factory,
 ) -> None:
     from app.core.enums import Role
 
     project_id = _project(client, admin_headers, "PERM-4")
+    join_project(client, admin_headers, project_id, engineer.id)
     building_id = client.post(
         f"/api/projects/{project_id}/buildings", headers=admin_headers, json={"name": "B"}
     ).json()["id"]
@@ -205,8 +214,10 @@ def test_only_a_manager_can_resolve_someone_elses_annotation(
         json={"title": "Cracked slab", "priority": "high"},
     ).json()["id"]
 
-    # A second engineer may not resolve it.
-    make_user(db, "engineer2@test.example.com", Role.SITE_ENGINEER, "Other Engineer")
+    # A second engineer may not resolve it. On the project, so the refusal is the capability
+    # check rather than membership — a non-member would get 404 and prove nothing about roles.
+    other_engineer = make_user(db, "engineer2@test.example.com", Role.SITE_ENGINEER, "Other")
+    join_project(client, admin_headers, project_id, other_engineer.id)
     other = auth_headers(client, "engineer2@test.example.com")
     refused = client.patch(
         f"/api/annotations/{annotation_id}", headers=other, json={"status": "resolved"}

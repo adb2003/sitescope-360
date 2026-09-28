@@ -75,6 +75,47 @@ class Project(Base, TimestampMixin):
         return f"<Project {self.code} {self.name}>"
 
 
+class ProjectMember(Base, TimestampMixin):
+    """Which users can see a project at all (§27).
+
+    Roles answer *what* a user may do and were, until this table existed, the only question the
+    API asked — so a Viewer on one job could read every other job in the deployment. That is
+    fine for a single-contractor install and wrong for anything else, and no role change fixes
+    it, because "viewer" was never meant to mean "viewer of everything".
+
+    Membership is deliberately **not** a second role. A user's global role still decides their
+    capabilities; this decides which projects those capabilities reach. Per-project roles — a
+    project manager on one job and a viewer on another — are a redesign of the §27 matrix rather
+    than an addition to it, and are not attempted here.
+
+    Administrators are not listed and do not need to be: they hold `settings:system` and
+    `user:manage`, so a deployment where an admin could be locked out of a project would have an
+    administrator who cannot administer. That exemption lives in one place,
+    `app.auth.membership`, rather than being re-decided per route.
+    """
+
+    __tablename__ = "project_members"
+    __table_args__ = (
+        UniqueConstraint("project_id", "user_id", name="uq_project_member"),
+        Index("ix_project_members_user", "user_id"),
+    )
+
+    id: Mapped[str] = pk_column()
+    project_id: Mapped[str] = mapped_column(
+        PKType, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        PKType, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    #: Who granted the access. Null for the migration backfill, which nobody performed.
+    added_by_id: Mapped[str | None] = mapped_column(
+        PKType, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<ProjectMember project={self.project_id} user={self.user_id}>"
+
+
 class Building(Base, TimestampMixin):
     __tablename__ = "buildings"
     __table_args__ = (UniqueConstraint("project_id", "name", name="uq_building_project_name"),)

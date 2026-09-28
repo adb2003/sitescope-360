@@ -115,7 +115,7 @@ def job_summary(db: DbSession, _: RequireJobAdmin) -> dict:
 
 
 @router.post("/jobs/{job_id}/retry", response_model=list[ProcessingJobOut])
-def retry_job(job_id: str, db: DbSession, _: RequireJobAdmin) -> list[ProcessingJobOut]:
+def retry_job(job_id: str, db: DbSession, user: RequireJobAdmin) -> list[ProcessingJobOut]:
     """Re-run a failed stage and everything after it.
 
     Re-running only the failed stage would leave downstream stages holding stale output, so the
@@ -130,7 +130,7 @@ def retry_job(job_id: str, db: DbSession, _: RequireJobAdmin) -> list[Processing
     from app.core.enums import PIPELINE_ORDER
 
     start = PIPELINE_ORDER.index(job.job_type)
-    session = get_session_or_404(db, job.session_id)
+    session = get_session_or_404(db, job.session_id, user)
     jobs = enqueue_pipeline(db, session, stages=list(PIPELINE_ORDER[start:]), force=True)
     return [ProcessingJobOut.model_validate(item) for item in jobs]
 

@@ -3,9 +3,9 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 
-from app.core.enums import DataProvenance, ProjectStatus
+from app.core.enums import DataProvenance, ProjectStatus, Role
 from app.schemas.common import ORMModel, SignedAsset
 
 Name = Annotated[str, Field(min_length=1, max_length=200)]
@@ -191,6 +191,39 @@ class CaptureLocationUpdate(BaseModel):
     y: float | None = None
     label: str | None = Field(default=None, max_length=200)
     zone_id: str | None = None
+
+
+class ProjectMemberOut(BaseModel):
+    """One person who can see this project."""
+
+    user_id: str
+    email: str
+    full_name: str
+    #: The user's global role, which decides what they may do here. Membership decides only
+    #: *whether* they reach this project at all — the two are separate on purpose (§27).
+    role: Role
+    is_active: bool
+    added_at: datetime
+    added_by_id: str | None
+
+
+class ProjectMemberAdd(BaseModel):
+    """Who to add, named either way.
+
+    By id when the caller already has one — an administrator picking from the user list. By email
+    otherwise, which is the only option a project manager has: listing users needs `user:manage`,
+    so a manager staffing their own job cannot look up an id. Email is not a leak of the user
+    list either; you have to know the address already.
+    """
+
+    user_id: str | None = None
+    email: EmailStr | None = None
+
+    @model_validator(mode="after")
+    def exactly_one(self) -> ProjectMemberAdd:
+        if bool(self.user_id) == bool(self.email):
+            raise ValueError("Give either user_id or email, not both")
+        return self
 
 
 class CaptureLocationOut(ORMModel):

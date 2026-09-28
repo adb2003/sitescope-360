@@ -49,17 +49,29 @@ def publish_capture_status(
     session_id: str,
     status: str,
     *,
+    project_id: str,
     stage: str | None = None,
     progress: float | None = None,
     error: str | None = None,
 ) -> None:
     """Tell any watching client that a capture moved.
 
+    ``project_id`` is required, not optional, because the socket uses it to decide who may be
+    told (§27). Every authenticated socket used to receive every event in the deployment — a
+    session id, its status and its stage — so a subcontractor's viewer could watch the main
+    contractor's captures being processed without being able to open one. Given a default this
+    would have been easy to publish without, and an event with no project is an event nobody can
+    filter.
+
     Swallows everything. This is called from inside a pipeline stage that has already committed
     its work, so raising here would convert a completed stage into a failed one and cost a real
     reprocessing run to deliver a notification nobody is waiting on any more.
     """
-    data: dict[str, object] = {"session_id": session_id, "status": status}
+    data: dict[str, object] = {
+        "session_id": session_id,
+        "status": status,
+        "project_id": project_id,
+    }
     if stage is not None:
         data["stage"] = stage
     if progress is not None:

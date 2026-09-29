@@ -53,6 +53,8 @@ import type {
   ProjectDashboard,
   ProjectMember,
   ProjectSummary,
+  SheetChosen,
+  SheetSet,
   ShareLink,
   ShareLinkCreated,
   Report,
@@ -86,6 +88,7 @@ export const keys = {
   zones: (floorId: string) => ['floor', floorId, 'zones'] as const,
   floorPlan: (floorId: string) => ['floor', floorId, 'floorplan'] as const,
   floorPlans: (floorId: string) => ['floor', floorId, 'floorplans'] as const,
+  planSheets: (planId: string) => ['floorplan', planId, 'sheets'] as const,
   locations: (floorId: string) => ['floor', floorId, 'locations'] as const,
   capturesNear: (floorId: string, x: number, y: number, radius: number) =>
     ['floor', floorId, 'captures-near', x, y, radius] as const,
@@ -703,6 +706,37 @@ export function useClearPlacement(sessionId: string, floorId: string | null | un
         void queryClient.invalidateQueries({ queryKey: keys.locations(floorId) })
         void queryClient.invalidateQueries({ queryKey: keys.floorPaths(floorId) })
       }
+    },
+  })
+}
+
+// ---- drawing sets -----------------------------------------------------------
+/**
+ * The sheets in the set a plan came from.
+ *
+ * `retry: false` because the expected failure is a 422 — a plan uploaded as a PNG has no sheets
+ * — and retrying a definite answer three times only delays rendering nothing.
+ */
+export function usePlanSheets(planId: string | null | undefined) {
+  return useQuery({
+    queryKey: keys.planSheets(planId ?? ''),
+    queryFn: () => api.get<SheetSet>(`/floorplans/${planId}/sheets`),
+    enabled: Boolean(planId),
+    retry: false,
+  })
+}
+
+export function useChooseSheet(planId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (page: number) => api.post<SheetChosen>(`/floorplans/${planId}/sheets/${page}`),
+    onSuccess: (result) => {
+      // The floor's active plan changed, so anything drawn on it is stale: the plan itself, the
+      // revision list, and the points the editor paints over it.
+      const floorId = result.plan.floor_id
+      void queryClient.invalidateQueries({ queryKey: keys.floorPlan(floorId) })
+      void queryClient.invalidateQueries({ queryKey: keys.floorPlans(floorId) })
+      void queryClient.invalidateQueries({ queryKey: keys.locations(floorId) })
     },
   })
 }

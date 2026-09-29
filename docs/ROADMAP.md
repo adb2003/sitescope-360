@@ -244,10 +244,15 @@ Collected in one place, all documented at their source:
    since it adds no new coordinate.
 7. **Coverage is declared, not detected.** It compares visited points to administrator-declared
    expectations; square footage is apportioned, never measured from imagery.
-8. **One PDF sheet becomes one plan.** A sheet set is rasterised a page at a time, chosen on
-   upload — a 40-page set also contains sections, elevations and details, and importing them all
-   as floor plans would be worse than importing none. There is no sheet picker that previews the
-   pages; the operator has to know which page they want.
+8. **One PDF sheet becomes one plan**, still — a 40-page set also contains sections, elevations
+   and details, and importing them all as floor plans would be worse than importing none. The
+   operator no longer has to *guess* which page, though: `GET /floorplans/{id}/sheets` lists the
+   set and `.../sheets/{page}/preview` renders a thumbnail, so the choice is made by looking.
+   Switching sheets creates a revision rather than re-rendering in place, because capture points
+   are stored in the pixels of the plan they were placed on. The remaining sharp edge is that the
+   floor-plan editor draws every point on the floor over whichever plan is active, so points from
+   an earlier sheet appear on a later one at meaningless coordinates; the switch reports how many
+   are affected, but nothing hides or migrates them.
 9. **The compass is relative**, not magnetic — an uploaded image carries no device heading, and the
    viewer labels it `rel`.
 10. **The thread queue is not durable.** Fine for development; `QUEUE_BACKEND=redis` for anything

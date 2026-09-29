@@ -226,6 +226,47 @@ class ProjectMemberAdd(BaseModel):
         return self
 
 
+class SheetOut(BaseModel):
+    """One page of a drawing set, described without rendering it."""
+
+    page: int
+    width_pt: float
+    height_pt: float
+    orientation: str
+
+
+class SheetSetOut(BaseModel):
+    """What is in the set this plan came from, and which sheet it is currently using.
+
+    Paper sizes rather than pixels: the picker shows them so an operator can tell a plan sheet
+    from a title page at a glance, before any preview has loaded.
+    """
+
+    floor_plan_id: str
+    page_count: int
+    current_page: int | None
+    sheets: list[SheetOut]
+
+
+class SheetChosen(BaseModel):
+    """The new revision, and what the operator needs to know about the old one's points.
+
+    Capture points are stored in the pixels of the plan they were placed on. Switching to another
+    sheet does not move them — that is why this creates a revision — but the floor-plan editor
+    draws every point on the floor over whatever plan is active, so points placed on the previous
+    sheet will appear on this one at coordinates that mean nothing here.
+
+    Returned as a count rather than hidden, because the operator is the only one who can decide
+    what should happen to them: they may be re-placed, or the previous revision may have been the
+    right sheet after all.
+    """
+
+    plan: FloorPlanOut
+    #: Points placed on an earlier revision of this floor's plan.
+    points_from_earlier_sheets: int
+    note: str
+
+
 class CaptureLocationOut(ORMModel):
     id: str
     floor_id: str

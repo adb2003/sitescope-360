@@ -259,6 +259,35 @@ export interface ShareLinkCreated extends ShareLink {
   path: string
 }
 
+/** One page of a drawing set, described without rendering it. */
+export interface Sheet {
+  page: number
+  width_pt: number
+  height_pt: number
+  orientation: string
+}
+
+export interface SheetSet {
+  floor_plan_id: string
+  page_count: number
+  /** Which sheet the current plan was rendered from; null for a plan uploaded as an image. */
+  current_page: number | null
+  sheets: Sheet[]
+}
+
+/**
+ * The revision created by choosing a sheet, and what it means for existing points.
+ *
+ * Switching sheets does not move a capture point — that is why it creates a revision — but the
+ * editor draws every point on the floor over whichever plan is active, so points placed on the
+ * previous sheet appear on this one at coordinates describing a different drawing.
+ */
+export interface SheetChosen {
+  plan: FloorPlan
+  points_from_earlier_sheets: number
+  note: string
+}
+
 export interface CaptureSchedule {
   id: string
   project_id: string

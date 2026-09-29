@@ -6,6 +6,7 @@ import { useNavigate } from 'react-router-dom'
 
 import { PageBody, PageHeader } from '@/components/layout/AppShell'
 import { FloorPlanCanvas, LocationList } from '@/components/floorplan/FloorPlanCanvas'
+import { SheetPicker } from '@/components/floorplan/SheetPicker'
 import { Metric, ProvenanceTag } from '@/components/status'
 import {
   Badge,
@@ -287,6 +288,12 @@ export function FloorPlansPage() {
                       </Callout>
                     </div>
                   ) : null}
+                  {/*
+                    Renders nothing unless this plan came from a PDF — an uploaded image has no
+                    sheets to choose between, and the API says so rather than returning an empty
+                    set.
+                  */}
+                  <SheetPicker planId={plan.data.id} />
                 </Card>
               ) : null}
 

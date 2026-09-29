@@ -1,6 +1,6 @@
 # API reference
 
-120 endpoints across 89 paths. Base prefix `/api`.
+123 endpoints across 92 paths. Base prefix `/api`.
 
 Interactive documentation is generated from the code and is the authoritative source:
 
@@ -315,6 +315,9 @@ it destroys an entire site's capture history, and a mistyped id should not be en
 | --- | --- | --- |
 | POST | `/floors/{id}/floorplan` | Upload PNG/JPG/PDF (multipart). Becomes the active plan. |
 | GET | `/floors/{id}/floorplan` | The active plan. 404 when the floor has none. |
+| GET | `/floorplans/{id}/sheets` | What is in the drawing set this plan came from. Nothing is rendered. |
+| GET | `/floorplans/{id}/sheets/{page}/preview` | A small PNG of one sheet, for choosing by eye. |
+| POST | `/floorplans/{id}/sheets/{page}` | Use a different sheet of the same set. Creates a revision. |
 | GET | `/floors/{id}/floorplans` | Every revision, active first. |
 | POST | `/floorplans/{id}/activate` | Make an earlier revision active again. |
 | PUT | `/floorplans/{id}/calibration` | Two points + a real distance → pixels per metre. |
@@ -569,6 +572,27 @@ who must ask for a new link either way. A test asserts the three bodies are byte
 URL reaches: the application redacts it from its own error logs, but a reverse proxy's access log
 records full paths, so a deployment that ships those should treat them as containing credentials.
 And a link cannot be password-protected — the token is the only factor.
+
+**Choosing a sheet.** A set arrives as one PDF holding forty drawings, of which one or two are
+the plans anybody wants to place capture points on. Upload has always taken a page number and the
+operator has always had to *know* it; these three endpoints let them look instead. Listing is
+cheap — paper sizes come off the page objects with nothing rasterised — and previews are rendered
+on demand at low DPI, so a set with hundreds of sheets opens immediately.
+
+Choosing a sheet creates a **new revision** rather than re-rendering in place, and that is the
+part worth understanding. A capture point is stored in the pixels of the plan it was placed on;
+another sheet is a different drawing at a different scale, so overwriting the raster would move
+every placed point to a coordinate that means nothing, with nothing in the data recording it.
+Revisions already exist for this (a re-upload deactivates the previous plan and keeps it) and
+picking a sheet is the same event by another route.
+
+The response carries `points_from_earlier_sheets`. Points are not moved — but the floor-plan
+editor draws every point on the floor over whichever plan is active, so any placed on the
+previous sheet will appear on this one at coordinates describing a different drawing. It looks
+entirely plausible, which is why the count is returned rather than left to be discovered. The
+calibration is deliberately *not* carried across: a pixel-to-metre scale measured on one drawing
+is not the scale of another, and a plan that looks calibrated and reports wrong distances is
+worse than one that admits it has none.
 
 ### Cameras
 

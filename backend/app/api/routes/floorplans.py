@@ -8,8 +8,9 @@ import math
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Query, UploadFile, status
+from fastapi.responses import Response
 from PIL import Image
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.api.deps import (
     DbSession,
@@ -43,8 +44,12 @@ from app.schemas.project import (
     FloorPlanCalibration,
     FloorPlanOut,
     NearestCaptureLocation,
+    SheetChosen,
+    SheetOut,
+    SheetSetOut,
 )
 from app.services import captures as capture_service
+from app.services import sheets as sheets_service
 from app.services.assets import sign
 from app.services.captures import EMPTY_LOCATION_STATS, LocationStats
 from app.services.spatial import MAX_RESULTS, captures_near, nearest_locations
@@ -516,4 +521,104 @@ def _location_out(location: CaptureLocation, stats: LocationStats) -> CaptureLoc
         frame_count=stats.frame_count,
         latest_frame_id=stats.latest_frame_id,
         latest_captured_at=stats.latest_captured_at,
+    )
+
+
+# ---- sheet sets --------------------------------------------------------------
+@router.get("/floorplans/{plan_id}/sheets", response_model=SheetSetOut)
+def list_plan_sheets(plan_id: str, db: DbSession, user: RequireProjectRead) -> SheetSetOut:
+    """What is in the drawing set this plan came from (§22).
+
+    Nothing is rendered here — paper sizes come straight off the page objects, so a set with
+    hundreds of sheets answers immediately and the picker fetches previews only for the sheets
+    somebody actually looks at.
+    """
+    plan = get_plan_or_404(db, plan_id, user)
+    sheets = sheets_service.list_sheets(plan)
+    render = plan.render or {}
+    current = render.get("page")
+    return SheetSetOut(
+        floor_plan_id=plan.id,
+        page_count=len(sheets),
+        current_page=int(current) if current else None,
+        sheets=[
+            SheetOut(
+                page=sheet.page,
+                width_pt=round(sheet.width_pt, 1),
+                height_pt=round(sheet.height_pt, 1),
+                orientation=sheet.orientation,
+            )
+            for sheet in sheets
+        ],
+    )
+
+
+@router.get(
+    "/floorplans/{plan_id}/sheets/{page}/preview",
+    responses={200: {"content": {"image/png": {}}, "description": "A small PNG of that sheet"}},
+)
+def preview_plan_sheet(
+    plan_id: str,
+    page: int,
+    db: DbSession,
+    user: RequireProjectRead,
+) -> Response:
+    """A thumbnail of one sheet, so the operator can choose by looking rather than guessing.
+
+    Returned as image bytes rather than a signed URL: the preview is rendered on demand from the
+    stored PDF and never written to storage, because caching forty thumbnails per set to save a
+    few milliseconds each would be more to keep consistent than it is worth.
+    """
+    plan = get_plan_or_404(db, plan_id, user)
+    png = sheets_service.preview(plan, page)
+    return Response(
+        content=png,
+        media_type="image/png",
+        # Immutable for a day: the bytes for (plan, page) cannot change, since the source PDF a
+        # plan points at is never rewritten.
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+@router.post("/floorplans/{plan_id}/sheets/{page}", response_model=SheetChosen)
+def choose_plan_sheet(
+    plan_id: str, page: int, db: DbSession, user: RequireFloorPlanEdit
+) -> SheetChosen:
+    """Use a different sheet of the same set as this floor's plan (§22).
+
+    Creates a **new revision** rather than re-rendering in place. Capture locations are stored in
+    the pixels of the plan they were placed on, and another sheet is a different drawing at a
+    different scale — overwriting the raster underneath them would move every placed point to a
+    coordinate that means nothing, with nothing in the data recording that it had happened. The
+    previous revision is kept and deactivated, exactly as a re-upload would leave it.
+    """
+    plan = get_plan_or_404(db, plan_id, user)
+    revision = sheets_service.choose_sheet(db, plan, page, user)
+
+    # Points are not moved — that is the whole reason this is a revision — but the floor-plan
+    # editor draws every point on the floor over whichever plan is active, so any placed on an
+    # earlier sheet will now appear on this one at coordinates that mean nothing here. Counted
+    # and returned rather than left to be discovered: only the operator can decide whether to
+    # re-place them or go back to the sheet they were placed on.
+    stranded = int(
+        db.scalar(
+            select(func.count(CaptureLocation.id)).where(
+                CaptureLocation.floor_id == revision.floor_id,
+                CaptureLocation.floor_plan_id.is_not(None),
+                CaptureLocation.floor_plan_id != revision.id,
+            )
+        )
+        or 0
+    )
+    db.commit()
+    return SheetChosen(
+        plan=_plan_out(revision),
+        points_from_earlier_sheets=stranded,
+        note=(
+            f"{stranded} capture point(s) were placed on an earlier sheet of this set. They have "
+            "not been moved, and their positions describe that sheet rather than this one — "
+            "re-place them here, or switch back to the sheet they belong to."
+        )
+        if stranded
+        else "No capture points had been placed on an earlier sheet of this set.",
     )

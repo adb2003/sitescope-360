@@ -24,6 +24,7 @@ from app.processing.pipeline import enqueue_pipeline
 from app.queue import get_queue
 from app.schemas.capture import ProcessingJobOut
 from app.schemas.common import Page
+from app.storage import get_storage
 from app.vision.ai import get_ai_engine
 
 router = APIRouter(tags=["admin"])
@@ -184,13 +185,29 @@ def system_health(db: DbSession) -> dict:
         error = str(exc)
 
     queue_health = get_queue().health()
+
+    # Storage used to be reported as `settings.storage_backend` — the *name* of the configured
+    # backend, which is true whether or not the bucket exists. A capture platform whose object
+    # store is unreachable cannot serve an image or accept an upload, so a probe that answered
+    # "ok" through that was not reporting health; it was suppressing the alarm.
+    #
+    # Wrapped, because a liveness probe must not 500. An exception escaping here would tell a
+    # load balancer the whole application is broken, when the truth is narrower and more useful.
+    try:
+        storage_health = get_storage().health()
+    except Exception as exc:  # pragma: no cover - the providers already return rather than raise
+        storage_health = {"backend": settings.storage_backend, "ok": False, "error": str(exc)}
+
+    storage_ok = bool(storage_health.get("ok", False))
     return {
-        "status": "ok" if database_ok else "degraded",
+        # Degraded, not failed, when storage is down: the API is still answering and the
+        # distinction is what tells an operator which of the two to go and look at.
+        "status": "ok" if database_ok and storage_ok else "degraded",
         "app": settings.app_name,
         "environment": settings.environment,
         "database": {"ok": database_ok, "error": error},
         "queue": queue_health,
-        "storage": settings.storage_backend,
+        "storage": storage_health,
     }
 
 

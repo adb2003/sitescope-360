@@ -14,7 +14,7 @@ import posixpath
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import BinaryIO, Protocol, runtime_checkable
+from typing import Any, BinaryIO, Protocol, runtime_checkable
 
 from app.core.errors import ValidationError
 
@@ -112,6 +112,21 @@ class StorageProvider(Protocol):
 
         The key is always chosen by the server, never by the client: a client-named key is a
         client-chosen write target, and no signature can make that safe.
+        """
+        ...
+
+    def health(self) -> dict[str, Any]:
+        """Can this backend actually be reached right now?
+
+        Returned by ``GET /api/system/health``, which previously reported storage as the *name*
+        of the configured backend — a value read from settings, which is true whether or not the
+        bucket exists. A capture platform whose object store is unreachable cannot serve a single
+        image or accept a single upload, and a health endpoint that answers "ok" through that is
+        worse than none: it suppresses the alarm rather than raising it.
+
+        Must never raise. An unreachable backend is a fact to report, not an exception to
+        propagate out of a liveness probe — a health check that 500s tells a load balancer the
+        *application* is broken when the truth is more specific and more useful.
         """
         ...
 

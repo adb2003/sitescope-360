@@ -685,7 +685,23 @@ cannot serve it because it sets `Connection ""`.
 | POST | `/jobs/{id}/retry` | Re-run a failed stage **and everything after it**. |
 | GET | `/system/capabilities` | What is implemented, estimated, or unavailable (§46). |
 | GET | `/system/events` | Recent capture lifecycle activity. |
-| GET | `/system/health` | Database, queue and storage status. |
+| GET | `/system/health` | Database, queue and storage, each actually probed. |
+
+**Two health endpoints, and the difference matters.** `GET /health` is the container's liveness
+probe: no database access, no storage access, so a restart is never triggered by a dependency
+being briefly unavailable. `GET /api/system/health` is the one an operator or a dashboard reads —
+it opens a database connection, asks the queue for its state, and probes the object store.
+
+`status` is `degraded` rather than `ok` when the database *or* storage cannot be reached, and the
+per-component objects say which. That was not always true of storage: it used to report the
+*name* of the configured backend, which is "local" or "s3" whether or not the bucket exists, so
+an unreachable object store left the service answering `ok` while every image request failed —
+the monitoring suppressing the alarm rather than raising it.
+
+The local backend probes by writing a small file and deleting it, because a read still succeeds
+on a volume that has gone read-only or filled up. S3 uses `head_bucket`, which answers in one
+round trip whether the endpoint is reachable *and* the credentials still have access — a 403
+after a key rotation stops imagery just as completely as a timeout.
 | GET | `/health` | Liveness probe — no database access, no auth. |
 | GET | `/files/{key}` | Signed asset delivery (local storage backend). |
 

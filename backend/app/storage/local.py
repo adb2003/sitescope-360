@@ -16,7 +16,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 from urllib.parse import quote
 
 from app.core.config import settings
@@ -283,6 +283,23 @@ class LocalStorage:
         # fail is a cleanup that leaks.
         with contextlib.suppress(Exception):
             shutil.rmtree(self._resolve(self._staging_prefix(upload_id)), ignore_errors=True)
+
+    def health(self) -> dict[str, Any]:
+        """Is the storage root there and writable?
+
+        A read alone would pass on a filesystem that has gone read-only or filled up, which are
+        the two ways local storage actually fails — so this writes, and removes what it wrote.
+        The probe file lives beside the data rather than in `/tmp`, because a `/tmp` that works
+        says nothing about the volume the captures are on.
+        """
+        probe = self.root / ".health"
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            probe.write_bytes(b"ok")
+            probe.unlink(missing_ok=True)
+        except Exception as exc:
+            return {"backend": self.name, "ok": False, "error": str(exc), "root": str(self.root)}
+        return {"backend": self.name, "ok": True, "root": str(self.root)}
 
     def purge_stale_uploads(self, max_age_seconds: int = 24 * 3600) -> int:
         """Delete parts from uploads nobody finished, and say how many were dropped.

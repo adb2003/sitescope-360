@@ -85,6 +85,20 @@ class S3Storage:
         body: bytes = response["Body"].read()
         return body
 
+    def health(self) -> dict[str, Any]:
+        """Can the bucket be reached, and does this identity have access to it?
+
+        `head_bucket` rather than listing: it is one round trip, returns no data, and answers the
+        two questions that matter together — the endpoint is reachable and these credentials are
+        allowed to use this bucket. A 403 is as much a failure as a timeout here; a deployment
+        whose keys were rotated cannot serve imagery either way.
+        """
+        try:
+            self._client.head_bucket(Bucket=self.bucket)
+        except Exception as exc:
+            return {"backend": self.name, "ok": False, "error": str(exc), "bucket": self.bucket}
+        return {"backend": self.name, "ok": True, "bucket": self.bucket}
+
     def exists(self, key: str) -> bool:
         validate_key(key)
         try:

@@ -13,7 +13,7 @@ Everything in the §52 Definition of Done, verified end to end through HTTP by
 | Capability | Status | Notes |
 | --- | --- | --- |
 | Project management | ✅ | Project → Building → Floor → Zone, with declared areas and expected capture points. |
-| Authentication and RBAC | ✅ | JWT + rotating refresh tokens; four roles enforced at the route. |
+| Authentication and RBAC | ✅ | JWT + rotating refresh tokens; four roles enforced at the route, and **project membership** deciding which projects those roles reach. |
 | Mobile capture workflow | ✅ web · ⚠ native | The responsive web flow is verified. The Expo app is complete and syntax-checked but not executed (no mobile toolchain here). |
 | Local upload | ✅ | Streaming, magic-byte sniffed, size-capped, checksummed, de-duplicated. |
 | 360 image viewer | ✅ | Three.js: drag, wheel/pinch zoom, keyboard, fullscreen, hotspot navigation, annotation pins. |
@@ -30,6 +30,8 @@ Everything in the §52 Definition of Done, verified end to end through HTTP by
 | Reports | ✅ | 4 types × 3 formats, with a provenance section that survives CSV export. |
 | Processing pipeline | ✅ | 7 independent, idempotent, retryable stages on a pluggable queue. |
 | Observability | ✅ | Structured JSON events, correlation ids, admin job dashboard. |
+| Project access control | ✅ | `project_members` scopes every read and write; a non-member gets 404 rather than 403, and administrators are exempt. |
+| Share links | ✅ | A read-only link to one view, openable with no account. Token stored only as a hash and shown once; expiry mandatory and capped; revocable by any member. |
 | Docker / CI | ⚠ written | Compose, Dockerfiles, nginx and a 6-job CI workflow exist but were not executed locally (no Docker here). CI runs them. |
 
 ### Beyond the brief's Phase 1
@@ -44,6 +46,8 @@ Some Phase 2 work landed early because it was needed to make Phase 1 honest:
 - **Feature matching and image similarity** — verified-inlier similarity between two dates at the
   same location.
 - **Keyframe selection** — near-duplicate and low-quality rejection before mapping.
+- **Cross-session localisation** — 2.2 below, delivered: a second capture of a floor places
+  itself against the first, on the first's own points.
 
 ---
 
@@ -205,7 +209,7 @@ Not oversights:
 | Real-time streaming from a camera | The MVP path is file-based on purpose; live transfer is a per-vendor adapter concern. |
 | In-browser panorama stitching | Cameras and their desktop tools already do this well. |
 | On-device processing | Frame extraction and feature detection are CPU-bound and belong on the server; the phone uploads and reports. |
-| Multi-tenant billing | An organisational concern, not a monitoring one. |
+| Multi-tenant billing | An organisational concern, not a monitoring one. Note that *access* separation is implemented — see project membership above — it is billing that is out of scope, not isolation. |
 
 ---
 

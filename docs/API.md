@@ -1,6 +1,6 @@
 # API reference
 
-99 endpoints across 71 paths. Base prefix `/api`.
+120 endpoints across 89 paths. Base prefix `/api`.
 
 Interactive documentation is generated from the code and is the authoritative source:
 

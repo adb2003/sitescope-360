@@ -43,11 +43,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra dev --python ${{ env.PYTHON_VERSION }}
 
+      # `alembic` is linted too. It was omitted rather than excluded, which is a different
+      # thing: nobody had decided migrations should be unchecked, so the first time a `--fix`
+      # ran over them it rewrote every import in files that were already merged and green.
       - name: Ruff (lint)
-        run: uv run ruff check app tests
+        run: uv run ruff check app tests alembic
 
       - name: Ruff (format check)
-        run: uv run ruff format --check app tests
+        run: uv run ruff format --check app tests alembic
 
       - name: mypy
         run: uv run mypy app

@@ -154,7 +154,7 @@ Why `worker/` and `vision/` live inside `backend/` rather than at the top level 
 cd backend && python -m pytest -q
 
 # Backend quality gates
-python -m ruff check app tests && python -m ruff format --check app tests && python -m mypy app
+python -m ruff check app tests alembic && python -m ruff format --check app tests alembic && python -m mypy app
 
 # Frontend: 117 tests
 cd frontend && npm test && npm run lint && npm run typecheck && npm run build

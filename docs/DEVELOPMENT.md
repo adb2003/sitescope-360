@@ -136,8 +136,8 @@ python -m pytest -q --cov=app --cov-report=term-missing
 Quality gates — the same commands CI runs:
 
 ```bash
-python -m ruff check app tests
-python -m ruff format --check app tests
+python -m ruff check app tests alembic
+python -m ruff format --check app tests alembic
 python -m mypy app
 ```
 

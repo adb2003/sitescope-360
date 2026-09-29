@@ -74,6 +74,15 @@ ignore = [
 "alembic/*" = ["E501"]
 "tests/*" = ["E501"]
 
+[tool.ruff.lint.isort]
+# `alembic` is a dependency, not our code — but the migrations live in a directory of that name,
+# so isort's heuristic reads `from alembic import op` as a first-party import and wants it
+# grouped with `app`. That is why every migration in this repository was written one way and
+# `ruff --fix` rewrote them the other the first time it was pointed at the directory.
+#
+# Stating it settles the disagreement in favour of the truth: alembic is installed from PyPI.
+known-third-party = ["alembic"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]

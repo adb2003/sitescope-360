@@ -15,7 +15,7 @@ from app.core.config import settings
 
 # Importing the models package registers every mapper on Base.metadata, which is what
 # autogenerate compares against.
-from app.models import Base  # noqa: F401
+from app.models import Base
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

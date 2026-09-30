@@ -611,20 +611,23 @@ def choose_plan_sheet(
 ) -> SheetChosen:
     """Use a different sheet of the same set as this floor's plan (§22).
 
-    Creates a **new revision** rather than re-rendering in place. Capture locations are stored in
-    the pixels of the plan they were placed on, and another sheet is a different drawing at a
-    different scale — overwriting the raster underneath them would move every placed point to a
-    coordinate that means nothing, with nothing in the data recording that it had happened. The
-    previous revision is kept and deactivated, exactly as a re-upload would leave it.
+    A **revision** rather than a re-render in place. Capture locations are stored in the pixels of
+    the plan they were placed on, and another sheet is a different drawing at a different scale —
+    overwriting the raster underneath them would move every placed point to a coordinate that
+    means nothing, with nothing in the data recording that it had happened. The previous revision
+    is kept and deactivated, exactly as a re-upload would leave it.
+
+    A sheet already rendered for this floor is re-activated rather than rendered again, so
+    switching away and back returns to the revision the points are on.
     """
     plan = get_plan_or_404(db, plan_id, user)
     revision = sheets_service.choose_sheet(db, plan, page, user)
 
-    # Points are not moved — that is the whole reason this is a revision — but the floor-plan
-    # editor draws every point on the floor over whichever plan is active, so any placed on an
-    # earlier sheet will now appear on this one at coordinates that mean nothing here. Counted
-    # and returned rather than left to be discovered: only the operator can decide whether to
-    # re-place them or go back to the sheet they were placed on.
+    # Points are not moved — that is the whole reason this is a revision — and the editor no
+    # longer draws the ones belonging to another revision, since their coordinates describe a
+    # different drawing. Counted and returned anyway: the editor can say "3 not shown" only
+    # while it is open, and an operator deciding whether to re-place them or switch back needs
+    # the number at the moment they choose the sheet.
     stranded = int(
         db.scalar(
             select(func.count(CaptureLocation.id)).where(

@@ -307,6 +307,7 @@ export function FloorPlansPage() {
                     locations={locations.data ?? []}
                     selectedLocationId={selectedLocationId}
                     onSelect={openLocation}
+                    activePlanId={plan.data?.id ?? null}
                   />
                 </div>
               </Card>

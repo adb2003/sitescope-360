@@ -290,10 +290,12 @@ Collected in one place, all documented at their source:
    operator no longer has to *guess* which page, though: `GET /floorplans/{id}/sheets` lists the
    set and `.../sheets/{page}/preview` renders a thumbnail, so the choice is made by looking.
    Switching sheets creates a revision rather than re-rendering in place, because capture points
-   are stored in the pixels of the plan they were placed on. The remaining sharp edge is that the
-   floor-plan editor draws every point on the floor over whichever plan is active, so points from
-   an earlier sheet appear on a later one at meaningless coordinates; the switch reports how many
-   are affected, but nothing hides or migrates them.
+   are stored in the pixels of the plan they were placed on — and a sheet already rendered for
+   that floor is re-activated rather than rendered a second time, so switching away and back
+   returns to the revision the points are on instead of orphaning them. The editor draws only
+   the points belonging to the plan on screen and reports how many it withheld and why. What is
+   still not offered is *migrating* a point from one sheet to another: the two drawings have no
+   known relationship, so the only honest answers are to place it again or go back.
 9. **The compass is relative**, not magnetic — an uploaded image carries no device heading, and the
    viewer labels it `rel`.
 10. **The thread queue is not durable.** Fine for development; `QUEUE_BACKEND=redis` for anything

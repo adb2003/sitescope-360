@@ -643,10 +643,20 @@ every placed point to a coordinate that means nothing, with nothing in the data 
 Revisions already exist for this (a re-upload deactivates the previous plan and keeps it) and
 picking a sheet is the same event by another route.
 
-The response carries `points_from_earlier_sheets`. Points are not moved — but the floor-plan
-editor draws every point on the floor over whichever plan is active, so any placed on the
-previous sheet will appear on this one at coordinates describing a different drawing. It looks
-entirely plausible, which is why the count is returned rather than left to be discovered. The
+**A sheet already rendered for this floor is re-activated, not rendered again.** That is not an
+optimisation. A capture point references the revision it was placed on, so an operator who
+switches to the section and back has to arrive at the *same* revision — a second revision of
+sheet 1 renders the identical drawing and is still, to every point on the first, a different
+plan, which would orphan them permanently. Re-rendering each time also grew the revision list
+and the stored rasters without bound: toggling between two sheets five times left six revisions
+describing two drawings. Because the revision is reused rather than recreated, a calibration
+already measured on it survives the round trip.
+
+The response carries `points_from_earlier_sheets`: points placed on a revision that is not the
+one now active. They are not moved — that is the whole reason this is a revision — and the
+floor-plan editor no longer draws them, because their coordinates describe a different drawing.
+It reports how many it withheld and says they were placed on an earlier revision; switching back
+to that revision shows them in place. The
 calibration is deliberately *not* carried across: a pixel-to-metre scale measured on one drawing
 is not the scale of another, and a plan that looks calibrated and reports wrong distances is
 worse than one that admits it has none.

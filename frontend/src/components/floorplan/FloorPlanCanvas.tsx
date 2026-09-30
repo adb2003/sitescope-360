@@ -82,6 +82,37 @@ interface Viewport {
   offsetY: number
 }
 
+/**
+ * Split a floor's capture points into the ones this plan can actually show, and the rest.
+ *
+ * A capture point stores pixel coordinates **in the raster of the plan it was placed on**, and a
+ * floor can hold several plan revisions — choosing a different sheet of a drawing set creates
+ * one, because the alternative is silently reinterpreting existing coordinates against a
+ * different drawing. That is exactly what the editor was doing anyway: it drew every point on
+ * the floor over whichever plan happened to be active, so a point placed on the general
+ * arrangement appeared on the section at coordinates describing neither.
+ *
+ * A point whose `floor_plan_id` is null is drawn rather than withheld. Null means "we do not
+ * know which revision this was placed on", which is not the same as knowing it was another one —
+ * and for the overwhelmingly common case of a floor with a single plan it is harmless. Hiding
+ * known-good data on the strength of a guess would be the worse failure of the two.
+ */
+export function partitionByPlan(
+  locations: CaptureLocation[],
+  planId: string,
+): { onPlan: CaptureLocation[]; elsewhere: CaptureLocation[] } {
+  const onPlan: CaptureLocation[] = []
+  const elsewhere: CaptureLocation[] = []
+  for (const location of locations) {
+    if (location.floor_plan_id === null || location.floor_plan_id === planId) {
+      onPlan.push(location)
+    } else {
+      elsewhere.push(location)
+    }
+  }
+  return { onPlan, elsewhere }
+}
+
 export function FloorPlanCanvas({
   plan,
   locations,
@@ -113,6 +144,14 @@ export function FloorPlanCanvas({
     moved: number
   } | null>(null)
   const dragState = useRef<{ pointerId: number; id: string; moved: number } | null>(null)
+
+  // Only the points belonging to this revision are drawn or draggable; the rest are counted and
+  // reported. `drawn` is what every interaction below works from, so a point on another sheet
+  // cannot be selected by a stale id or moved by a drag it never rendered for.
+  const { onPlan: drawn, elsewhere } = useMemo(
+    () => partitionByPlan(locations, plan.id),
+    [locations, plan.id],
+  )
 
   const isRasterUsable = plan.width_px > 0 && plan.height_px > 0
 
@@ -244,7 +283,7 @@ export function FloorPlanCanvas({
         if (final && drag.moved > 1 && onMoveLocation) {
           onMoveLocation(drag.id, Math.round(final.x), Math.round(final.y))
         } else if (drag.moved <= 1) {
-          const location = locations.find((item) => item.id === drag.id)
+          const location = drawn.find((item) => item.id === drag.id)
           if (location) onSelectLocation?.(location)
         }
         return
@@ -285,7 +324,7 @@ export function FloorPlanCanvas({
     [
       dragging,
       onMoveLocation,
-      locations,
+      drawn,
       onSelectLocation,
       addMode,
       onAddLocation,
@@ -380,6 +419,21 @@ export function FloorPlanCanvas({
         </Button>
       </div>
 
+      {/*
+        Withholding points silently would be its own bug — an operator who placed P01 last month
+        and cannot find it needs to be told where it went, not left to conclude it was deleted.
+      */}
+      {elsewhere.length ? (
+        <div className="absolute bottom-2 left-2 z-10 max-w-xs">
+          <Callout tone="warn" title={`${elsewhere.length} point(s) not shown`}>
+            {elsewhere.length === 1 ? 'It was' : 'They were'} placed on an earlier revision of
+            this floor plan, so {elsewhere.length === 1 ? 'its' : 'their'} coordinates describe a
+            different drawing. Switch back to that revision to see{' '}
+            {elsewhere.length === 1 ? 'it' : 'them'} in place.
+          </Callout>
+        </div>
+      ) : null}
+
       {plan.px_per_meter ? (
         <ScaleBar pxPerMeter={plan.px_per_meter} scale={viewport.scale} />
       ) : null}
@@ -448,7 +502,7 @@ export function FloorPlanCanvas({
         </div>
 
         {/* Pins live outside the scaled wrapper so they stay a constant screen size. */}
-        {locations.map((location) => {
+        {drawn.map((location) => {
           const live = dragging?.id === location.id ? dragging : location
           const left = viewport.offsetX + live.x * viewport.scale
           const top = viewport.offsetY + live.y * viewport.scale
@@ -577,11 +631,18 @@ export function LocationList({
   selectedLocationId,
   onSelect,
   className,
+  activePlanId,
 }: {
   locations: CaptureLocation[]
   selectedLocationId?: string | null
   onSelect: (location: CaptureLocation) => void
   className?: string
+  /**
+   * The plan currently on screen, when there is one. Points belonging to an earlier revision
+   * are still listed — their captures are real and worth opening — but they are marked, because
+   * selecting one highlights a pin the canvas is deliberately not drawing.
+   */
+  activePlanId?: string | null
 }) {
   if (!locations.length) {
     return (
@@ -607,6 +668,13 @@ export function LocationList({
             <span className="min-w-0 flex-1">
               <span className="block truncate text-sm text-ink">
                 {location.label ?? 'Unlabelled'}
+                {activePlanId &&
+                location.floor_plan_id &&
+                location.floor_plan_id !== activePlanId ? (
+                  <span className="ml-1.5 align-middle text-2xs font-normal text-warn">
+                    on an earlier sheet
+                  </span>
+                ) : null}
               </span>
               <span className="block text-2xs text-ink-subtle">
                 {location.frame_count > 0

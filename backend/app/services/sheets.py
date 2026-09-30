@@ -128,6 +128,14 @@ def choose_sheet(db: Session, plan: FloorPlan, page: int, user: User) -> FloorPl
 
     The source PDF is shared with the revision rather than copied: it is the same file, it can be
     tens of megabytes, and a set with four plans in it should not be stored four times.
+
+    A sheet already rendered for this floor is **re-activated rather than rendered again**, and
+    that is not merely an optimisation. Capture points reference the revision they were placed
+    on, so an operator who switches to the section and back has to arrive at the *same* revision
+    or their points are orphaned for good — a second revision of sheet 1 renders the identical
+    drawing and is still, to every point on the first, a different plan. Rendering afresh each
+    time also grew the revision list and the stored rasters without bound: toggling between two
+    sheets four times left eight revisions and eight PNGs describing two drawings.
     """
     source_key = source_of(plan)
     data = _source_bytes(plan)
@@ -138,6 +146,23 @@ def choose_sheet(db: Session, plan: FloorPlan, page: int, user: User) -> FloorPl
             floor_plan_id=plan.id,
         )
 
+    existing = _revision_for_page(db, plan, source_key, page)
+    if existing is not None:
+        _deactivate_others(db, plan.floor_id)
+        existing.is_active = True
+        db.flush()
+        log_event(
+            "floorplan.sheet_chosen",
+            floor_id=plan.floor_id,
+            floor_plan_id=existing.id,
+            replaced_plan_id=plan.id,
+            page=page,
+            of_pages=total,
+            reused_existing_revision=True,
+            chosen_by=user.id,
+        )
+        return existing
+
     sheet = render_page(data, page=page)
     render = sheet.to_metadata()
     render["source_storage_key"] = source_key
@@ -146,10 +171,7 @@ def choose_sheet(db: Session, plan: FloorPlan, page: int, user: User) -> FloorPl
     key = floorplan_key(_project_of(db, plan), plan.floor_id, f"{plan_id}.png")
     get_storage().put_bytes(key, sheet.png, "image/png")
 
-    for previous in db.scalars(
-        select(FloorPlan).where(FloorPlan.floor_id == plan.floor_id, FloorPlan.is_active.is_(True))
-    ):
-        previous.is_active = False
+    _deactivate_others(db, plan.floor_id)
 
     revision = FloorPlan(
         id=plan_id,
@@ -178,9 +200,34 @@ def choose_sheet(db: Session, plan: FloorPlan, page: int, user: User) -> FloorPl
         replaced_plan_id=plan.id,
         page=page,
         of_pages=total,
+        reused_existing_revision=False,
         chosen_by=user.id,
     )
     return revision
+
+
+def _revision_for_page(
+    db: Session, plan: FloorPlan, source_key: str, page: int
+) -> FloorPlan | None:
+    """A revision of this floor already rendered from this set's given sheet, if there is one.
+
+    Matched on the source file *and* the page, because a floor can legitimately hold plans from
+    two different sets and "sheet 2" of one is unrelated to "sheet 2" of the other. Reads the
+    handful of rows rather than asking two dialects to index into a JSON column — and a wrong
+    match here would re-activate a plan showing the wrong drawing, so it must not be clever.
+    """
+    for candidate in db.scalars(select(FloorPlan).where(FloorPlan.floor_id == plan.floor_id)):
+        render = candidate.render or {}
+        if render.get("source_storage_key") == source_key and render.get("page") == page:
+            return candidate
+    return None
+
+
+def _deactivate_others(db: Session, floor_id: str) -> None:
+    for previous in db.scalars(
+        select(FloorPlan).where(FloorPlan.floor_id == floor_id, FloorPlan.is_active.is_(True))
+    ):
+        previous.is_active = False
 
 
 def _base_name(name: str) -> str:

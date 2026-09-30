@@ -196,11 +196,14 @@ def test_a_chosen_sheet_starts_uncalibrated(plan_from_a_set, client, admin_heade
     distances, which is worse than one that admits it has no scale yet.
     """
     _floor_id, plan = plan_from_a_set
-    client.put(
+    # The payload shape is asserted, not assumed. This test read a 422 as success for as long as
+    # it existed: the new revision is uncalibrated whether or not the old one ever was.
+    calibrated = client.put(
         f"/api/floorplans/{plan['id']}/calibration",
-        json={"a": {"x": 0, "y": 0}, "b": {"x": 100, "y": 0}, "distance_m": 10.0},
+        json={"x1": 0, "y1": 0, "x2": 100, "y2": 0, "real_distance_m": 10.0},
         headers=admin_headers,
     )
+    assert calibrated.status_code == 200, calibrated.text
 
     revision = client.post(f"/api/floorplans/{plan['id']}/sheets/2", headers=admin_headers).json()[
         "plan"
@@ -312,3 +315,72 @@ def test_deleting_the_last_revision_does_take_the_set_with_it(
     assert client.delete(f"/api/floorplans/{only['id']}", headers=admin_headers).status_code == 200
 
     assert not get_storage().exists(source_key)
+
+
+# ---- going back to the sheet a point was placed on ---------------------------
+def test_returning_to_a_sheet_reuses_the_revision_the_points_are_on(
+    plan_from_a_set, client, admin_headers
+) -> None:
+    """Switching away and back has to arrive at the *same* revision, or points are orphaned.
+
+    A capture point references the plan revision it was placed on. A second revision of sheet 1
+    renders the identical drawing and is still, to every point on the first, a different plan —
+    so re-rendering on the way back would leave them stranded permanently, with the editor
+    correctly refusing to draw them and no way for the operator to get them back.
+    """
+    floor_id, first = plan_from_a_set
+    point = client.post(
+        f"/api/floors/{floor_id}/locations", json={"x": 180, "y": 140}, headers=admin_headers
+    ).json()
+    assert point["floor_plan_id"] == first["id"]
+
+    client.post(f"/api/floorplans/{first['id']}/sheets/3", headers=admin_headers)
+    back = client.post(f"/api/floorplans/{first['id']}/sheets/1", headers=admin_headers).json()
+
+    assert back["plan"]["id"] == first["id"], "went back to a new revision, not the original"
+    assert back["plan"]["is_active"] is True
+    assert back["points_from_earlier_sheets"] == 0, "the point is on this revision again"
+
+
+def test_toggling_between_sheets_does_not_grow_the_revision_list(
+    plan_from_a_set, client, admin_headers
+) -> None:
+    """Two drawings should cost two revisions, however often an operator switches.
+
+    Before this, each pick rendered a fresh revision and a fresh PNG: four switches between two
+    sheets left eight of each, all describing the same two drawings.
+    """
+    floor_id, first = plan_from_a_set
+
+    for page in (3, 1, 3, 1, 3):
+        client.post(f"/api/floorplans/{first['id']}/sheets/{page}", headers=admin_headers)
+
+    revisions = client.get(f"/api/floors/{floor_id}/floorplans", headers=admin_headers).json()
+    assert len(revisions) == 2, [row["name"] for row in revisions]
+    assert sum(1 for row in revisions if row["is_active"]) == 1
+
+
+def test_reusing_a_revision_keeps_the_calibration_it_already_had(
+    plan_from_a_set, client, admin_headers
+) -> None:
+    """A scale measured on *this* drawing is still that drawing's scale when you come back.
+
+    A fresh revision starts uncalibrated on purpose — another sheet is another scale. Coming
+    back to one already calibrated is the opposite case, and re-rendering it would silently
+    throw away a measurement somebody took.
+    """
+    _floor_id, first = plan_from_a_set
+    calibrated = client.put(
+        f"/api/floorplans/{first['id']}/calibration",
+        json={"x1": 0, "y1": 0, "x2": 100, "y2": 0, "real_distance_m": 10.0},
+        headers=admin_headers,
+    )
+    # Asserted, because a 422 here would make the rest of this test pass for the wrong reason.
+    assert calibrated.status_code == 200, calibrated.text
+    assert calibrated.json()["px_per_meter"] == 10.0
+
+    client.post(f"/api/floorplans/{first['id']}/sheets/2", headers=admin_headers)
+    back = client.post(f"/api/floorplans/{first['id']}/sheets/1", headers=admin_headers).json()
+
+    assert back["plan"]["id"] == first["id"]
+    assert back["plan"]["px_per_meter"] == 10.0

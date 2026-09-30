@@ -1,6 +1,6 @@
 # API reference
 
-125 endpoints across 94 paths. Base prefix `/api`.
+126 endpoints across 95 paths. Base prefix `/api`.
 
 Interactive documentation is generated from the code and is the authoritative source:
 
@@ -197,6 +197,7 @@ Every failure uses one envelope:
 | --- | --- | --- |
 | 401 | `authentication_failed` | Missing, invalid or expired token |
 | 403 | `permission_denied` | Authenticated but lacking the capability |
+| 403 | `password_change_required` | An administrator reset this password; the account may reach `/auth/me` and `/auth/change-password` only |
 | 404 | `not_found` | No such resource |
 | 409 | `conflict` | Duplicate code, already processing, invalid state transition |
 | 413 | `payload_too_large` | Upload exceeds `MAX_UPLOAD_BYTES` |
@@ -271,7 +272,7 @@ Every response includes `X-Correlation-Id` and `X-Response-Time-Ms`. Send your o
 | POST | `/auth/refresh` | Rotate the refresh token; returns a new pair. |
 | POST | `/auth/logout` | Revoke a refresh token. |
 | GET | `/auth/me` | Current user plus their capability list. |
-| POST | `/auth/change-password` | Change password; revokes all sessions. |
+| POST | `/auth/change-password` | Change your own password; revokes all sessions. Must differ from the current one. |
 
 ### Users — `/api/users` *(admin)*
 
@@ -281,8 +282,35 @@ Every response includes `X-Correlation-Id` and `X-Response-Time-Ms`. Send your o
 | POST | `/users` | Create a user with a role. |
 | PATCH | `/users/{user_id}` | Change name, role or active state. |
 | DELETE | `/users/{user_id}` | **Deactivate** (never delete — captures keep operator attribution). |
+| POST | `/users/{user_id}/password` | Reset somebody else's password. The account is then held to replacing it. |
 
-An admin cannot remove their own admin role or deactivate their own account.
+An admin cannot remove their own admin role, deactivate their own account, or reset their own password through `/users/{id}/password` — that last one would skip the current-password check `/auth/change-password` exists to make.
+
+**There is no self-service password reset, and there cannot be one here.** Proving you own an address means sending something to it, and no feature of this platform may depend on a mail service to run locally. So recovery is an administrator action, and what keeps that honest is that the credential they set is explicitly temporary:
+
+`POST /users/{id}/password` sets the password, revokes every session the account has open, and sets `must_change_password`. While that flag stands the account can reach `/auth/me` and `POST /auth/change-password` and **nothing else** — every other endpoint answers 403 with `code: "password_change_required"`. Branch on that code rather than on the status: the token is genuine, so a client that treats a 403 here as an expiry will refresh in a loop and never reach the screen it needs.
+
+The flag is checked against the row on every request rather than written into the access token, so it applies to a session opened *before* the reset — which is the case that matters, since the person whose password is being reset because somebody else may be in the account is precisely the person already holding a token. Setting a password through `/auth/change-password` clears it, and the new password must differ from the temporary one, or the requirement could be satisfied by keeping the password the administrator chose.
+
+The temporary password is never echoed in the response. The administrator typed it; repeating it would put it in every log between them and the browser for no gain.
+
+### What the platform records
+
+`GET /api/system/events` returns recent capture activity read from durable state, plus
+`logged_event_names` — every domain event this build emits. That list is the registry in
+`app/core/audit.py`, not a hand-maintained copy of it: it was a hard-coded list of eight names
+while the code emitted thirty-five, which is worse than an omission, because it is a false
+statement about the system served from the endpoint whose job is to describe it.
+`tests/unit/test_audit_events.py` parses every `log_event()` call in `app/` and fails if the two
+sets differ in either direction.
+
+Destructive and privilege-changing actions are the ones the registry exists for, and none of them
+were recorded at all until they were looked for: `auth.role_changed` (with both the old and new
+role, since the old one cannot be reconstructed afterwards), `auth.password_reset`,
+`auth.user_created`, `auth.user_activated`, `auth.user_deactivated`, `project.deleted`,
+`capture.deleted` (with the frame and file counts, which nothing can recover once the row is
+gone), `capture.file_deleted`, `floorplan.deleted`, `location.deleted` (with how many frames it
+unplaced) and `annotation.deleted` (recording whether the deleter was the author).
 
 ### Projects, buildings, floors, zones
 

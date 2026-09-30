@@ -674,6 +674,70 @@ deployment. It preserves exactly today's access and changes nothing for anyone; 
 real from that point on, and an administrator removes the backfilled rows once they know who
 belongs where.
 
+#### Getting an account back, without pretending to have email
+
+There was no way to recover a forgotten password. `/auth/change-password` needs the current one,
+and an administrator could change a user's name, role and active flag but not their credential —
+so the most ordinary support request there is required somebody with database access. The Users
+tab compounded it: a read-only table, while `POST /users`, `PATCH /users/{id}` and `DELETE
+/users/{id}` had always existed on the server, so a fresh deployment could not add one person
+without calling the API by hand.
+
+Self-service recovery is impossible here and the fix does not pretend otherwise. Proving you own
+an address means sending something to it, and nothing in this platform may depend on a mail
+service to run locally. So recovery is an administrator action, and the whole design question is
+whether the credential they set stays temporary — because a "reset" that merely sets a password
+hands out a working account protected by a secret somebody else chose and very possibly said out
+loud.
+
+`users.must_change_password` is the answer, and three things about it are deliberate.
+
+**It is checked against the row on every request, not written into the token.** A login-time check
+would miss the case that matters: the person whose password is being reset because somebody else
+may be in the account is precisely the person already holding a valid token. Reading the flag in
+`api/deps.get_current_user` means a hold applies to a session opened before the reset, and no
+token outlives the requirement — the same reasoning that already governs a role change there.
+
+**The exemption is a second dependency, not an allow-list.** `/auth/me` and
+`/auth/change-password` have to stay reachable or the holder cannot recover, and the obvious
+implementation is a set of route names consulted inside the check. That puts the decision next to
+the check, where a route added to the set by accident is invisible. Instead there is
+`get_user_setting_password`, and an endpoint is reachable by a held account only because its
+signature says so. Every other endpoint is protected by not saying so.
+
+**The new password must differ from the temporary one.** Otherwise the requirement could be
+satisfied by keeping the administrator's password, which is the single thing the hold exists to
+prevent.
+
+The refusal is a 403 carrying `code: "password_change_required"` rather than a 401. The token is
+genuine, so a client treating it as an expiry would refresh in a loop and never reach the screen
+it needs; the code is what says "send them to the change-password form". The web client honours
+that by replacing the application shell entirely — navigation rendered around it would be a grid
+of panels each reporting its own 403, with the one available action the hardest thing on screen
+to find.
+
+#### What the platform records, and who says so
+
+`GET /api/system/events` advertises the event names this build emits, because a deployment with no
+log aggregator attached has nothing else to go on. It carried a hard-coded list of eight while the
+code emitted thirty-five — not a gap in the logging but a false statement about it, served from
+the endpoint whose job is to describe the system.
+
+The names now live in `core/audit.py` and the endpoint reads them. What keeps that true is not
+diligence: `tests/unit/test_audit_events.py` parses every `log_event()` call in `app/` and fails
+if the two sets differ **in either direction**, because a registry that over-claims is the same
+kind of lie as one that under-claims and is the easier one to leave behind after deleting a
+feature. It found one immediately — a call that chose between two names with a conditional
+expression, greppable by neither, which is exactly what `log_event` exists to prevent.
+
+The events worth having were the ones missing entirely. Deleting a capture destroys imagery;
+deleting a capture location silently unplaces every frame that ever stood there, across sessions
+and dates; changing a role hands somebody the platform. `project.deleted` was logged, so the
+intent had been there and simply not finished. Each of these now records what cannot be
+reconstructed after the fact — the counts that go with a deletion, and both sides of a role
+change — and the specific list is asserted by name in that test rather than inferred from a
+prefix, so a refactor that quietly drops one fails there and not in an incident.
+
 #### Spatial data: PostGIS, on PostgreSQL only
 
 `capture_locations.geom` is a `geometry(Point, 0)` column, `GENERATED ALWAYS AS

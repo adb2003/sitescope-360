@@ -18,7 +18,12 @@ from app.auth.membership import assert_member
 from app.auth.rbac import Capability, has_capability, role_at_least
 from app.auth.security import decode_access_token
 from app.core.enums import Role
-from app.core.errors import AuthenticationError, NotFoundError, PermissionDeniedError
+from app.core.errors import (
+    AuthenticationError,
+    NotFoundError,
+    PasswordChangeRequiredError,
+    PermissionDeniedError,
+)
 from app.database.session import get_db
 from app.models import (
     Building,
@@ -40,11 +45,12 @@ bearer_scheme = HTTPBearer(auto_error=False, description="JWT access token")
 DbSession = Annotated[Session, Depends(get_db)]
 
 
-def get_current_user(
+def _authenticated_user(
     request: Request,
-    db: DbSession,
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)] = None,
+    db: Session,
+    credentials: HTTPAuthorizationCredentials | None,
 ) -> User:
+    """Resolve the bearer token to a live account, without asking what it may do."""
     if credentials is None or not credentials.credentials:
         raise AuthenticationError("Authentication required")
 
@@ -62,7 +68,44 @@ def get_current_user(
     return user
 
 
+def get_current_user(
+    request: Request,
+    db: DbSession,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)] = None,
+) -> User:
+    """The ordinary dependency: an account that may actually use the platform.
+
+    An account whose password was reset by an administrator is held here. The alternative —
+    refusing at sign-in — would leave the holder with no way to use the credential they were
+    given, and flagging only the new token would let a session opened beforehand carry on
+    indefinitely. Checking the row on every request means the requirement cannot be outlived.
+    """
+    user = _authenticated_user(request, db, credentials)
+    if user.must_change_password:
+        raise PasswordChangeRequiredError(
+            "Your password was reset by an administrator. Set a new one before continuing."
+        )
+    return user
+
+
+def get_user_setting_password(
+    request: Request,
+    db: DbSession,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)] = None,
+) -> User:
+    """The same account, for the few endpoints a held account must still reach.
+
+    Deliberately a *second dependency* rather than an exemption inside the first. An allow-list
+    consulted by route name would put the decision next to the check, where a later route added
+    to the list by accident is invisible; this way an endpoint is reachable by a held account
+    only because its signature says so, and every other endpoint is protected by not saying so.
+    """
+    return _authenticated_user(request, db, credentials)
+
+
 CurrentUser = Annotated[User, Depends(get_current_user)]
+#: For `/auth/me`, `/auth/change-password` and nothing else: see `get_user_setting_password`.
+UserSettingPassword = Annotated[User, Depends(get_user_setting_password)]
 
 
 def require_role(minimum: Role) -> Callable[[User], User]:

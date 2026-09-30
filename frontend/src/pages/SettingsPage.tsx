@@ -12,9 +12,11 @@ import {
   Camera,
   CircleSlash,
   Cpu,
+  KeyRound,
   ListChecks,
   Save,
   ShieldCheck,
+  UserPlus,
   Users,
 } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
@@ -27,6 +29,7 @@ import {
   Callout,
   Card,
   CardHeader,
+  Dialog,
   EmptyState,
   Field,
   Input,
@@ -42,10 +45,13 @@ import {
   useCameraProviders,
   useCameras,
   useCapabilities,
+  useCreateUser,
   useJobSummary,
   useJobs,
   useProjectFloors,
+  useResetPassword,
   useSchedules,
+  useUpdateUser,
   useUpsertSchedule,
   useUsers,
 } from '@/hooks/queries'
@@ -55,6 +61,7 @@ import { Capability, useAuth } from '@/hooks/useAuth'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { ApiError } from '@/lib/api'
 import { formatBytes, formatDateTime, formatDuration, humanize } from '@/lib/utils'
+import type { Role, User as UserRecord } from '@/types/api'
 
 type Tab = 'schedule' | 'access' | 'cameras' | 'jobs' | 'capabilities' | 'users'
 
@@ -633,51 +640,303 @@ function JobsTab() {
 }
 
 // ---- users ------------------------------------------------------------------
+const ROLES: Role[] = ['viewer', 'site_engineer', 'project_manager', 'admin']
+
+/**
+ * User administration.
+ *
+ * This was a read-only table while `POST /users`, `PATCH /users/{id}`, `DELETE /users/{id}` and
+ * the password reset all existed on the server — so a fresh deployment could not add a single
+ * person without calling the API by hand, while the project-access panel next door cheerfully
+ * offered to grant that person access.
+ *
+ * The password reset is the part worth reading carefully. It sets a credential the administrator
+ * knows, and the server then holds that account to replacing it, so a temporary password cannot
+ * quietly become the permanent one. The form says so, because an administrator who believes they
+ * have "set someone's password" and one who knows they have "given someone a way back in" will
+ * tell the person concerned different things.
+ */
 function UsersTab() {
-  const { can } = useAuth()
+  const { can, session } = useAuth()
   const users = useUsers(can(Capability.UserManage))
+  const [resetting, setResetting] = useState<UserRecord | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const update = useUpdateUser()
+
+  const setRole = (user: UserRecord, role: Role) => {
+    setError(null)
+    setNotice(null)
+    update.mutate(
+      { userId: user.id, role },
+      {
+        onSuccess: () => setNotice(`${user.full_name} is now ${humanize(role)}`),
+        onError: (caught) =>
+          setError(caught instanceof ApiError ? caught.message : 'Could not change the role'),
+      },
+    )
+  }
+
+  const setActive = (user: UserRecord, isActive: boolean) => {
+    setError(null)
+    setNotice(null)
+    update.mutate(
+      { userId: user.id, is_active: isActive },
+      {
+        onSuccess: () => setNotice(`${user.full_name} ${isActive ? 'reactivated' : 'deactivated'}`),
+        onError: (caught) =>
+          setError(caught instanceof ApiError ? caught.message : 'Could not update the account'),
+      },
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {error ? <Callout tone="bad">{error}</Callout> : null}
+      {notice ? <Callout tone="info">{notice}</Callout> : null}
+
+      <Card>
+        <CardHeader title="Users" description="Roles follow the §27 permission matrix" />
+        {users.isLoading ? (
+          <div className="p-4">
+            <Skeleton className="h-10" />
+          </div>
+        ) : !users.data?.items.length ? (
+          <EmptyState icon={Users} title="No users" />
+        ) : (
+          <Table>
+            <thead>
+              <tr>
+                <Th>Name</Th>
+                <Th>Email</Th>
+                <Th>Role</Th>
+                <Th>Last sign-in</Th>
+                <Th>Status</Th>
+                <Th />
+              </tr>
+            </thead>
+            <tbody>
+              {users.data.items.map((user) => {
+                const isSelf = user.id === session?.user.id
+                return (
+                  <Tr key={user.id}>
+                    <Td className="font-medium">{user.full_name}</Td>
+                    <Td className="text-xs text-ink-muted">{user.email}</Td>
+                    <Td>
+                      {/*
+                        Self is read-only rather than merely erroring on submit: the server
+                        refuses an administrator removing their own admin role, and offering a
+                        control that cannot work teaches people to ignore refusals.
+                      */}
+                      {isSelf ? (
+                        <Badge tone="brand">{humanize(user.role)}</Badge>
+                      ) : (
+                        <Select
+                          className="min-w-40 py-1 text-xs"
+                          aria-label={`Role for ${user.full_name}`}
+                          value={user.role}
+                          disabled={update.isPending}
+                          onChange={(event) => setRole(user, event.target.value as Role)}
+                        >
+                          {ROLES.map((role) => (
+                            <option key={role} value={role}>
+                              {humanize(role)}
+                            </option>
+                          ))}
+                        </Select>
+                      )}
+                    </Td>
+                    <Td className="text-xs text-ink-muted">{formatDateTime(user.last_login_at)}</Td>
+                    <Td>
+                      {user.must_change_password ? (
+                        <Badge tone="warn">Must set a password</Badge>
+                      ) : (
+                        <Badge tone={user.is_active ? 'good' : 'bad'}>
+                          {user.is_active ? 'Active' : 'Deactivated'}
+                        </Badge>
+                      )}
+                    </Td>
+                    <Td className="text-right">
+                      {isSelf ? null : (
+                        <div className="flex justify-end gap-1">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            icon={KeyRound}
+                            onClick={() => {
+                              setNotice(null)
+                              setResetting(user)
+                            }}
+                          >
+                            Reset password
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            loading={update.isPending}
+                            onClick={() => setActive(user, !user.is_active)}
+                          >
+                            {user.is_active ? 'Deactivate' : 'Reactivate'}
+                          </Button>
+                        </div>
+                      )}
+                    </Td>
+                  </Tr>
+                )
+              })}
+            </tbody>
+          </Table>
+        )}
+      </Card>
+
+      <NewUserCard onDone={(message) => setNotice(message)} />
+      {resetting ? (
+        <ResetPasswordDialog
+          user={resetting}
+          onClose={() => setResetting(null)}
+          onDone={(message) => {
+            setResetting(null)
+            setNotice(message)
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function NewUserCard({ onDone }: { onDone: (message: string) => void }) {
+  const create = useCreateUser()
+  const [email, setEmail] = useState('')
+  const [fullName, setFullName] = useState('')
+  const [password, setPassword] = useState('')
+  const [role, setRole] = useState<Role>('viewer')
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    setError(null)
+    create.mutate(
+      { email, full_name: fullName, password, role },
+      {
+        onSuccess: (user) => {
+          setEmail('')
+          setFullName('')
+          setPassword('')
+          setRole('viewer')
+          onDone(`${user.full_name} added as ${humanize(user.role)}`)
+        },
+        onError: (caught) =>
+          setError(caught instanceof ApiError ? caught.message : 'Could not create the user'),
+      },
+    )
+  }
 
   return (
     <Card>
-      <CardHeader title="Users" description="Roles follow the §27 permission matrix" />
-      {users.isLoading ? (
-        <div className="p-4">
-          <Skeleton className="h-10" />
+      <CardHeader
+        title="Add a user"
+        description="They can sign in immediately; project access is granted separately"
+      />
+      <form onSubmit={submit} className="space-y-3 p-4">
+        {error ? <Callout tone="bad">{error}</Callout> : null}
+        <div className="grid gap-3 md:grid-cols-2">
+          <Field label="Full name">
+            <Input value={fullName} onChange={(e) => setFullName(e.target.value)} required />
+          </Field>
+          <Field label="Email">
+            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          </Field>
+          <Field label="Initial password" hint="At least 10 characters">
+            <Input
+              type="password"
+              autoComplete="new-password"
+              minLength={10}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+          </Field>
+          <Field label="Role">
+            <Select value={role} onChange={(e) => setRole(e.target.value as Role)}>
+              {ROLES.map((value) => (
+                <option key={value} value={value}>
+                  {humanize(value)}
+                </option>
+              ))}
+            </Select>
+          </Field>
         </div>
-      ) : !users.data?.items.length ? (
-        <EmptyState icon={Users} title="No users" />
-      ) : (
-        <Table>
-          <thead>
-            <tr>
-              <Th>Name</Th>
-              <Th>Email</Th>
-              <Th>Role</Th>
-              <Th>Last sign-in</Th>
-              <Th>Active</Th>
-            </tr>
-          </thead>
-          <tbody>
-            {users.data.items.map((user) => (
-              <Tr key={user.id}>
-                <Td className="font-medium">{user.full_name}</Td>
-                <Td className="text-xs text-ink-muted">{user.email}</Td>
-                <Td>
-                  <Badge tone={user.role === 'admin' ? 'brand' : 'neutral'}>
-                    {humanize(user.role)}
-                  </Badge>
-                </Td>
-                <Td className="text-xs text-ink-muted">{formatDateTime(user.last_login_at)}</Td>
-                <Td>
-                  <Badge tone={user.is_active ? 'good' : 'bad'}>
-                    {user.is_active ? 'Active' : 'Deactivated'}
-                  </Badge>
-                </Td>
-              </Tr>
-            ))}
-          </tbody>
-        </Table>
-      )}
+        {/*
+          Said plainly rather than left to be inferred from a missing feature. A reader who
+          assumes an invitation email is on its way will not tell the new user their password,
+          and the account is then unreachable until somebody resets it.
+        */}
+        <Callout tone="info">
+          There is no invitation email — nothing here may depend on a mail service to run locally.
+          Tell them this password yourself; they can change it from their own account at any time.
+        </Callout>
+        <Button type="submit" variant="primary" icon={UserPlus} loading={create.isPending}>
+          Add user
+        </Button>
+      </form>
     </Card>
+  )
+}
+
+function ResetPasswordDialog({
+  user,
+  onClose,
+  onDone,
+}: {
+  user: UserRecord
+  onClose: () => void
+  onDone: (message: string) => void
+}) {
+  const reset = useResetPassword()
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    setError(null)
+    reset.mutate(
+      { userId: user.id, password },
+      {
+        onSuccess: (message) => onDone(message.message),
+        onError: (caught) =>
+          setError(caught instanceof ApiError ? caught.message : 'Could not reset the password'),
+      },
+    )
+  }
+
+  return (
+    <Dialog open title={`Reset the password for ${user.full_name}`} onClose={onClose}>
+      <form onSubmit={submit} className="space-y-3">
+        {error ? <Callout tone="bad">{error}</Callout> : null}
+        <Callout tone="warn" title="This is a temporary password">
+          {user.full_name} will be able to sign in with it and do nothing else until they set
+          their own. Every session they currently have open will be signed out.
+        </Callout>
+        <Field label="Temporary password" hint="At least 10 characters. Tell them yourself.">
+          <Input
+            type="password"
+            autoComplete="new-password"
+            minLength={10}
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            required
+            autoFocus
+          />
+        </Field>
+        <div className="flex gap-2">
+          <Button type="submit" variant="primary" icon={KeyRound} loading={reset.isPending}>
+            Reset password
+          </Button>
+          <Button type="button" variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+        </div>
+      </form>
+    </Dialog>
   )
 }

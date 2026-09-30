@@ -273,8 +273,18 @@ def delete_floor_plan(plan_id: str, db: DbSession, user: RequireFloorPlanEdit) -
     if isinstance(source_key, str) and not _source_shared_with_another_plan(db, plan, source_key):
         with contextlib.suppress(Exception):
             get_storage().delete(source_key)
+    name, floor_id = plan.name, plan.floor_id
     db.delete(plan)
     db.commit()
+    log_event(
+        "floorplan.deleted",
+        plan_id=plan_id,
+        floor_id=floor_id,
+        name=name,
+        source_kept_for_siblings=isinstance(source_key, str)
+        and _source_shared_with_another_plan(db, plan, source_key),
+        actor_id=user.id,
+    )
     return Message(message="Floor plan deleted")
 
 
@@ -486,6 +496,16 @@ def delete_capture_location(location_id: str, db: DbSession, user: RequireLocati
         if session is not None:
             build_capture_path(db, session)
     db.commit()
+    # A point is a place captures compare against, so deleting one silently unplaces every frame
+    # that stood there — across sessions and dates. The count is the damage.
+    log_event(
+        "location.deleted",
+        location_id=location_id,
+        floor_id=location.floor_id,
+        code=code,
+        frames_unplaced=len(affected),
+        actor_id=user.id,
+    )
     return Message(message=f"Location {code} deleted; {len(affected)} frame(s) unplaced")
 
 

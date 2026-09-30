@@ -89,3 +89,27 @@ def test_the_local_backend_probes_by_writing(client: TestClient, storage_root) -
 
     assert result["ok"] is True
     assert not (storage_root / ".health").exists(), "the probe must remove what it wrote"
+
+
+def test_the_events_endpoint_reports_what_the_platform_actually_logs(
+    client: TestClient, admin_headers
+) -> None:
+    """The endpoint's whole job is to describe the system, and it was misdescribing it.
+
+    `logged_event_names` was a hard-coded list of eight while the code emitted thirty-five. A
+    reader with no log aggregator attached has nothing else to go on, so the number being wrong
+    was not a documentation lapse but a false statement served from the API.
+
+    `tests/unit/test_audit_events.py` holds the registry to the code; this holds the *endpoint*
+    to the registry, which is the other half and the one a refactor is likelier to break.
+    """
+    from app.core.audit import EVENT_NAMES
+
+    response = client.get("/api/system/events", headers=admin_headers)
+
+    assert response.status_code == 200, response.text
+    reported = response.json()["logged_event_names"]
+    assert reported == list(EVENT_NAMES)
+    assert len(reported) > 40, "the registry is meant to be the whole set, not a sample"
+    for destructive in ("capture.deleted", "auth.role_changed", "location.deleted"):
+        assert destructive in reported

@@ -31,6 +31,9 @@ class UserOut(ORMModel):
     full_name: str
     role: Role
     is_active: bool
+    #: True while an administrator's reset is outstanding: the account can reach `/auth/me`
+    #: and `/auth/change-password` and nothing else until it sets its own password.
+    must_change_password: bool = False
     last_login_at: datetime | None = None
     created_at: datetime
 
@@ -50,6 +53,17 @@ class UserUpdate(BaseModel):
 
 class PasswordChange(BaseModel):
     current_password: str
+    new_password: Annotated[str, Field(min_length=10, max_length=200)]
+
+
+class PasswordReset(BaseModel):
+    """An administrator setting a temporary password for somebody who has lost theirs.
+
+    Same length floor as every other password here. It is temporary by policy rather than by
+    construction — nothing can stop an administrator choosing a weak one — so the account is
+    held to replacing it rather than trusted to.
+    """
+
     new_password: Annotated[str, Field(min_length=10, max_length=200)]
 
 

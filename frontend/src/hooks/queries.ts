@@ -61,6 +61,7 @@ import type {
   ShareLinkCreated,
   Report,
   ReportCatalogue,
+  Role,
   StaleAreas,
   SystemCapabilities,
   Timeline,
@@ -492,6 +493,59 @@ export function useUsers(enabled = true) {
     queryKey: keys.users,
     queryFn: () => api.get<Page<User>>('/users', { limit: 100 }),
     enabled,
+  })
+}
+
+// ---- user administration ----------------------------------------------------
+/**
+ * Create, re-role, deactivate and reset — the API has always supported these; the UI did not,
+ * so a fresh deployment could not add a single person without calling the API by hand.
+ *
+ * All four invalidate the user list, and `useResetPassword` deliberately returns the server's
+ * message rather than anything derived: it names how many sessions were signed out, which is
+ * information the client does not otherwise have.
+ */
+export function useCreateUser() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { email: string; full_name: string; password: string; role: Role }) =>
+      api.post<User>('/users', body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.users }),
+  })
+}
+
+export function useUpdateUser() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      userId,
+      ...body
+    }: {
+      userId: string
+      full_name?: string
+      role?: Role
+      is_active?: boolean
+    }) => api.patch<User>(`/users/${userId}`, body),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.users }),
+  })
+}
+
+export function useResetPassword() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ userId, password }: { userId: string; password: string }) =>
+      api.post<Message>(`/users/${userId}/password`, { new_password: password }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.users }),
+  })
+}
+
+export function useChangeOwnPassword() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { current_password: string; new_password: string }) =>
+      api.post<Message>('/auth/change-password', body),
+    // The hold is lifted server-side, so the cached session is now wrong about this account.
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['session'] }),
   })
 }
 

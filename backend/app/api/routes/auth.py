@@ -8,7 +8,12 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request, status
 from sqlalchemy import select
 
-from app.api.deps import CurrentUser, DbSession, Pagination, RequireUserManage
+from app.api.deps import (
+    DbSession,
+    Pagination,
+    RequireUserManage,
+    UserSettingPassword,
+)
 from app.auth import ratelimit
 from app.auth.rbac import capabilities_for
 from app.auth.security import (
@@ -25,6 +30,7 @@ from app.models import RefreshToken, User
 from app.schemas.auth import (
     LoginRequest,
     PasswordChange,
+    PasswordReset,
     RefreshRequest,
     SessionInfo,
     TokenPair,
@@ -106,7 +112,15 @@ def logout(payload: RefreshRequest, db: DbSession) -> Message:
 
 
 @router.get("/me", response_model=SessionInfo)
-def me(user: CurrentUser) -> SessionInfo:
+def me(user: UserSettingPassword) -> SessionInfo:
+    """Who is signed in, and what they may do.
+
+    Reachable by an account held for a password reset, unlike everything else — the client has
+    to be able to render a shell and read `user.must_change_password` to know where to send
+    them. The capabilities are reported unchanged, because the role has not changed; what is
+    withheld is the ability to act on them, and that is enforced per request rather than by
+    editing this list into a half-truth.
+    """
     return SessionInfo(
         user=UserOut.model_validate(user),
         capabilities=sorted(str(c) for c in capabilities_for(user.role)),
@@ -114,10 +128,17 @@ def me(user: CurrentUser) -> SessionInfo:
 
 
 @router.post("/change-password", response_model=Message)
-def change_password(payload: PasswordChange, user: CurrentUser, db: DbSession) -> Message:
+def change_password(payload: PasswordChange, user: UserSettingPassword, db: DbSession) -> Message:
+    """Set your own password, which is also the only way out of an administrative reset."""
     if not verify_password(payload.current_password, user.password_hash):
         raise AuthenticationError("Current password is incorrect")
+    if payload.new_password == payload.current_password:
+        # Otherwise a held account could satisfy the requirement with the password the
+        # administrator chose, which is the one thing the hold exists to prevent.
+        raise ValidationError("The new password must differ from the current one")
     user.password_hash = hash_password(payload.new_password)
+    # Whatever brought them here, this password is now theirs.
+    user.must_change_password = False
     # Changing a password invalidates every existing session.
     for token in db.scalars(
         select(RefreshToken).where(
@@ -126,6 +147,9 @@ def change_password(payload: PasswordChange, user: CurrentUser, db: DbSession) -
     ):
         token.revoked_at = datetime.now(UTC)
     db.commit()
+    # No "was this a reset" field: this route is only ever self-service, so it could only
+    # ever say False. `auth.password_reset` is the event for the other case.
+    log_event("auth.password_changed", user_id=user.id, actor_id=user.id)
     return Message(message="Password updated. Please sign in again on other devices.")
 
 
@@ -178,6 +202,7 @@ def update_user(
     if user.id == actor.id and payload.is_active is False:
         raise ValidationError("You cannot deactivate your own account")
 
+    was_role, was_active = user.role, user.is_active
     if payload.full_name is not None:
         user.full_name = payload.full_name
     if payload.role is not None:
@@ -185,6 +210,27 @@ def update_user(
     if payload.is_active is not None:
         user.is_active = payload.is_active
     db.commit()
+
+    # A role change is a privilege change, and it left no trace at all until now — which meant
+    # the question "who gave this account admin, and when" had no answer. Logged with both
+    # sides, because the previous role is the part a reader cannot reconstruct afterwards.
+    if payload.role is not None and payload.role != was_role:
+        log_event(
+            "auth.role_changed",
+            user_id=user.id,
+            actor_id=actor.id,
+            from_role=str(was_role),
+            to_role=str(user.role),
+        )
+    # Two calls rather than one with a conditional name. `log_event` exists so the observable
+    # event names are literals a grep can find; choosing the name in an expression defeats
+    # exactly that, and the registry guard in `tests/unit/test_audit_events.py` sees it as an
+    # event promised and never emitted.
+    if payload.is_active is not None and payload.is_active != was_active:
+        if user.is_active:
+            log_event("auth.user_activated", user_id=user.id, actor_id=actor.id)
+        else:
+            log_event("auth.user_deactivated", user_id=user.id, actor_id=actor.id)
     return UserOut.model_validate(user)
 
 
@@ -197,14 +243,69 @@ def deactivate_user(user_id: str, db: DbSession, actor: RequireUserManage) -> Me
     if user.id == actor.id:
         raise ValidationError("You cannot deactivate your own account")
     user.is_active = False
+    revoked = _revoke_sessions(db, user)
+    db.commit()
+    log_event("auth.user_deactivated", user_id=user.id, actor_id=actor.id, sessions_revoked=revoked)
+    return Message(message=f"{user.email} deactivated")
+
+
+@users_router.post("/{user_id}/password", response_model=Message)
+def reset_user_password(
+    user_id: str, payload: PasswordReset, db: DbSession, actor: RequireUserManage
+) -> Message:
+    """Set another account's password, for the person who has forgotten theirs.
+
+    There is no self-service reset and there cannot be one here: proving you own an address
+    means sending something to it, and nothing in this platform may depend on a mail service to
+    run locally. So recovery is an administrator action, and the honest way to do that is to
+    make the credential they set explicitly temporary — `must_change_password` holds the account
+    to setting its own password and nothing else, so a password somebody else chose cannot
+    quietly become the one protecting the account.
+
+    Every existing session is revoked. A reset is what you do when you suspect the account is
+    reachable by somebody who should not reach it, and leaving their refresh token alive would
+    answer the wrong half of the problem.
+    """
+    user = db.get(User, user_id)
+    if user is None:
+        raise NotFoundError(f"User {user_id} not found")
+    if user.id == actor.id:
+        # Not a refusal about safety — about honesty. Resetting your own password through this
+        # route would hold your own account and skip the current-password check that
+        # `/auth/change-password` exists to make.
+        raise ValidationError("Use change-password to set your own password")
+
+    user.password_hash = hash_password(payload.new_password)
+    user.must_change_password = True
+    revoked = _revoke_sessions(db, user)
+    db.commit()
+    log_event(
+        "auth.password_reset",
+        user_id=user.id,
+        actor_id=actor.id,
+        sessions_revoked=revoked,
+    )
+    # The password is not echoed. The administrator typed it; repeating it here would put it in
+    # every response log between them and the browser for no gain.
+    return Message(
+        message=(
+            f"Password reset for {user.email}. They must set their own password at next sign-in, "
+            f"and {revoked} existing session(s) were signed out."
+        )
+    )
+
+
+def _revoke_sessions(db: DbSession, user: User) -> int:
+    """End every live session for one account. Returns how many there were."""
+    count = 0
     for token in db.scalars(
         select(RefreshToken).where(
             RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None)
         )
     ):
         token.revoked_at = datetime.now(UTC)
-    db.commit()
-    return Message(message=f"{user.email} deactivated")
+        count += 1
+    return count
 
 
 # ---- helpers -----------------------------------------------------------------

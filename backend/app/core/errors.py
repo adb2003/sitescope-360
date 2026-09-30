@@ -48,6 +48,18 @@ class PermissionDeniedError(SiteScopeError):
     code = "permission_denied"
 
 
+class PasswordChangeRequiredError(SiteScopeError):
+    """The credential is valid; the account may not use it for anything else yet.
+
+    403 and not 401: the token is genuine and re-authenticating with it would change nothing, so
+    a client that retries a 401 by refreshing would loop. The distinct ``code`` is what a client
+    branches on — it means "send them to the change-password screen", not "sign them in again".
+    """
+
+    status_code = 403
+    code = "password_change_required"
+
+
 class UnsupportedMediaError(SiteScopeError):
     status_code = 415
     code = "unsupported_media"

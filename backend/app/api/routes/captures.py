@@ -31,6 +31,7 @@ from app.core.enums import (
     QualityVerdict,
 )
 from app.core.errors import ConflictError, NotFoundError, ValidationError
+from app.core.logging import log_event
 from app.models import (
     Building,
     CaptureFile,
@@ -237,9 +238,22 @@ def delete_capture_session(session_id: str, db: DbSession, user: RequireCaptureD
     session = get_session_or_404(db, session_id, user)
     # Not a blind prefix wipe: an upload that was split into several walkthroughs shares its
     # stored frames with them, and this capture may be the one holding the bytes.
-    capture_service.delete_session_storage(db, session)
+    storage = capture_service.delete_session_storage(db, session)
+    frames, files = session.frame_count, session.file_count
     db.delete(session)
     db.commit()
+    # Logged because it is irreversible and destroys imagery. The counts are the part that
+    # cannot be recovered afterwards: once the row is gone, nothing says how much went with it.
+    log_event(
+        "capture.deleted",
+        session_id=session_id,
+        project_id=session.project_id,
+        floor_id=session.floor_id,
+        frames=frames,
+        files=files,
+        actor_id=user.id,
+        swept_prefix=storage.get("swept_prefix"),
+    )
     return Message(message=f"Capture {session_id} deleted")
 
 
@@ -502,8 +516,17 @@ def delete_capture_file(
     if record is None or record.session_id != session_id:
         raise NotFoundError(f"File {file_id} not found in this capture")
     removed = capture_service.delete_file_storage(db, record)
+    filename = record.original_filename
     db.delete(record)
     db.commit()
+    log_event(
+        "capture.file_deleted",
+        session_id=session_id,
+        file_id=file_id,
+        filename=filename,
+        bytes_removed=removed,
+        actor_id=user.id,
+    )
     return Message(
         message="File deleted"
         if removed

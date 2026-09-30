@@ -1,10 +1,9 @@
 """Structured JSON logging with request/job correlation ids (§45).
 
-Domain events are emitted through :func:`log_event` so the observable event names live in one
-place and stay greppable:
-
-    capture.created · file.uploaded · processing.started · processing.stage.completed
-    processing.failed · processing.completed · mapping.completed · viewer.opened
+Domain events are emitted through :func:`log_event` so they stay greppable, and every name they
+use is registered in :mod:`app.core.audit` — which is what ``GET /api/system/events`` reports and
+what a unit test holds to the calls in this package. This docstring used to list eight of them
+inline and had fallen a long way behind, so it names none: see the registry.
 """
 
 from __future__ import annotations

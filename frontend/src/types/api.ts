@@ -86,6 +86,12 @@ export interface User {
   full_name: string
   role: Role
   is_active: boolean
+  /**
+   * True while an administrator's password reset is outstanding. The account can reach
+   * `/auth/me` and `/auth/change-password` and nothing else until it sets its own password,
+   * so a client that ignores this renders a shell in which every request returns 403.
+   */
+  must_change_password: boolean
   last_login_at: string | null
   created_at: string
 }

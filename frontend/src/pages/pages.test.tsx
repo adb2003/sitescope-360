@@ -71,6 +71,7 @@ const SESSION = {
     full_name: 'Test Admin',
     role: 'admin',
     is_active: true,
+    must_change_password: false,
     last_login_at: null,
     created_at: '2026-09-01T00:00:00Z',
   },

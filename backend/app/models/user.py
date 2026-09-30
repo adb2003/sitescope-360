@@ -24,6 +24,23 @@ class User(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
+    #: Set when an administrator resets this account's password, cleared when the user sets
+    #: their own.
+    #:
+    #: A reset password is a secret the administrator knows, spoken aloud or sent over whatever
+    #: channel was to hand, and it is not a password the account should keep. Without this flag
+    #: there is nothing to stop a temporary credential becoming a permanent one, and nothing to
+    #: distinguish "this person chose this password" from "somebody else chose it for them".
+    #:
+    #: Enforced in `api/deps.get_current_user` rather than at sign-in, so the answer comes from
+    #: the row on every request: an account flagged while its holder is mid-session stops being
+    #: able to do anything but set a new password, and no token outlives the requirement.
+    #: ``server_default`` as well as ``default`` because the column is NOT NULL on a table that
+    #: already has rows, and false is the truthful answer for every one of them.
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+
     managed_projects: Mapped[list[Project]] = relationship(
         "Project", back_populates="project_manager", foreign_keys="Project.project_manager_id"
     )

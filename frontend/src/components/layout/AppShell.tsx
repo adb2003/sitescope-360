@@ -28,6 +28,8 @@ import {
 import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 
+import { PasswordChangeRequired } from '@/components/auth/PasswordChangeRequired'
+
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { Badge, Button, Spinner } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
@@ -94,6 +96,15 @@ export function AppShell() {
     )
   }
   if (!session) return null
+  /*
+    Before the shell, not inside it. The server holds an account with an outstanding password
+    reset to `/auth/me` and `/auth/change-password`, so rendering navigation around this would
+    produce a screen of panels each reporting its own 403 — and the one action available would
+    be the hardest thing on it to find.
+  */
+  if (session.user.must_change_password) {
+    return <PasswordChangeRequired email={session.user.email} />
+  }
 
   return (
     <div className="flex min-h-screen bg-canvas">

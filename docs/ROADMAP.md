@@ -102,7 +102,7 @@ recognised references instead of adopting the nearest one's coordinates outright
 the tolerance from the answer rather than bounding it. A floor's *first* capture still has to be
 anchored by hand, and always will — nothing has been there before.
 
-### 2.3 Automatic capture grouping — **built**
+### 2.3 Automatic capture grouping · **delivered**
 
 **The problem.** A capture session has exactly one `floor_id`, and an operator capturing a
 building in a morning walks level 0, takes the lift, walks level 1, and uploads the lot. Mapping
@@ -305,4 +305,13 @@ Collected in one place, all documented at their source:
    merely views another cannot be expressed: they are a project manager on both. Per-project
    roles are a redesign of the §27 matrix rather than an addition to it — every capability check
    would need a project in hand — and were deliberately not attempted alongside the scoping.
-13. **No progress, defect, object or BIM analysis.** Phase 3.
+13. **Password recovery is an administrator action, never self-service.** Proving you own an
+   address means sending something to it, and no feature here may depend on a mail service to
+   run locally — so there is no "forgot password" link and there will not be one while that
+   constraint holds. `POST /api/users/{id}/password` is the answer: it sets a temporary
+   credential, revokes every session the account has open, and holds the account to
+   `/auth/me` and `/auth/change-password` until it sets its own password. What that does not
+   solve is a deployment with exactly one administrator who loses their own password; that still
+   needs database access, and nothing short of a second administrator or a mail service can fix
+   it. Create a second admin.
+14. **No progress, defect, object or BIM analysis.** Phase 3.

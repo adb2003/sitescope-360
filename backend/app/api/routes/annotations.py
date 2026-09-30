@@ -158,8 +158,20 @@ def delete_annotation(annotation_id: str, db: DbSession, user: RequireAnnotate) 
         user.role, Capability.ANNOTATION_RESOLVE
     ):
         raise PermissionDeniedError("You can only delete annotations you created")
+    frame_id, title = annotation.frame_id, annotation.title
+    own = annotation.created_by_id == user.id
     db.delete(annotation)
     db.commit()
+    # `own` is the part worth recording: a finding removed by somebody other than its author is
+    # a different event from one withdrawn by the person who raised it.
+    log_event(
+        "annotation.deleted",
+        annotation_id=annotation_id,
+        frame_id=frame_id,
+        title=title,
+        deleted_own=own,
+        actor_id=user.id,
+    )
     return Message(message="Annotation deleted")
 
 

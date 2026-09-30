@@ -16,6 +16,7 @@ from app.api.deps import (
     get_session_or_404,
 )
 from app.bim.interfaces import bim_status
+from app.core.audit import EVENT_NAMES
 from app.core.config import settings
 from app.core.enums import JobStatus, JobType
 from app.core.errors import ConflictError, NotFoundError
@@ -239,15 +240,8 @@ def recent_events(
             }
             for item in sessions
         ],
-        "logged_event_names": [
-            "capture.created",
-            "file.uploaded",
-            "processing.started",
-            "processing.stage.started",
-            "processing.stage.completed",
-            "processing.failed",
-            "processing.completed",
-            "mapping.completed",
-            "viewer.opened",
-        ],
+        # Read from `core.audit`, not written out here. This was a hard-coded list of eight
+        # while the code emitted thirty-five — a false statement about the system, inside the
+        # endpoint whose job is to describe it. A unit test holds the registry to the code.
+        "logged_event_names": list(EVENT_NAMES),
     }

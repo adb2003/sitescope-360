@@ -264,8 +264,13 @@ def delete_floor_plan(plan_id: str, db: DbSession, user: RequireFloorPlanEdit) -
         get_storage().delete(plan.storage_key)
     # And the PDF it was rendered from, which is a second object under a key only the plan row
     # knows. Deleting the row without it leaves the sheet in storage with nothing referencing it.
+    #
+    # Unless another revision is still rendering from that same PDF. Choosing a different sheet
+    # of a drawing set creates a revision that *shares* `source_storage_key` rather than copying
+    # the file, so deleting one revision would take the set out from under its siblings — they
+    # would keep displaying their own rasters and quietly lose the ability to switch sheet.
     source_key = (plan.render or {}).get("source_storage_key")
-    if isinstance(source_key, str):
+    if isinstance(source_key, str) and not _source_shared_with_another_plan(db, plan, source_key):
         with contextlib.suppress(Exception):
             get_storage().delete(source_key)
     db.delete(plan)
@@ -621,4 +626,19 @@ def choose_plan_sheet(
         )
         if stranded
         else "No capture points had been placed on an earlier sheet of this set.",
+    )
+
+
+def _source_shared_with_another_plan(db: DbSession, plan: FloorPlan, source_key: str) -> bool:
+    """Is some other revision of this floor still rendering from that same drawing set?
+
+    Cheap and exact enough: a floor has a handful of plan revisions, and the key lives inside a
+    JSON column, so this reads them rather than asking the database to index into JSON on two
+    dialects. What it must never do is guess — a wrong `False` deletes a set that is still in use.
+    """
+    siblings = db.scalars(
+        select(FloorPlan).where(FloorPlan.floor_id == plan.floor_id).where(FloorPlan.id != plan.id)
+    )
+    return any(
+        (sibling.render or {}).get("source_storage_key") == source_key for sibling in siblings
     )

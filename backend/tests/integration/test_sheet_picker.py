@@ -269,3 +269,46 @@ def test_a_floor_with_no_points_is_told_so_plainly(plan_from_a_set, client, admi
 
     assert body["points_from_earlier_sheets"] == 0
     assert "No capture points" in body["note"]
+
+
+def test_deleting_one_revision_leaves_the_set_its_siblings_still_need(
+    plan_from_a_set, client, admin_headers
+) -> None:
+    """Sharing the PDF is the point; deleting it out from under a sibling is the price.
+
+    A revision deletes the drawing set it was rendered from, because otherwise the file would
+    outlive every row that names it. But since choosing a sheet *shares* that key rather than
+    copying the file, deleting the superseded revision took the set with it — the remaining plan
+    kept displaying its own raster and silently lost the ability to look at any other sheet, so
+    nothing failed visibly at the moment the data went.
+    """
+    from app.storage import get_storage
+
+    _floor_id, first = plan_from_a_set
+    second = client.post(f"/api/floorplans/{first['id']}/sheets/2", headers=admin_headers).json()[
+        "plan"
+    ]
+    source_key = first["render"]["source_storage_key"]
+    assert second["render"]["source_storage_key"] == source_key
+
+    deleted = client.delete(f"/api/floorplans/{first['id']}", headers=admin_headers)
+    assert deleted.status_code == 200, deleted.text
+
+    assert get_storage().exists(source_key), "the surviving revision's drawing set was deleted"
+    sheets = client.get(f"/api/floorplans/{second['id']}/sheets", headers=admin_headers)
+    assert sheets.status_code == 200, sheets.text
+    assert sheets.json()["page_count"] == 4
+
+
+def test_deleting_the_last_revision_does_take_the_set_with_it(
+    plan_from_a_set, client, admin_headers
+) -> None:
+    """The guard must not turn into a leak: with no sibling left, the file still goes."""
+    from app.storage import get_storage
+
+    _floor_id, only = plan_from_a_set
+    source_key = only["render"]["source_storage_key"]
+
+    assert client.delete(f"/api/floorplans/{only['id']}", headers=admin_headers).status_code == 200
+
+    assert not get_storage().exists(source_key)

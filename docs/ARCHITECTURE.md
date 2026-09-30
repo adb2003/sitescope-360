@@ -609,6 +609,27 @@ the evidence — every match with its inlier count and residual parallax, everyt
 why, and the fitted transform. The coordinates from the two paths are indistinguishable; how much
 they should be trusted is not (§46).
 
+#### Noticing that one upload was several walks
+
+The same operator who walks a floor a week later also walks *three* floors in a morning and
+uploads the lot, and a capture session has one `floor_id`. `vision/grouping.py` asks, per
+consecutive pair, whether the walk continued — from the gap between frames and from the verified
+inlier counts the MAPPING stage has already computed, so it adds no vision work. Both bars are
+relative to the session's own behaviour: a gap counts against the median interval this capture
+has been keeping, and an inlier count against what this capture's own links typically carry. A
+fixed bar cannot serve both video sampled every two seconds and hand-taken stills, and real
+imagery showed a fixed inlier floor failing too — two structurally identical spaces with
+different surfaces still match by coincidence.
+
+A pair too featureless to judge is reported as **unknown** rather than as a break, because
+"nothing matched" and "there was nothing to match" look identical and only one is evidence.
+
+`services/grouping.py` applies what a person confirms, and the thing they confirm is the part no
+algorithm supplies: which floor each walk was on. The split moves no bytes — copying imagery
+cannot be made atomic with the transaction that re-points the rows, so a walkthrough's frames stay
+under the storage prefix of the upload they came from and `captures.delete_session_storage` stops
+assuming a capture owns everything beneath its own prefix.
+
 #### Project membership: which projects a role reaches
 
 Roles answered what a user may do and nothing answered which projects they may do it to, so every

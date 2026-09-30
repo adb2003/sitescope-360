@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import BinaryIO, NoReturn, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -42,7 +42,7 @@ from app.models import (
 )
 from app.processing.media import SniffResult, sniff
 from app.schemas.capture import CaptureSessionCreate
-from app.storage import extension_of, get_storage, session_key, session_prefix
+from app.storage import build_key, extension_of, get_storage, session_key, session_prefix
 from app.storage.base import validate_key
 from app.storage.maintenance import purge_abandoned_uploads
 from app.storage.multipart import (
@@ -913,3 +913,116 @@ def location_stats(db: Session, floor_id: str) -> dict[str, LocationStats]:
         )
         for location_id, count, latest in rows
     }
+
+
+# ---- deletion ----------------------------------------------------------------
+#: Every column through which a capture reaches a stored object.
+_FRAME_KEY_COLUMNS = (
+    CaptureFrame.storage_key,
+    CaptureFrame.thumbnail_key,
+    CaptureFrame.preview_key,
+    CaptureFrame.feature_blob_key,
+)
+
+
+def delete_session_storage(db: Session, session: CaptureSession) -> dict[str, int | bool]:
+    """Delete the bytes a capture owns, and only those.
+
+    A capture normally owns everything beneath its own storage prefix, and wiping the prefix is
+    both cheaper and more thorough than deleting object by object: it also sweeps whatever a
+    failed stage left behind, which no row points at and nothing would otherwise collect.
+
+    That stops being true the moment an upload is split. The walkthroughs carved out of it keep
+    referencing frames written under the original's prefix, because splitting re-points rows
+    instead of copying hundreds of megabytes — see `app.services.grouping` for why that trade was
+    made. Wiping the prefix would then delete another capture's imagery, and the operator would
+    discover it by opening a viewer onto nothing.
+
+    So the prefix is swept only when nothing outside this capture reaches into it. Otherwise the
+    keys this capture references, less the keys anything else references, are deleted one at a
+    time and the rest is left where it is. That can leave an object nobody points at, which costs
+    storage; the alternative costs somebody their imagery.
+    """
+    storage = get_storage()
+    prefix = (
+        build_key(
+            "projects", session.project_id, "floors", session.floor_id, "sessions", session.id
+        )
+        + "/"
+    )
+
+    shared = _keys_under_prefix(db, prefix, excluding_session=session.id)
+    if not shared:
+        with contextlib.suppress(Exception):
+            return {"swept_prefix": True, "objects": storage.delete_prefix(prefix)}
+        return {"swept_prefix": True, "objects": 0}
+
+    removed = 0
+    for key in sorted(_keys_of(db, session.id) - shared):
+        with contextlib.suppress(Exception):
+            storage.delete(key)
+            removed += 1
+    return {"swept_prefix": False, "objects": removed, "kept_for_others": len(shared)}
+
+
+def _keys_of(db: Session, session_id: str) -> set[str]:
+    """Every stored object this capture's own rows point at."""
+    keys: set[str] = set()
+    for row in db.execute(select(*_FRAME_KEY_COLUMNS).where(CaptureFrame.session_id == session_id)):
+        keys.update(value for value in row if value)
+    keys.update(
+        value
+        for value in db.scalars(
+            select(CaptureFile.storage_key).where(CaptureFile.session_id == session_id)
+        )
+        if value
+    )
+    return keys
+
+
+def _keys_under_prefix(db: Session, prefix: str, *, excluding_session: str) -> set[str]:
+    """Objects beneath ``prefix`` that some *other* capture still reaches."""
+    keys: set[str] = set()
+    for row in db.execute(
+        select(*_FRAME_KEY_COLUMNS)
+        .where(CaptureFrame.session_id != excluding_session)
+        .where(or_(*(column.startswith(prefix) for column in _FRAME_KEY_COLUMNS)))
+    ):
+        keys.update(value for value in row if value and value.startswith(prefix))
+    keys.update(
+        value
+        for value in db.scalars(
+            select(CaptureFile.storage_key)
+            .where(CaptureFile.session_id != excluding_session)
+            .where(CaptureFile.storage_key.startswith(prefix))
+        )
+        if value
+    )
+    return keys
+
+
+def delete_file_storage(db: Session, record: CaptureFile) -> bool:
+    """Delete an uploaded file's bytes unless another row still points at them.
+
+    Two rows can name the same object without either being a copy: a split gives each
+    walkthrough its own file row over the original upload, and a still frame has always pointed
+    straight at the uploaded file rather than duplicating it. Returns whether the bytes went.
+    """
+    others = db.scalar(
+        select(CaptureFile.id)
+        .where(CaptureFile.id != record.id)
+        .where(CaptureFile.storage_key == record.storage_key)
+        .limit(1)
+    )
+    if others is None:
+        others = db.scalar(
+            select(CaptureFrame.id)
+            .where(CaptureFrame.file_id != record.id)
+            .where(CaptureFrame.storage_key == record.storage_key)
+            .limit(1)
+        )
+    if others is not None:
+        return False
+    with contextlib.suppress(Exception):
+        get_storage().delete(record.storage_key)
+    return True

@@ -102,10 +102,51 @@ recognised references instead of adopting the nearest one's coordinates outright
 the tolerance from the answer rather than bounding it. A floor's *first* capture still has to be
 anchored by hand, and always will — nothing has been there before.
 
-### 2.3 Automatic capture grouping
+### 2.3 Automatic capture grouping — **built**
 
-Split one upload into logical walkthroughs (per floor, per zone) using time gaps and visual
-discontinuity, so an operator can upload a whole day at once.
+**The problem.** A capture session has exactly one `floor_id`, and an operator capturing a
+building in a morning walks level 0, takes the lift, walks level 1, and uploads the lot. Mapping
+then estimates a single continuous track through three walks that share no space at all. The
+positions either side of each join are not merely imprecise; they answer a question nobody asked.
+
+**What was built.** `app/vision/grouping.py` and `app/services/grouping.py`. Detection runs at
+the end of MAPPING and costs no vision work: the pairwise matching that estimates the track has
+already measured how much every consecutive pair has in common, so this reads that arithmetic and
+asks one question per pair — *did the walk continue here?* — from two signals.
+
+The **clock** cannot use an absolute threshold, because video sampled every two seconds has no
+gaps by construction while hand-taken stills are irregular by nature. So a gap is measured
+against the session's own median interval. The **imagery** is the stronger signal: consecutive
+frames of a continuing walk overlap enormously; frames either side of a lift ride share nothing.
+Its bar is a fraction of what this walk's own links carry, for the same reason and after real
+imagery showed why a fixed floor fails — two structurally identical spaces with different
+surfaces still match by coincidence, above any absolute floor low enough to be defensible.
+
+Neither alone is right, and the interesting cases are where they disagree. An operator who stops
+for five minutes and carries on down the same corridor produces a gap with no discontinuity, and
+the imagery correctly refutes the clock. A pair too featureless to match produces no inliers for
+the same reason a different building would, so it is reported as **unknown** — not as a break —
+and is only proposed when the clock independently agrees.
+
+`GET /api/captures/{id}/segments` reports the finding with the evidence behind every boundary,
+including the ones considered and declined. `POST /api/captures/{id}/split` applies a plan, which
+need not be the proposal.
+
+**The split moves no bytes.** Copying a walkthrough's frames cannot be made atomic with the
+transaction that re-points the rows, so splitting a day's capture would be a long, interruptible,
+half-undoable operation over hundreds of megabytes. Re-pointing rows is one transaction and
+either happened or did not. The cost is that a walkthrough's frames live under the storage prefix
+of the upload it came from, so deletion no longer assumes a capture owns everything beneath its
+own prefix — `services/captures.delete_session_storage` sweeps the prefix only when nothing else
+reaches into it.
+
+**What is still open here.** Zones, which the original entry named: segments are filed per floor,
+and a zone can be given per segment but is never inferred. The **first segment keeps its
+capture's floor**, because frame storage keys embed the floor and nothing rewrites a key — an
+operator who started on the wrong floor must split the rest out and correct that capture another
+way. And the part that will never close: nothing in the imagery says *which* floor a walk was on.
+That is a fact about the building, so the split is proposed and confirmed, never applied
+automatically.
 
 ### 2.4 Scale from a second signal
 

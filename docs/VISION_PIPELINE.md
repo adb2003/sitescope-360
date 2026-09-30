@@ -300,6 +300,36 @@ the first would shift the whole walk by one point, and since every frame shifts 
 result is a pure translation that the similarity fit reproduces with a zero residual. Parallax is
 the only signal here that orders candidates by distance.
 
+### Where one upload stops being one walk
+
+`app/vision/grouping.py`. A capture session has exactly one `floor_id`, and an operator who walks
+a building in a morning uploads several floors under it — so mapping estimates one track straight
+through a lift ride. This asks, for each consecutive pair, whether the walk continued, and it
+does no vision work: the pairwise matching that estimated the track has already counted how much
+every pair has in common.
+
+Two signals, and **both thresholds are relative to the session's own behaviour** rather than
+fixed, for the same reason and using the median for the same reason — the breaks being looked for
+are themselves in the sample, so a mean would move the bar toward hiding them.
+
+| | |
+| --- | --- |
+| `MIN_GAP_SECONDS` = 25, `GAP_CADENCE_MULTIPLE` = 6 | A gap counts when it is six times the session's median interval *and* long in absolute terms. No absolute threshold can serve both inputs: video sampled every two seconds has no gaps by construction, hand-taken stills are irregular by nature. |
+| `SCENE_BREAK_INLIERS` = 12, `SCENE_BREAK_FRACTION` = 0.10 | Verified inliers below the solver's own minimum **and** below a tenth of what this walk's links typically carry. Real imagery forced the second half: two structurally identical spaces with different surfaces still matched at 9 inliers — above any absolute floor low enough to defend — against 160–220 for a continuing step. |
+| `MIN_FEATURES_TO_JUDGE` = 120 | Below this the imagery abstains. Nothing matched because there was nothing to match, and a detector that read that as a break would split hardest where the evidence is weakest. |
+
+The interesting cases are where the two disagree, and each correction is the point. An operator
+who pauses five minutes and carries on down the same corridor trips the clock; the imagery
+refutes it, and the walk did continue. A pair too featureless to judge is recorded as **unknown**
+— a third answer, not a quiet "continued" — and is proposed only when the clock independently
+agrees.
+
+What this will never do is say *which* floor a walk was on. That is a fact about the building and
+not about the pixels, so `services/grouping.py` proposes and a person confirms. The split is a
+pure database transaction that moves no bytes: copying a walkthrough's imagery cannot be made
+atomic with the transaction re-pointing its rows, and a half-copied split of a day's capture is a
+worse failure than any it would prevent.
+
 ---
 
 ## 8. What is not implemented
@@ -316,6 +346,7 @@ UI reads that endpoint rather than hard-coding assumptions.
 | BIM comparison | Not implemented — Phase 3. Interfaces in `app/bim/`. |
 | Loop closure / global optimisation | Implemented — `vision/slam.py`. SE(2) pose graph, Levenberg-Marquardt, Huber kernel. See below. |
 | Cross-session localisation | Implemented — `vision/relocalize.py`. Places a new walk against a floor captured before. See §7. |
+| Walkthrough grouping | Implemented — `vision/grouping.py`. Finds where one upload stopped being one walk. Proposed, never applied: which floor is not in the pixels. See §7. |
 | Bundle adjustment over 3D landmarks | Not implemented. The graph optimises poses; there is no landmark map. |
 | Metric positioning | Not possible monocularly. Direction only — see *Scale*, below. |
 

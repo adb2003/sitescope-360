@@ -137,6 +137,25 @@ class CaptureSession(Base, TimestampMixin):
     #: recognition never ran or found nothing.
     localization_report: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
 
+    #: Where this upload stopped being one walkthrough, and the evidence behind each break.
+    #:
+    #: Written by MAPPING from arithmetic it already had — see `app.vision.grouping`. Never
+    #: acted on automatically: the report proposes boundaries, a person confirms them and says
+    #: which floor each walk was on, because nothing in the imagery can say that.
+    grouping_report: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+
+    #: The capture this one was split out of, when one upload turned out to be several walks.
+    #:
+    #: Kept because the split is not reversible by re-running anything: after it, the child's
+    #: frames reference bytes written under the parent's storage prefix, and both the deletion
+    #: guard and an operator asking "where did this come from" need the link to be recorded
+    #: rather than inferred from names.
+    split_from_session_id: Mapped[str | None] = mapped_column(
+        String(40), ForeignKey("capture_sessions.id", ondelete="SET NULL"), nullable=True
+    )
+    #: 1-based position of this walkthrough within the upload it came from.
+    split_segment_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     #: Denormalised counters kept current by the pipeline; they make dashboards cheap.
     frame_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     file_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -159,6 +178,16 @@ class CaptureSession(Base, TimestampMixin):
     )
     path: Mapped[CapturePath | None] = relationship(
         "CapturePath", back_populates="session", cascade="all, delete-orphan", uselist=False
+    )
+    split_from: Mapped[CaptureSession | None] = relationship(
+        "CaptureSession",
+        remote_side="CaptureSession.id",
+        back_populates="split_children",
+    )
+    split_children: Mapped[list[CaptureSession]] = relationship(
+        "CaptureSession",
+        back_populates="split_from",
+        order_by="CaptureSession.split_segment_index",
     )
 
     def __repr__(self) -> str:  # pragma: no cover

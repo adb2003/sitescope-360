@@ -12,6 +12,7 @@ import {
 import { useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
+import { WalkthroughPanel } from '@/components/capture/WalkthroughPanel'
 import { PageBody, PageHeader } from '@/components/layout/AppShell'
 import {
   JobStatusBadge,
@@ -260,6 +261,14 @@ export function CaptureDetailPage() {
             )}
           </div>
         </Card>
+
+        {/*
+          Before the mapping note, deliberately. A capture that crossed three floors has a track
+          whose confidence is beside the point — the question is whether it should have been one
+          track at all, and an operator who reads "low confidence" first will go looking for a
+          mapping problem instead of the upload it actually is.
+        */}
+        {session.data ? <WalkthroughPanel session={session.data} /> : null}
 
         {session.data ? (
           <MappingConfidenceNote

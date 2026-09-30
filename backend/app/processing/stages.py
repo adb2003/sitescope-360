@@ -45,6 +45,7 @@ from app.models import (
 )
 from app.processing import media
 from app.queue.base import JobSpec
+from app.services import grouping
 from app.storage import get_storage, session_key
 from app.storage.base import StorageProvider
 from app.vision.engine import get_vision_engine
@@ -720,6 +721,9 @@ def stage_mapping(db: Session, session: CaptureSession, spec: JobSpec) -> dict[s
     if len(frames) < 2:
         session.mapping_confidence = MappingConfidence.NONE
         session.mapping_confidence_score = None
+        # One frame cannot be several walkthroughs, and a stale finding from a previous run
+        # would outlive the frames it described.
+        session.grouping_report = None
         session.mapping_note = (
             "Automatic mapping needs at least two usable frames from one walkthrough. "
             "Place this capture on the floor plan manually."
@@ -773,6 +777,12 @@ def stage_mapping(db: Session, session: CaptureSession, spec: JobSpec) -> dict[s
     session.loop_closure_report = None if slam.unchanged else slam_report
     db.flush()
 
+    # Whether this was one walkthrough at all. The pairwise matching that produced `per_pair` is
+    # the same evidence that answers it, so asking costs arithmetic rather than vision — and a
+    # capture that crosses three floors gets the question asked before anyone wonders why the
+    # track looks like that. Nothing is split here; the finding is recorded for an operator.
+    walkthroughs = grouping.record_analysis(db, session, frames, outcome.per_pair)
+
     log_event(
         "mapping.completed",
         session_id=session.id,
@@ -794,6 +804,7 @@ def stage_mapping(db: Session, session: CaptureSession, spec: JobSpec) -> dict[s
         "normalized_track": engine.map_builder.normalize_track(outcome.poses),
         "mapping_method": session.mapping_method,
         "loop_closure": slam_report,
+        "walkthroughs": walkthroughs,
         "cross_session": _try_cross_session_placement(db, session),
     }
 

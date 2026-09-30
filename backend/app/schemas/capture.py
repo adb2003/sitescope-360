@@ -78,6 +78,12 @@ class CaptureSessionOut(ORMModel):
     #: What cross-session recognition compared and believed, including what it rejected and why.
     #: Null when recognition never ran.
     localization_report: dict[str, Any] | None = None
+    #: Where this upload stopped being one walkthrough, with the evidence behind each break.
+    #: Null until MAPPING has run, and cleared once the capture is actually split.
+    grouping_report: dict[str, Any] | None = None
+    #: The capture this one was split out of, when one upload turned out to be several walks.
+    split_from_session_id: str | None = None
+    split_segment_index: int | None = None
     frame_count: int
     file_count: int
     created_at: datetime
@@ -516,6 +522,83 @@ class MappingResultOut(BaseModel):
     note: str
     requires_manual_placement: bool
     estimated_positions: list[dict[str, Any]] = []
+
+
+# ---- walkthrough grouping ----------------------------------------------------
+class WalkthroughBoundaryOut(BaseModel):
+    """One place an upload may stop being a single walk, and why it is thought so."""
+
+    link_index: int
+    #: Where the break sits, in terms a split can be asked for.
+    after_frame_id: str
+    before_frame_id: str
+    after_sequence_index: int
+    breaks_at: datetime
+    gap_seconds: float
+    #: The session's own median interval, against which the gap was judged.
+    cadence_seconds: float
+    gap_ratio: float
+    inliers: int
+    matches: int
+    #: The clock's verdict, and the imagery's. ``scene_break`` is null when the two frames were
+    #: too featureless for a failure to match to mean anything either way.
+    time_break: bool
+    scene_break: bool | None
+    #: Whether this is offered as a split, as opposed to merely recorded. A boundary can be real
+    #: and still not proposed — see ``reason``.
+    proposed: bool
+    confidence: float
+    reason: str
+
+
+class WalkthroughSegmentOut(BaseModel):
+    """A run of frames the evidence keeps together."""
+
+    index: int
+    start_sequence_index: int
+    end_sequence_index: int
+    frame_count: int
+
+
+class WalkthroughReportOut(BaseModel):
+    """What walkthrough detection found for one capture."""
+
+    session_id: str
+    analysed: bool
+    cadence_seconds: float = 0.0
+    proposed_count: int = 0
+    note: str = ""
+    segments: list[WalkthroughSegmentOut] = []
+    boundaries: list[WalkthroughBoundaryOut] = []
+
+
+class SplitSegmentRequest(BaseModel):
+    """One walkthrough an operator is confirming, and where they say it was."""
+
+    start_sequence_index: Annotated[int, Field(ge=0)]
+    end_sequence_index: Annotated[int, Field(ge=0)]
+    #: Null keeps the capture's floor. The first segment cannot be moved — its frames are stored
+    #: under the capture's original floor and the split does not rewrite storage keys.
+    floor_id: str | None = None
+    zone_id: str | None = None
+    name: Annotated[str, Field(max_length=200)] | None = None
+
+
+class SplitRequest(BaseModel):
+    segments: list[SplitSegmentRequest]
+    #: Queue mapping for every resulting walkthrough. On by default: the split throws away a
+    #: track that ran through the break, and leaving every capture unmapped is not a finished
+    #: operation.
+    reprocess: bool = True
+
+
+class SplitResult(BaseModel):
+    parent_id: str
+    created: list[CaptureSessionOut]
+    moved_frames: int
+    cleared_track: bool
+    reprocessing: list[str] = []
+    note: str
 
 
 CaptureSessionDetail.model_rebuild()

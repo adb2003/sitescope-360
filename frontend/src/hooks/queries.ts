@@ -55,6 +55,8 @@ import type {
   ProjectSummary,
   SheetChosen,
   SheetSet,
+  SplitResult,
+  SplitSegmentRequest,
   ShareLink,
   ShareLinkCreated,
   Report,
@@ -64,6 +66,7 @@ import type {
   Timeline,
   User,
   ViewerManifest,
+  WalkthroughReport,
   Zone,
 } from '@/types/api'
 
@@ -96,6 +99,7 @@ export const keys = {
   captures: (filters?: Record<string, QueryValue>) => ['captures', filters ?? {}] as const,
   capture: (id: string) => ['capture', id] as const,
   captureFiles: (id: string) => ['capture', id, 'files'] as const,
+  captureSegments: (id: string) => ['capture', id, 'segments'] as const,
   captureFrames: (id: string, filters?: Record<string, QueryValue>) =>
     ['capture', id, 'frames', filters ?? {}] as const,
   captureStatus: (id: string) => ['capture', id, 'status'] as const,
@@ -706,6 +710,43 @@ export function useClearPlacement(sessionId: string, floorId: string | null | un
         void queryClient.invalidateQueries({ queryKey: keys.locations(floorId) })
         void queryClient.invalidateQueries({ queryKey: keys.floorPaths(floorId) })
       }
+    },
+  })
+}
+
+// ---- walkthrough grouping ---------------------------------------------------
+/**
+ * Where this upload looks like it stopped being one walkthrough.
+ *
+ * Read from what mapping recorded rather than recomputed, so it is cheap and answers instantly —
+ * and it answers `analysed: false` rather than nothing when the capture has not been processed.
+ */
+export function useCaptureSegments(sessionId: string | null | undefined) {
+  return useQuery({
+    queryKey: keys.captureSegments(sessionId ?? ''),
+    queryFn: () => api.get<WalkthroughReport>(`/captures/${sessionId}/segments`),
+    enabled: Boolean(sessionId),
+  })
+}
+
+/**
+ * Cut one upload into the walkthroughs the operator confirmed.
+ *
+ * Invalidates widely on purpose: the split moves frames between captures, clears the estimated
+ * track from all of them, and creates sessions on other floors. Nothing that was on screen
+ * before it describes the same data afterwards.
+ */
+export function useSplitCapture(sessionId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { segments: SplitSegmentRequest[]; reprocess?: boolean }) =>
+      api.post<SplitResult>(`/captures/${sessionId}/split`, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.capture(sessionId) })
+      void queryClient.invalidateQueries({ queryKey: keys.captureFiles(sessionId) })
+      void queryClient.invalidateQueries({ queryKey: keys.captureFrames(sessionId) })
+      void queryClient.invalidateQueries({ queryKey: keys.captureSegments(sessionId) })
+      void queryClient.invalidateQueries({ queryKey: ['captures'] })
     },
   })
 }

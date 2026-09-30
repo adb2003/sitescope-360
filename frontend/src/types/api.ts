@@ -361,6 +361,69 @@ export interface LocalizationReport {
   } | null
 }
 
+/**
+ * One place an upload may stop being a single walk, and why it is thought so.
+ *
+ * `scene_break` is null where the two frames were too featureless for a failure to match to mean
+ * anything — which is not the same as "the walk continued", and is shown as such. A boundary can
+ * be real and still not `proposed`: splitting there would leave too few frames to be a walk.
+ */
+export interface WalkthroughBoundary {
+  link_index: number
+  after_frame_id: string
+  before_frame_id: string
+  after_sequence_index: number
+  breaks_at: string
+  gap_seconds: number
+  /** The session's own median interval, against which the gap was judged. */
+  cadence_seconds: number
+  gap_ratio: number
+  inliers: number
+  matches: number
+  time_break: boolean
+  scene_break: boolean | null
+  proposed: boolean
+  confidence: number
+  reason: string
+}
+
+export interface WalkthroughSegment {
+  index: number
+  start_sequence_index: number
+  end_sequence_index: number
+  frame_count: number
+}
+
+export interface WalkthroughReport {
+  session_id: string
+  /** False until the capture has been processed — detection runs during mapping. */
+  analysed: boolean
+  cadence_seconds: number
+  proposed_count: number
+  note: string
+  segments: WalkthroughSegment[]
+  boundaries: WalkthroughBoundary[]
+}
+
+/** One walkthrough the operator is confirming, and where they say it was. */
+export interface SplitSegmentRequest {
+  start_sequence_index: number
+  end_sequence_index: number
+  /** Null keeps the capture's floor. The first segment cannot be moved. */
+  floor_id?: string | null
+  zone_id?: string | null
+  name?: string | null
+}
+
+export interface SplitResult {
+  parent_id: string
+  created: CaptureSession[]
+  moved_frames: number
+  cleared_track: boolean
+  reprocessing: string[]
+  note: string
+}
+
 export interface CaptureSession {
   id: string
   project_id: string
@@ -394,6 +457,11 @@ export interface CaptureSession {
   placement_method: string | null
   /** What recognition compared and believed. Null when recognition never ran. */
   localization_report: LocalizationReport | null
+  /** Where this upload stopped being one walk. Null until mapping has run; cleared by a split. */
+  grouping_report: WalkthroughReport | null
+  /** The capture this one was split out of, when one upload turned out to be several walks. */
+  split_from_session_id: string | null
+  split_segment_index: number | null
   frame_count: number
   file_count: number
   created_at: string

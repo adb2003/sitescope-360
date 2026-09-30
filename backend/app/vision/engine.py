@@ -249,6 +249,13 @@ class VisionEngine:
                 f"{slam.report.max_correction_steps:.1f}x the median step."
             ),
             requires_manual_placement=outcome.requires_manual_placement,
+            # Carried over rather than left to default. These describe the frame *pairs* — how
+            # many features matched and survived verification between each consecutive frame —
+            # and loop closure does not change any of that; it moves the poses the pairs were
+            # integrated into. Dropping them here silently emptied the stage's diagnostics in
+            # exactly the case where the track is most worth inspecting, and took the evidence
+            # walkthrough detection reads with it.
+            per_pair=outcome.per_pair,
         )
         return refined, slam
 
@@ -346,6 +353,39 @@ class VisionEngine:
                     "person placed, and creating points from references more than three hops out "
                     "is refused (reusing one is always allowed, as it adds no new coordinate)",
                     "the first capture of any floor still has to be anchored by hand",
+                ],
+            },
+            "walkthrough_grouping": {
+                "implemented": True,
+                "method": (
+                    "per-pair evidence already computed by mapping: a gap measured against the "
+                    "session's own median interval, and verified inlier counts measured against "
+                    "the session's own typical link; a pair too featureless to match is reported "
+                    "as unknown rather than as a break"
+                ),
+                # Not "estimated": nothing is written to a capture from this without a person
+                # confirming it. The report is a measurement of the frames; the split is theirs.
+                "provenance": "measured",
+                "limitations": [
+                    # The boundary of the feature, stated first because everything else assumes
+                    # it. No amount of imagery will ever say which floor a walk was on.
+                    "detects *that* a walk stopped, never *where* it resumed — which floor each "
+                    "walkthrough was on is a fact about the building, not about the pixels, so "
+                    "the split is proposed and never applied automatically",
+                    "an operator who walks straight from one identical bay into another leaves "
+                    "no discontinuity to find, and one who pauses without moving leaves a gap "
+                    "that is not a break; the two signals correct each other but neither is "
+                    "complete",
+                    "two frames with too little texture to match cannot distinguish 'a different "
+                    "place' from 'nothing to match'; such a pair is reported as unknown and is "
+                    "only proposed as a break when the clock independently agrees",
+                    "the inlier bar is a fraction of the session's own typical link, so a "
+                    "capture that is poor throughout is judged against its own standard — which "
+                    "is the intent, and also means a uniformly poor capture is harder to split",
+                    "a break that would leave fewer than four frames on one side is reported but "
+                    "not proposed",
+                    "splitting re-points rows rather than copying imagery, so a walkthrough's "
+                    "frames remain stored under the upload it came from",
                 ],
             },
             "object_detection": {"implemented": False, "phase": 3},

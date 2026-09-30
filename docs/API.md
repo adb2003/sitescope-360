@@ -1,6 +1,6 @@
 # API reference
 
-123 endpoints across 92 paths. Base prefix `/api`.
+125 endpoints across 94 paths. Base prefix `/api`.
 
 Interactive documentation is generated from the code and is the authoritative source:
 
@@ -381,6 +381,35 @@ geometry would produce a confident, precise and wrong number.
 | POST | `/captures/{id}/align` | Pin the estimated track to the plan from ≥2 manual anchors. Driven by the viewer's Plan tab. |
 | POST | `/captures/{id}/localize` | Place the capture by recognising frames from earlier captures of the same floor. Runs automatically at the end of processing; this re-runs it. |
 | DELETE | `/captures/{id}/placement` | Undo a placement: unplace every frame and remove the points that placement created. |
+| GET | `/captures/{id}/segments` | Where this upload looks like it stopped being one walkthrough, with the evidence behind each break. |
+| POST | `/captures/{id}/split` | Cut the upload into the walkthroughs an operator confirmed, each on the floor they say it was walked on. |
+
+**One upload, several walkthroughs.** An operator who captures a building in a morning walks one
+floor, takes the lift, and keeps going — and a capture session has exactly one `floor_id`, so
+mapping estimates a single track straight through a lift ride. `GET /captures/{id}/segments`
+reports where that happened. It reads what the MAPPING stage recorded rather than recomputing, so
+`analysed` is `false` until the capture has been processed; that is an answer, not an error.
+
+Each boundary carries its own evidence, and the two fields to read are `time_break` and
+`scene_break`. A `scene_break` of `null` is the third answer and not a quiet `false`: the two
+frames were too featureless for a failure to match to mean anything, so the imagery abstained.
+`proposed` is what the platform would act on — a boundary can be real and unproposed, when
+splitting there would leave fewer than four frames on one side, and `reason` says so.
+
+`POST /captures/{id}/split` takes the plan, which need not be the proposal: the operator can move
+a boundary or split where nothing was proposed, because they can see the building and the
+detector cannot. What is enforced is that the segments tile the capture exactly — every frame in
+one walkthrough, none in two — and that each carries a floor, **which the detector never supplies
+and never could**. Nothing in the imagery says which floor a walk was on.
+
+Two consequences worth knowing before calling it. The **first segment stays in this capture and
+keeps its floor**: frame storage keys embed the floor the capture was created on, and the split
+re-points database rows rather than copying hundreds of megabytes of imagery, so a row whose
+floor moved would look for its own bytes in the wrong place. Passing a different `floor_id` for
+segment 1 is refused rather than ignored. And the **estimated track is cleared from every
+resulting walkthrough**, because a track that ran through a break was not measuring anything;
+`reprocess` (default true) queues mapping again for each. Quality scores and ORB features
+survive — those are facts about a frame, not about which capture it is filed under.
 
 **Automatic placement.** `/localize` never fails for the ordinary refusals — a floor nobody has
 captured before, or a walk nothing recognised, are answers rather than errors, and both leave the

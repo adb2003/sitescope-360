@@ -27,6 +27,7 @@ from app.api.deps import (
 from app.auth.membership import restrict_to_member_projects
 from app.core.enums import (
     CaptureSessionStatus,
+    JobType,
     QualityVerdict,
 )
 from app.core.errors import ConflictError, NotFoundError, ValidationError
@@ -69,12 +70,16 @@ from app.schemas.capture import (
     ProcessingJobOut,
     ProcessingStatus,
     ProcessRequest,
+    SplitRequest,
+    SplitResult,
     UploadPartOut,
     ViewerManifest,
+    WalkthroughReportOut,
 )
 from app.schemas.common import Message, Page
 from app.services import alignment as alignment_service
 from app.services import captures as capture_service
+from app.services import grouping as grouping_service
 from app.services import relocalization as relocalization_service
 from app.services import viewer as viewer_service
 from app.services.assets import sign
@@ -230,19 +235,9 @@ def cancel_capture_session(
 @router.delete("/captures/{session_id}", response_model=Message)
 def delete_capture_session(session_id: str, db: DbSession, user: RequireCaptureDelete) -> Message:
     session = get_session_or_404(db, session_id, user)
-    from app.storage import build_key, get_storage
-
-    with contextlib.suppress(Exception):
-        get_storage().delete_prefix(
-            build_key(
-                "projects",
-                session.project_id,
-                "floors",
-                session.floor_id,
-                "sessions",
-                session.id,
-            )
-        )
+    # Not a blind prefix wipe: an upload that was split into several walkthroughs shares its
+    # stored frames with them, and this capture may be the one holding the bytes.
+    capture_service.delete_session_storage(db, session)
     db.delete(session)
     db.commit()
     return Message(message=f"Capture {session_id} deleted")
@@ -506,13 +501,14 @@ def delete_capture_file(
     record = get_capture_file_or_404(db, file_id, user)
     if record is None or record.session_id != session_id:
         raise NotFoundError(f"File {file_id} not found in this capture")
-    from app.storage import get_storage
-
-    with contextlib.suppress(Exception):
-        get_storage().delete(record.storage_key)
+    removed = capture_service.delete_file_storage(db, record)
     db.delete(record)
     db.commit()
-    return Message(message="File deleted")
+    return Message(
+        message="File deleted"
+        if removed
+        else "File removed from this capture; its bytes are still used by another walkthrough"
+    )
 
 
 # ---- processing --------------------------------------------------------------
@@ -670,6 +666,81 @@ def unassign_frame_location(
     build_capture_path(db, session)
     db.commit()
     return viewer_service.frame_detail(db, frame)
+
+
+# ---- walkthrough grouping ----------------------------------------------------
+@router.get("/captures/{session_id}/segments", response_model=WalkthroughReportOut)
+def capture_segments(
+    session_id: str, db: DbSession, user: RequireCaptureRead
+) -> WalkthroughReportOut:
+    """Where this upload looks like it stopped being one walkthrough.
+
+    Read from what MAPPING recorded rather than recomputed: the evidence is the pairwise matching
+    that estimated the track, and asking for it again would mean matching every consecutive frame
+    a second time to reach the same answer.
+    """
+    session = get_session_or_404(db, session_id, user)
+    report = session.grouping_report
+    if not report:
+        return WalkthroughReportOut(
+            session_id=session.id,
+            analysed=False,
+            note=(
+                "This capture has not been analysed for separate walkthroughs yet. Detection "
+                "runs during mapping, so process the capture first."
+            ),
+        )
+    return WalkthroughReportOut(session_id=session.id, analysed=True, **report)
+
+
+@router.post("/captures/{session_id}/split", response_model=SplitResult)
+def split_capture(
+    session_id: str, payload: SplitRequest, db: DbSession, user: RequireCaptureCreate
+) -> SplitResult:
+    """Cut one upload into the walkthroughs the operator confirmed.
+
+    The plan is theirs, not the detector's: they can accept the proposal, move a boundary, or
+    split somewhere nothing was proposed. What the platform insists on is that the segments
+    tile the capture exactly — every frame in one walkthrough, none in two.
+    """
+    session = get_session_or_404(db, session_id, user)
+    outcome = grouping_service.split_session(
+        db,
+        session,
+        [
+            grouping_service.SegmentPlan(
+                start_sequence_index=segment.start_sequence_index,
+                end_sequence_index=segment.end_sequence_index,
+                floor_id=segment.floor_id,
+                zone_id=segment.zone_id,
+                name=segment.name,
+            )
+            for segment in payload.segments
+        ],
+        user,
+    )
+    db.commit()
+
+    reprocessing: list[str] = []
+    if payload.reprocess:
+        for capture in [session, *outcome.created]:
+            # One capture failing to queue must not strand the rest: the split has already
+            # happened and is committed, and a walkthrough nobody mapped is recoverable with the
+            # process button. Losing the other walkthroughs' jobs to it would not be.
+            with contextlib.suppress(ConflictError, ValidationError):
+                enqueue_pipeline(
+                    db, capture, stages=[JobType.MAPPING, JobType.VIEWER_DATA], force=True
+                )
+                reprocessing.append(capture.id)
+
+    return SplitResult(
+        parent_id=outcome.parent_id,
+        created=[CaptureSessionOut.model_validate(child) for child in outcome.created],
+        moved_frames=outcome.moved_frames,
+        cleared_track=outcome.cleared_track,
+        reprocessing=reprocessing,
+        note=outcome.note,
+    )
 
 
 # ---- capture path ------------------------------------------------------------

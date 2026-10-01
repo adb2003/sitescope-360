@@ -80,7 +80,7 @@ def test_video_upload_extracts_frames_at_the_configured_interval(
     status = wait(client, admin_headers, session_id)
     assert status["status"] == CaptureSessionStatus.READY, status
 
-    files = client.get(f"/api/captures/{session_id}/files", headers=admin_headers).json()
+    files = client.get(f"/api/captures/{session_id}/files", headers=admin_headers).json()["items"]
     assert files[0]["kind"] == "video_360"
     assert files[0]["projection"] == "equirectangular"
     assert files[0]["duration_seconds"] == pytest.approx(8.0, abs=0.6)
@@ -313,7 +313,7 @@ def test_duplicate_upload_of_identical_bytes_is_deduplicated(
 
     assert first[0]["id"] == second[0]["id"]
     files = client.get(f"/api/captures/{session_id}/files", headers=admin_headers).json()
-    assert len(files) == 1
+    assert files["total"] == 1
 
 
 def test_client_supplied_session_id_is_idempotent(
@@ -484,7 +484,7 @@ def test_a_dual_fisheye_upload_becomes_an_equirectangular_frame(
     status = wait(client, admin_headers, session_id)
     assert status["status"] == CaptureSessionStatus.READY, status
 
-    files = client.get(f"/api/captures/{session_id}/files", headers=admin_headers).json()
+    files = client.get(f"/api/captures/{session_id}/files", headers=admin_headers).json()["items"]
     assert files[0]["projection"] == "dual_fisheye", files[0]["projection"]
     # And the operator is told, because the stitch uses assumed lens geometry.
     assert any(

@@ -282,14 +282,14 @@ export function ComparePage() {
               <FrameFacts label="Later" frame={comparison.data.b} />
             </div>
 
-            {history.data && history.data.length > 2 ? (
+            {history.data && history.data.items.length > 2 ? (
               <Card>
                 <CardHeader
                   title="Pick a different pair"
-                  description={`${history.data.length} visits recorded at this point`}
+                  description={`${history.data.total} visits recorded at this point`}
                 />
                 <div className="flex gap-2 overflow-x-auto p-3">
-                  {history.data.map((item) => {
+                  {history.data.items.map((item) => {
                     const isA = item.id === comparison.data?.a.id
                     const isB = item.id === comparison.data?.b.id
                     return (

@@ -210,8 +210,8 @@ def test_full_mvp_workflow(
     assert p03["latest_frame_id"] is not None
     from_plan = client.get(f"/api/locations/{p03['id']}/frames", headers=headers)
     assert from_plan.status_code == 200, from_plan.text
-    assert from_plan.json()[0]["id"] == p03["latest_frame_id"]
-    assert from_plan.json()[0]["full"]["url"].startswith("http")
+    assert from_plan.json()["items"][0]["id"] == p03["latest_frame_id"]
+    assert from_plan.json()["items"][0]["full"]["url"].startswith("http")
 
     # ---- 12. UPLOAD ANOTHER CAPTURE (a later date, same locations) ------
     second_visit = datetime.now(UTC)
@@ -255,8 +255,8 @@ def test_full_mvp_workflow(
 
     # ---- 13. VIEW CAPTURE HISTORY ---------------------------------------
     history = client.get(f"/api/locations/{location_ids[2]}/frames", headers=headers).json()
-    assert len(history) == 2, "P03 should now have one frame from each visit"
-    assert history[0]["captured_at"] > history[1]["captured_at"]
+    assert history["total"] == 2, "P03 should now have one frame from each visit"
+    assert history["items"][0]["captured_at"] > history["items"][1]["captured_at"]
 
     timeline = client.get(f"/api/projects/{project_id}/timeline", headers=headers).json()
     assert timeline["location_total"] == 4
@@ -284,7 +284,7 @@ def test_full_mvp_workflow(
     assert steps == sorted(steps, key=lambda step: step["timestamp"])
 
     floor_paths = client.get(f"/api/floors/{floor_id}/paths", headers=headers).json()
-    assert len(floor_paths) == 2, "one path per visit"
+    assert floor_paths["total"] == 2, "one path per visit"
 
     # ---- 16. SEE COVERAGE -----------------------------------------------
     coverage = client.get(f"/api/projects/{project_id}/coverage", headers=headers).json()

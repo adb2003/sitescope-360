@@ -14,6 +14,7 @@ from app.api.deps import (
     RequireAnnotate,
     RequireCaptureRead,
     get_frame_or_404,
+    get_project_or_404,
     get_session_or_404,
 )
 from app.auth.membership import assert_member
@@ -85,11 +86,15 @@ def list_project_annotations(
     project_id: str,
     db: DbSession,
     page: Pagination,
-    _: RequireCaptureRead,
+    user: RequireCaptureRead,
     annotation_status: Annotated[AnnotationStatus | None, Query(alias="status")] = None,
     priority: Annotated[AnnotationPriority | None, Query()] = None,
     floor_id: Annotated[str | None, Query()] = None,
 ) -> Page[AnnotationDetail]:
+    # The project is resolved rather than merely filtered on. Filtering by an id the caller
+    # supplied answers "what is in that project", which is exactly the question a non-member
+    # must not have answered — and every annotation here carries a title and a description.
+    get_project_or_404(db, project_id, user)
     query = select(Annotation).where(Annotation.project_id == project_id)
     if annotation_status:
         query = query.where(Annotation.status == annotation_status)

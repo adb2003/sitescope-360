@@ -90,7 +90,8 @@ def test_the_whole_direct_path_produces_a_normal_capture_file(
     assert record["content_type"] == "image/jpeg"
 
     listed = client.get(f"/api/captures/{session_id}/files", headers=headers).json()
-    assert [item["id"] for item in listed] == [record["id"]]
+    assert listed["total"] == 1
+    assert [item["id"] for item in listed["items"]] == [record["id"]]
     # And the pipeline will accept it: the session is ready to finish and process.
     assert client.post(f"/api/captures/{session_id}/finish", headers=headers).status_code == 200
 
@@ -155,7 +156,8 @@ def test_a_disguised_file_is_rejected_and_deleted(client: TestClient, admin) -> 
 
     assert refused.status_code == 415
     assert not get_storage().exists(ticket["storage_key"]), "the rejected object was left behind"
-    assert client.get(f"/api/captures/{session_id}/files", headers=headers).json() == []
+    listed = client.get(f"/api/captures/{session_id}/files", headers=headers).json()
+    assert listed["items"] == [] and listed["total"] == 0
 
 
 def test_an_empty_object_is_rejected_and_deleted(client: TestClient, admin) -> None:
@@ -195,7 +197,7 @@ def test_registering_twice_yields_one_file(client: TestClient, admin, panorama_f
 
     assert first.status_code == 201
     assert second.json()["id"] == first.json()["id"]
-    assert len(client.get(f"/api/captures/{session_id}/files", headers=headers).json()) == 1
+    assert client.get(f"/api/captures/{session_id}/files", headers=headers).json()["total"] == 1
 
 
 def test_a_filename_that_disagrees_with_the_key_is_refused(
@@ -231,7 +233,7 @@ def test_a_read_link_cannot_be_replayed_as_an_upload(
 
     # A signed *read* URL for that stored object, exactly as the viewer receives it.
     detail = client.get(f"/api/captures/{session_id}/files", headers=headers).json()
-    read_url = next(item for item in detail if item["id"] == created["id"])["asset"]["url"]
+    read_url = next(item for item in detail["items"] if item["id"] == created["id"])["asset"]["url"]
 
     replayed = client.put(read_url.replace(settings.public_base_url, ""), content=b"overwritten")
 

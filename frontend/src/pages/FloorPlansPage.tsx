@@ -180,7 +180,7 @@ export function FloorPlansPage() {
                 <FloorPlanCanvas
                   plan={plan.data}
                   locations={locations.data ?? []}
-                  paths={paths.data ?? []}
+                  paths={paths.data?.items ?? []}
                   selectedLocationId={selectedLocationId}
                   editable={canEditPoints}
                   onSelectLocation={openLocation}
@@ -204,7 +204,7 @@ export function FloorPlansPage() {
                 />
               )}
 
-              {paths.data?.some((path) => path.provenance === 'estimated') ? (
+              {paths.data?.items.some((path) => path.provenance === 'estimated') ? (
                 <Callout tone="estimated" title="Some capture paths are estimated">
                   A dashed path was derived by visual positioning rather than manual placement. Its
                   shape is meaningful; its exact position on the plan is not guaranteed.

@@ -218,9 +218,9 @@ def test_the_new_walkthrough_reads_like_any_other_capture(
     frames = client.get(f"/api/captures/{child_id}/frames", headers=headers).json()["items"]
     assert [frame["sequence_index"] for frame in frames] == [0, 1, 2, 3, 4]
 
-    files = client.get(f"/api/captures/{child_id}/files", headers=headers).json()
+    files = client.get(f"/api/captures/{child_id}/files", headers=headers).json()["items"]
     assert len(files) == 5, "each still it inherited needs a file row of its own"
-    parent_files = client.get(f"/api/captures/{session_id}/files", headers=headers).json()
+    parent_files = client.get(f"/api/captures/{session_id}/files", headers=headers).json()["items"]
     assert {f["id"] for f in files}.isdisjoint({f["id"] for f in parent_files})
 
 
@@ -241,7 +241,7 @@ def test_the_original_stops_listing_the_files_whose_frames_left(
         headers=headers,
     )
 
-    parent_files = client.get(f"/api/captures/{session_id}/files", headers=headers).json()
+    parent_files = client.get(f"/api/captures/{session_id}/files", headers=headers).json()["items"]
 
     assert [file["original_filename"] for file in parent_files] == [
         f"g{index}.jpg" for index in range(5)

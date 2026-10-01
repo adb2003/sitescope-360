@@ -282,9 +282,12 @@ def test_a_projects_links_can_be_audited_in_one_place(client, admin_headers, sha
 
     listed = client.get(f"/api/projects/{project['id']}/shares", headers=admin_headers).json()
 
-    assert {row["label"] for row in listed} == {"one", "two"}
+    # A page, because this list only grows: dead links are kept deliberately, so the count is
+    # every link the project has ever had.
+    assert listed["total"] == 2
+    assert {row["label"] for row in listed["items"]} == {"one", "two"}
     # Dead links are listed too: hiding them answers "was this ever shared" wrongly.
-    assert {row["is_live"] for row in listed} == {True, False}
+    assert {row["is_live"] for row in listed["items"]} == {True, False}
 
 
 def test_a_token_is_never_written_to_the_logs(client, admin_headers, shared_frame) -> None:

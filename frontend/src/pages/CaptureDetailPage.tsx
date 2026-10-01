@@ -371,7 +371,7 @@ export function CaptureDetailPage() {
               <Skeleton className="h-8" />
               <Skeleton className="h-8" />
             </div>
-          ) : !files.data?.length ? (
+          ) : !files.data?.items.length ? (
             <EmptyState
               icon={CloudUpload}
               title="No files yet"
@@ -394,7 +394,7 @@ export function CaptureDetailPage() {
                 </tr>
               </thead>
               <tbody>
-                {files.data.map((file) => (
+                {files.data.items.map((file) => (
                   <Tr key={file.id}>
                     <Td className="max-w-[200px] truncate font-medium">
                       {file.original_filename}
@@ -454,9 +454,9 @@ export function CaptureDetailPage() {
             </Table>
           )}
 
-          {files.data?.some((file) => file.validation_warnings?.length) ? (
+          {files.data?.items.some((file) => file.validation_warnings?.length) ? (
             <div className="space-y-1.5 border-t border-line p-4">
-              {files.data
+              {files.data.items
                 .filter((file) => file.validation_warnings?.length)
                 .map((file) => (
                   <Callout key={file.id} tone="warn" title={file.original_filename}>

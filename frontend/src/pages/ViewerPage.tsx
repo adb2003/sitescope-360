@@ -340,7 +340,7 @@ export function ViewerPage() {
                       <FloorPlanCanvas
                         plan={plan.data}
                         locations={locations.data ?? []}
-                        paths={paths.data ?? []}
+                        paths={paths.data?.items ?? []}
                         selectedLocationId={frame?.location_id ?? null}
                         editable={false}
                         onSelectLocation={(location) => {

@@ -47,11 +47,12 @@ def project_dashboard(project_id: str, db: DbSession, user: RequireProjectRead) 
 def project_timeline(
     project_id: str,
     db: DbSession,
-    _: RequireProjectRead,
+    user: RequireProjectRead,
     floor_id: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=365)] = 60,
 ) -> TimelineOut:
     """Capture activity by date (§16)."""
+    get_project_or_404(db, project_id, user)
     return monitoring.compute_timeline(db, project_id, floor_id=floor_id, limit=limit)
 
 
@@ -59,7 +60,7 @@ def project_timeline(
 def project_coverage(
     project_id: str,
     db: DbSession,
-    _: RequireProjectRead,
+    user: RequireProjectRead,
     recent_days: Annotated[
         int | None,
         Query(ge=1, le=365, description="Only count locations captured within this window"),
@@ -70,6 +71,7 @@ def project_coverage(
     The response carries ``provenance`` and ``method`` because these numbers are derived from
     administrator-declared expectations, not measured from imagery.
     """
+    get_project_or_404(db, project_id, user)
     return monitoring.compute_coverage(db, project_id, recent_days=recent_days)
 
 
@@ -77,10 +79,11 @@ def project_coverage(
 def project_frequency(
     project_id: str,
     db: DbSession,
-    _: RequireProjectRead,
+    user: RequireProjectRead,
     floor_id: Annotated[str | None, Query()] = None,
 ) -> FrequencyStatusOut:
     """Last capture, days since, and due/overdue status (§20)."""
+    get_project_or_404(db, project_id, user)
     return monitoring.compute_frequency(db, project_id, floor_id=floor_id)
 
 
@@ -88,8 +91,9 @@ def project_frequency(
 def project_stale_areas(
     project_id: str,
     db: DbSession,
-    _: RequireProjectRead,
+    user: RequireProjectRead,
     threshold_days: Annotated[int, Query(ge=1, le=365)] = 14,
 ) -> StaleAreasOut:
     """Locations never captured, or not captured recently."""
+    get_project_or_404(db, project_id, user)
     return monitoring.find_stale_areas(db, project_id, threshold_days=threshold_days)

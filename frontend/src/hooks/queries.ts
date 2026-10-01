@@ -279,10 +279,17 @@ export function useCapturesNear(
   })
 }
 
+/**
+ * The walked routes on a floor, newest first.
+ *
+ * Asks for the maximum page because these are *drawn*, not listed — a canvas showing some of
+ * the paths with no way to reach the rest would be worse than a slow one. The response still
+ * carries `total`, so the plan can say when a floor has more history than it is drawing.
+ */
 export function useFloorPaths(floorId: string | null | undefined) {
   return useQuery({
     queryKey: keys.floorPaths(floorId ?? ''),
-    queryFn: () => api.get<CapturePath[]>(`/floors/${floorId}/paths`),
+    queryFn: () => api.get<Page<CapturePath>>(`/floors/${floorId}/paths`, { limit: 200 }),
     enabled: Boolean(floorId),
   })
 }
@@ -319,7 +326,7 @@ export function useCapture(sessionId: string | null | undefined) {
 export function useCaptureFiles(sessionId: string | null | undefined) {
   return useQuery({
     queryKey: keys.captureFiles(sessionId ?? ''),
-    queryFn: () => api.get<CaptureFileDetail[]>(`/captures/${sessionId}/files`),
+    queryFn: () => api.get<Page<CaptureFileDetail>>(`/captures/${sessionId}/files`),
     enabled: Boolean(sessionId),
   })
 }
@@ -380,7 +387,7 @@ export function useViewerManifest(frameId: string | null | undefined) {
 export function useLocationFrames(locationId: string | null | undefined) {
   return useQuery({
     queryKey: keys.locationFrames(locationId ?? ''),
-    queryFn: () => api.get<CaptureFrameDetail[]>(`/locations/${locationId}/frames`),
+    queryFn: () => api.get<Page<CaptureFrameDetail>>(`/locations/${locationId}/frames`),
     enabled: Boolean(locationId),
   })
 }
@@ -883,7 +890,7 @@ export function useRevokeShareLink(frameId: string) {
 export function useProjectShares(projectId: string | null | undefined) {
   return useQuery({
     queryKey: keys.projectShares(projectId ?? ''),
-    queryFn: () => api.get<ShareLink[]>(`/projects/${projectId}/shares`),
+    queryFn: () => api.get<Page<ShareLink>>(`/projects/${projectId}/shares`, { limit: 200 }),
     enabled: Boolean(projectId),
   })
 }

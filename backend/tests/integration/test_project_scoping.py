@@ -300,3 +300,126 @@ def test_naming_a_member_both_ways_at_once_is_refused(
     )
 
     assert refused.status_code == 422, refused.text
+
+
+# ---- the five other doors ----------------------------------------------------
+def test_the_reporting_views_of_another_project_are_out_of_reach(
+    outsider, client, admin_headers
+) -> None:
+    """Six routes answered these questions for anyone with an account.
+
+    Each of them took the project id, filtered on it, and never resolved it — the signature was
+    `_: RequireProjectRead`, which checks the *capability* and discards the user, so there was
+    no user to check membership with and nothing for a type checker to notice. `project_dashboard`
+    sits directly above `project_timeline` in the same module doing it correctly, which is how
+    the pattern survived.
+
+    Between them they are a readable account of a job's progress: what has been inspected, how
+    often, what is overdue, and every defect raised with its title and description.
+    """
+    headers, _mine, theirs = outsider
+
+    for path in (
+        f"/api/projects/{theirs['id']}/timeline",
+        f"/api/projects/{theirs['id']}/coverage",
+        f"/api/projects/{theirs['id']}/frequency",
+        f"/api/projects/{theirs['id']}/stale-areas",
+        f"/api/projects/{theirs['id']}/annotations",
+    ):
+        response = client.get(path, headers=headers)
+        assert response.status_code == 404, f"{path} answered: {response.text[:200]}"
+        assert response.json()["code"] == "not_found"
+
+
+def test_the_walked_routes_on_another_projects_floor_are_out_of_reach(
+    outsider, client, admin_headers
+) -> None:
+    """A capture path is the shape of somebody's walk through somebody else's building."""
+    headers, _mine, theirs = outsider
+    _building, floor_id = _floor_in(client, admin_headers, theirs["id"])
+
+    response = client.get(f"/api/floors/{floor_id}/paths", headers=headers)
+
+    assert response.status_code == 404, response.text
+
+
+def test_every_route_taking_a_scoped_id_enforces_membership() -> None:
+    """The guard, so this class of hole cannot come back quietly.
+
+    Reads the source rather than the responses, because the alternative — calling every route as
+    a non-member — cannot cover the ones needing a request body, and those are the writes. A
+    route that takes somebody else's id must *resolve* it through a helper that checks
+    membership; filtering a query by an id the caller supplied is not a check, it is the
+    question.
+
+    The resolver list is maintained by hand and that is deliberate: adding a new way to reach a
+    project should be a decision somebody makes, and this test failing is how it gets made.
+    """
+    import ast
+    from pathlib import Path
+
+    resolvers = {
+        "get_project_or_404",
+        "get_building_or_404",
+        "get_floor_or_404",
+        "get_session_or_404",
+        "get_frame_or_404",
+        "get_zone_or_404",
+        "get_plan_or_404",
+        "get_location_or_404",
+        "get_report_or_404",
+        "get_capture_file_or_404",
+        "assert_member",
+        "restrict_to_member_projects",
+        "visible_project_ids",
+        "member_floor_ids",
+        "is_member",
+        # Three modules resolve an id addressed directly — an annotation, a report — through a
+        # local helper that walks up to the project. Named here rather than inlined, because the
+        # walk is the same three lines in each and hiding it in the route would be worse.
+        "_get_or_404",
+    }
+    scoped = (
+        "{project_id}",
+        "{building_id}",
+        "{floor_id}",
+        "{session_id}",
+        "{frame_id}",
+        "{zone_id}",
+        "{plan_id}",
+        "{location_id}",
+        "{report_id}",
+        "{file_id}",
+        "{annotation_id}",
+    )
+
+    unguarded: list[str] = []
+    routes_dir = Path(__file__).resolve().parents[2] / "app" / "api" / "routes"
+    for module in sorted(routes_dir.glob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            paths = [
+                decorator.args[0].value
+                for decorator in node.decorator_list
+                if isinstance(decorator, ast.Call)
+                and decorator.args
+                and isinstance(decorator.args[0], ast.Constant)
+                and isinstance(decorator.args[0].value, str)
+            ]
+            touched = [path for path in paths if any(token in path for token in scoped)]
+            if not touched:
+                continue
+            called = {
+                call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", "")
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+            }
+            if not called & resolvers:
+                unguarded.extend(f"{module.name}:{node.lineno} {path}" for path in touched)
+
+    assert not unguarded, (
+        "These routes take an id belonging to a project and never resolve it through a "
+        f"membership check, so any account can read or write it: {unguarded}"
+    )

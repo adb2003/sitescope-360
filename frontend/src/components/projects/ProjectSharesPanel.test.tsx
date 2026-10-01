@@ -30,9 +30,13 @@ function link(overrides: Partial<ShareLink> = {}): ShareLink {
   }
 }
 
-function show(links: ShareLink[]) {
+function show(links: ShareLink[], total = links.length) {
+  // A page, not a bare array: the list only grows, because dead links are kept on purpose.
+  // `total` is separable from the rows so a short page can still report the whole count.
   vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-    new Response(JSON.stringify(links), { headers: { 'content-type': 'application/json' } }),
+    new Response(JSON.stringify({ items: links, total, limit: 200, offset: 0 }), {
+      headers: { 'content-type': 'application/json' },
+    }),
   )
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
@@ -75,5 +79,22 @@ describe('ProjectSharesPanel', () => {
 
     await screen.findByText('for the QS')
     expect(document.body.textContent).not.toMatch(/[A-Za-z0-9_-]{30,}/)
+  })
+
+  it('counts every link ever created, not the ones on this page', async () => {
+    // The list is paginated, so the rows on screen are what was fetched. "Ever created" is the
+    // whole point of the sentence, and reporting the page size would understate it silently —
+    // which is the specific way a leaked link gets missed.
+    show([link({ id: 'a', label: 'newest' })], 87)
+
+    expect(await screen.findByText(/of 87 ever created/)).toBeInTheDocument()
+    expect(screen.getByText(/showing the newest 1/)).toBeInTheDocument()
+  })
+
+  it('says nothing about truncation when the page is the whole list', async () => {
+    show([link({ id: 'a', label: 'only one' })])
+
+    expect(await screen.findByText(/of 1 ever created/)).toBeInTheDocument()
+    expect(screen.queryByText(/showing the newest/)).not.toBeInTheDocument()
   })
 })

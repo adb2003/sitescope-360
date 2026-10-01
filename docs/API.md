@@ -229,6 +229,37 @@ Every list endpoint returns the same envelope and caps `limit` at 200 (§35):
 
 Requesting `limit=5000` is a 422, not a silently truncated response.
 
+"Every list endpoint" was a claim rather than a fact for four of them —
+`/floors/{id}/paths`, `/locations/{id}/frames`, `/captures/{id}/files` and
+`/projects/{id}/shares` — and they were the four that grow for as long as a deployment runs: one
+path per visit (each carrying its whole `steps` array), one frame per visit to a place forever,
+one row per uploaded file, and every share link ever created, because dead ones are kept on
+purpose. `tests/integration/test_list_pagination.py` now reads the OpenAPI schema and fails on
+any `GET` returning a bare array unless it is listed there with a reason it is bounded by
+something other than time — a building's floors, a frame's annotations, a fixed catalogue.
+
+A client that wants a whole short list still asks for `limit=200`; what it cannot do any more is
+receive an unbounded one by accident.
+
+### Project scoping
+
+Every route that takes an id belonging to a project resolves it through a membership check, and
+answers **404** when the caller is not a member — never 403, which would confirm the resource
+exists to somebody who was never told about it.
+
+Six routes did not. `/projects/{id}/timeline`, `/coverage`, `/frequency`, `/stale-areas` and
+`/annotations`, plus `/floors/{id}/paths`, took the id, filtered a query on it, and never
+resolved it: their signature was `_: RequireProjectRead`, which checks the *capability* and
+discards the user, so there was no user left to check membership with and nothing for a type
+checker to catch. Between them they answered what had been inspected, how often, what was
+overdue, and every defect raised with its title — to any account in the deployment.
+
+`tests/integration/test_project_scoping.py` now carries both a behavioural test (a non-member
+asking for each of them) and a guard that walks the route table and fails on any route taking a
+scoped id without calling a resolver. The resolver list in that guard is maintained by hand on
+purpose: a new way to reach a project should be a decision somebody makes, and the test failing
+is how it gets made.
+
 ### Signed assets
 
 Binary objects are never exposed as filesystem paths. Any response referencing an image, video,

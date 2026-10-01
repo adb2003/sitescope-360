@@ -17,9 +17,9 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from app.api.deps import DbSession, RequireCaptureRead, get_frame_or_404
+from app.api.deps import DbSession, Pagination, RequireCaptureRead, get_frame_or_404
 from app.auth.membership import assert_member
 from app.auth.ratelimit import check_share_address
 from app.core.errors import NotFoundError
@@ -38,7 +38,7 @@ from app.schemas.capture import (
     ShareLinkCreated,
     ShareLinkOut,
 )
-from app.schemas.common import Message
+from app.schemas.common import Message, Page
 from app.services import sharing
 from app.services.assets import sign
 
@@ -124,18 +124,25 @@ def list_frame_shares(frame_id: str, db: DbSession, user: RequireCaptureRead) ->
     return [_out(row) for row in rows]
 
 
-@router.get("/projects/{project_id}/shares", response_model=list[ShareLinkOut])
+@router.get("/projects/{project_id}/shares", response_model=Page[ShareLinkOut])
 def list_project_shares(
-    project_id: str, db: DbSession, user: RequireCaptureRead
-) -> list[ShareLinkOut]:
-    """Every link into this project — the page someone opens to audit what is out there."""
+    project_id: str, db: DbSession, page: Pagination, user: RequireCaptureRead
+) -> Page[ShareLinkOut]:
+    """Every link into this project — the page someone opens to audit what is out there.
+
+    Paginated, and newest first. Dead links are listed deliberately, because "was this ever
+    shared, and how widely" is half the question the page exists to answer — which also means
+    the list only ever grows, for as long as the project runs.
+    """
     assert_member(db, user, project_id, what=f"Project {project_id}")
+    query = select(ShareLink).where(ShareLink.project_id == project_id)
+    total = int(db.scalar(select(func.count()).select_from(query.subquery())) or 0)
     rows = db.scalars(
-        select(ShareLink)
-        .where(ShareLink.project_id == project_id)
-        .order_by(ShareLink.created_at.desc())
+        query.order_by(ShareLink.created_at.desc()).limit(page.limit).offset(page.offset)
     )
-    return [_out(row) for row in rows]
+    return Page(
+        items=[_out(row) for row in rows], total=total, limit=page.limit, offset=page.offset
+    )
 
 
 @router.delete("/shares/{share_id}", response_model=Message)

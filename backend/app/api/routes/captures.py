@@ -478,33 +478,47 @@ def register_direct_upload(
     return CaptureFileOut.model_validate(record)
 
 
-@router.get("/captures/{session_id}/files", response_model=list[CaptureFileDetail])
+@router.get("/captures/{session_id}/files", response_model=Page[CaptureFileDetail])
 def list_capture_files(
-    session_id: str, db: DbSession, user: RequireCaptureRead
-) -> list[CaptureFileDetail]:
+    session_id: str, db: DbSession, page: Pagination, user: RequireCaptureRead
+) -> Page[CaptureFileDetail]:
+    """The files in one upload, with their metadata and frame counts.
+
+    Paginated because one upload is not one file: a day of stills arrives as several hundred,
+    each becoming a row here with its full EXIF payload attached.
+    """
     get_session_or_404(db, session_id, user)
+    query = select(CaptureFile).where(CaptureFile.session_id == session_id)
+    total = int(db.scalar(select(func.count()).select_from(query.subquery())) or 0)
     files = list(
-        db.scalars(
-            select(CaptureFile)
-            .where(CaptureFile.session_id == session_id)
-            .order_by(CaptureFile.created_at)
-        )
+        db.scalars(query.order_by(CaptureFile.created_at).limit(page.limit).offset(page.offset))
     )
-    details: list[CaptureFileDetail] = []
-    for item in files:
-        frame_count = int(
-            db.scalar(select(func.count(CaptureFrame.id)).where(CaptureFrame.file_id == item.id))
-            or 0
-        )
-        details.append(
+
+    # One grouped count for the page, not one query per file. At several hundred stills the old
+    # shape issued several hundred round trips to render a table nobody had scrolled yet.
+    counts: dict[str, int] = {}
+    if files:
+        rows = db.execute(
+            select(CaptureFrame.file_id, func.count(CaptureFrame.id))
+            .where(CaptureFrame.file_id.in_([item.id for item in files]))
+            .group_by(CaptureFrame.file_id)
+        ).all()
+        counts = {str(file_id): int(count) for file_id, count in rows}
+
+    return Page(
+        items=[
             CaptureFileDetail(
                 **CaptureFileOut.model_validate(item).model_dump(),
                 metadata_json=item.metadata_json,
-                frame_count=frame_count,
+                frame_count=counts.get(item.id, 0),
                 asset=sign(item.storage_key),
             )
-        )
-    return details
+            for item in files
+        ],
+        total=total,
+        limit=page.limit,
+        offset=page.offset,
+    )
 
 
 @router.delete("/captures/{session_id}/files/{file_id}", response_model=Message)
@@ -896,19 +910,36 @@ def get_capture_path(session_id: str, db: DbSession, user: RequireCaptureRead) -
     return CapturePathOut.model_validate(path)
 
 
-@router.get("/floors/{floor_id}/paths", response_model=list[CapturePathOut])
+@router.get("/floors/{floor_id}/paths", response_model=Page[CapturePathOut])
 def list_floor_paths(
     floor_id: str,
     db: DbSession,
-    _: RequireCaptureRead,
+    page: Pagination,
+    user: RequireCaptureRead,
     session_id: Annotated[str | None, Query()] = None,
-) -> list[CapturePathOut]:
-    """Capture paths on a floor — one polyline per visit, drawn over the plan (§13)."""
+) -> Page[CapturePathOut]:
+    """Capture paths on a floor — one polyline per visit, drawn over the plan (§13).
+
+    Paginated, and newest first, because this response grows for as long as the floor is in use.
+    A path carries its whole ``steps`` array — every frame, at roughly 180 bytes each — so a
+    floor walked weekly for two years is megabytes of polyline in one reply, fetched every time
+    somebody opens the plan. Newest first means the default page is the paths anybody actually
+    wants to see drawn.
+    """
+    get_floor_or_404(db, floor_id, user)
     query = select(CapturePath).where(CapturePath.floor_id == floor_id)
     if session_id:
         query = query.where(CapturePath.session_id == session_id)
-    rows = db.scalars(query.order_by(CapturePath.created_at.desc()))
-    return [CapturePathOut.model_validate(row) for row in rows]
+    total = int(db.scalar(select(func.count()).select_from(query.subquery())) or 0)
+    rows = db.scalars(
+        query.order_by(CapturePath.created_at.desc()).limit(page.limit).offset(page.offset)
+    )
+    return Page(
+        items=[CapturePathOut.model_validate(row) for row in rows],
+        total=total,
+        limit=page.limit,
+        offset=page.offset,
+    )
 
 
 # ---- comparison --------------------------------------------------------------
@@ -936,17 +967,28 @@ def compare_location_dates(
     return viewer_service.find_comparison_pair(db, location_id, date_a=date_a, date_b=date_b)
 
 
-@router.get("/locations/{location_id}/frames", response_model=list[CaptureFrameDetail])
+@router.get("/locations/{location_id}/frames", response_model=Page[CaptureFrameDetail])
 def location_frames(
-    location_id: str, db: DbSession, user: RequireCaptureRead
-) -> list[CaptureFrameDetail]:
-    """Capture history at one location, newest first — the timeline strip in the viewer."""
+    location_id: str, db: DbSession, page: Pagination, user: RequireCaptureRead
+) -> Page[CaptureFrameDetail]:
+    """Capture history at one location, newest first — the timeline strip in the viewer.
+
+    Paginated because this is the one list in the product that grows forever by design: a
+    location accumulates one frame per visit for the life of the job, and comparing dates at a
+    place is the feature that makes people revisit it. Newest first, so the default page is the
+    recent history the strip opens on.
+    """
     get_location_or_404(db, location_id, user)
+    query = select(CaptureFrame).where(CaptureFrame.location_id == location_id)
+    total = int(db.scalar(select(func.count()).select_from(query.subquery())) or 0)
     frames = list(
         db.scalars(
-            select(CaptureFrame)
-            .where(CaptureFrame.location_id == location_id)
-            .order_by(CaptureFrame.captured_at.desc())
+            query.order_by(CaptureFrame.captured_at.desc()).limit(page.limit).offset(page.offset)
         )
     )
-    return [viewer_service.frame_detail(db, frame) for frame in frames]
+    return Page(
+        items=[viewer_service.frame_detail(db, frame) for frame in frames],
+        total=total,
+        limit=page.limit,
+        offset=page.offset,
+    )

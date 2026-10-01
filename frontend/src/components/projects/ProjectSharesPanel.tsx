@@ -65,7 +65,7 @@ export function ProjectSharesPanel({ projectId }: { projectId: string }) {
   const revoke = useRevokeProjectShare(projectId)
   const [error, setError] = useState<string | null>(null)
 
-  const links = shares.data ? ordered(shares.data) : []
+  const links = shares.data ? ordered(shares.data.items) : []
   const liveCount = links.filter((link) => link.is_live).length
 
   return (
@@ -88,8 +88,15 @@ export function ProjectSharesPanel({ projectId }: { projectId: string }) {
           />
         ) : (
           <>
+            {/*
+              `total` and not `links.length`. The list is paginated, so the number of rows on
+              screen is how many were fetched — and "ever created" is the whole point of the
+              sentence. Reporting the page size would understate it the moment a project has
+              more links than one page.
+            */}
             <p className="mb-2 text-xs text-ink-subtle">
-              {liveCount} live of {links.length} ever created.
+              {liveCount} live of {shares.data?.total ?? links.length} ever created
+              {links.length < (shares.data?.total ?? 0) ? `, showing the newest ${links.length}` : ''}.
             </p>
             <Table>
               <thead>

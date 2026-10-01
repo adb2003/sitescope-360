@@ -642,6 +642,22 @@ membership check lives there and a new route that loads a frame cannot forget it
 argument on those resolvers is **required**, which is the whole trick: adding the parameter turned
 66 call sites into type errors, and a missed one is a failed build rather than a silent hole.
 
+**The required-argument trick has a hole, and six routes sat in it.** Making `user` required on
+the resolvers turns a forgotten call site into a type error — but only for a route that calls a
+resolver at all. `/projects/{id}/timeline`, `/coverage`, `/frequency`, `/stale-areas` and
+`/annotations`, plus `/floors/{id}/paths`, took the project or floor id, filtered a query on it,
+and resolved nothing. Their signature was `_: RequireProjectRead`: the capability guard runs, and
+the user it returns is thrown away, so there was no argument to require and nothing to type-check.
+`project_dashboard` sits directly above `project_timeline` in the same module doing it correctly,
+which is how the pattern survived being read.
+
+They answered, to any account in the deployment, what had been inspected, how often, what was
+overdue, and every defect raised with its title and description. Found by walking the route table
+rather than by reading it, and the walk is now a test: `test_project_scoping` fails on any route
+taking a scoped id that calls no resolver. The lesson worth keeping is that "enforced in the
+resolvers" is only a guarantee for code that goes through them, and nothing structural was
+stopping a route from not.
+
 That covered most of the API and not all of it, and the gap was instructive. Routes that address
 a resource by *its own* id — `/annotations/{id}`, `/reports/{id}`, `/locations/{id}`,
 `/floorplans/{id}`, `/zones/{id}` — resolve no parent, so they had no resolver to check. Each got

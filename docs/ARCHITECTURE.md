@@ -915,7 +915,21 @@ See [CAMERA_INTEGRATION.md](CAMERA_INTEGRATION.md).
 - Panorama textures are loaded on demand, cached with an LRU bounded by count, and disposed on
   unmount to keep WebGL memory flat.
 - Aggregates (coverage, timeline buckets, dashboard tiles) are computed with SQL aggregation, not
-  by materializing rows in Python.
+  by materializing rows in Python — and the portfolio aggregates across *all* visible projects in
+  one set of grouped queries rather than looping. It did loop, and the cost was measured rather
+  than suspected: 77 queries for six projects, 149 for twelve, so twelve per project on the first
+  screen after signing in. A contractor with fifty live jobs would have issued around six hundred.
+  It is now a fixed eleven.
+- Detail for a *page* of frames is assembled in a fixed number of queries, not one set per row.
+  `viewer.frame_details` fetches the session context once per distinct session — a list shares
+  one — plus one quality query and one grouped annotation count for the whole page. Per frame it
+  cost five: 9 queries for one frame, 54 for ten, 104 for twenty, so the default page of fifty
+  ran to about 254. It is now eight at any page size.
+- Neither is visible on demo data, which is why both are held by `tests/integration/
+  test_query_counts.py` — it counts statements and asserts the count does not change with the
+  number of rows. A ceiling alone would not do: the frame list passed `< 15` while still growing
+  per row, because the remaining lazy load arrived *through* the serialiser rather than from any
+  line that looked like a query.
 - Signed URLs are cacheable and CDN-frontable via `CDN_BASE_URL`, which replaces the scheme, host
   and any path prefix while carrying the signed query string through untouched. With `local`
   storage that is unconditional (the HMAC does not cover the host); with `s3` the distribution
@@ -926,10 +940,13 @@ See [CAMERA_INTEGRATION.md](CAMERA_INTEGRATION.md).
 
 ## 10. Observability
 
-Structured JSON logs with a correlation id per request and per job, emitting the domain events
-required by §45: `capture.created`, `file.uploaded`, `processing.started`, `processing.stage.done`,
-`processing.failed`, `processing.completed`, `mapping.completed`, `viewer.opened`. The admin
-processing dashboard reads `processing_jobs` directly, giving the exact table in §45.
+Structured JSON logs with a correlation id per request and per job. The domain event names are
+registered in `app/core/audit.py` and reported by `GET /api/system/events`; a unit test holds that
+registry to the `log_event()` calls in the package, in both directions. They are deliberately not
+listed again here — this paragraph previously named eight of them, one of which
+(`processing.stage.done`) had never existed, and that is the failure mode a registry exists to
+prevent. The admin processing dashboard reads `processing_jobs` directly, giving the exact table
+in §45.
 
 ---
 

@@ -1,0 +1,267 @@
+"""The hot endpoints must not issue one query per row (§35, §40).
+
+Two of them did, and neither is visible on a demo project — which is the whole difficulty. A
+list that costs five queries per row is indistinguishable from a fast one until the data
+arrives, and by then it is the landing page.
+
+Measured before the fix:
+
+* `GET /captures/{id}/frames` — 9 queries for one frame, 54 for ten, 104 for twenty. Four fixed
+  plus five per frame, so the default page of fifty cost about 254. It backs the capture page
+  and the viewer's timeline strip.
+* `GET /dashboard` — 77 queries for six projects, 149 for twelve. Twelve per project, on the
+  first screen after signing in.
+
+These tests count statements rather than time, because a timing assertion on a developer laptop
+is a flake and a statement count is the actual defect. The ceilings are deliberately loose: the
+point is to catch a return to *per-row* growth, not to freeze an exact number that a legitimate
+extra join would trip over.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import event
+
+from app.database.session import engine
+from tests.conftest import auth_headers
+
+
+class Counter:
+    """Counts SQL statements issued while it is armed."""
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.armed = False
+
+    def __enter__(self) -> Counter:
+        self.count = 0
+        self.armed = True
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.armed = False
+
+
+@pytest.fixture
+def sql() -> Iterator[Counter]:
+    counter = Counter()
+
+    def listen(*_args: object, **_kwargs: object) -> None:
+        if counter.armed:
+            counter.count += 1
+
+    event.listen(engine, "before_cursor_execute", listen)
+    try:
+        yield counter
+    finally:
+        event.remove(engine, "before_cursor_execute", listen)
+
+
+@pytest.fixture
+def capture_with_frames(client: TestClient, admin, panorama_factory):
+    """One capture holding six frames, processed."""
+    from tests.integration.test_definition_of_done import _await_ready
+
+    headers = auth_headers(client, admin.email)
+    project = client.post(
+        "/api/projects", json={"name": "Counts", "code": "QCNT-1"}, headers=headers
+    ).json()
+    building = client.post(
+        f"/api/projects/{project['id']}/buildings", json={"name": "B"}, headers=headers
+    ).json()
+    floor = client.post(
+        f"/api/buildings/{building['id']}/floors",
+        json={"name": "L1", "level": 1},
+        headers=headers,
+    ).json()
+    session_id = client.post(
+        "/api/captures", json={"floor_id": floor["id"]}, headers=headers
+    ).json()["id"]
+    for index in range(6):
+        client.post(
+            f"/api/captures/{session_id}/upload",
+            files={
+                "files": (
+                    f"f{index}.jpg",
+                    panorama_factory((index * 1.2, 0.0, 0.0)),
+                    "image/jpeg",
+                )
+            },
+            headers=headers,
+        )
+    client.post(f"/api/captures/{session_id}/finish", headers=headers)
+    client.post(f"/api/captures/{session_id}/process", json={}, headers=headers)
+    _await_ready(client, headers, session_id)
+    return headers, session_id
+
+
+def test_listing_frames_costs_the_same_for_two_as_for_six(
+    client: TestClient, capture_with_frames, sql
+) -> None:
+    """The shape of the bug: a flat cost, not a small one.
+
+    Asserting equality rather than a ceiling, because any per-row query shows up here as a
+    difference however cheap it is. This caught a lazy load arriving *through* the serialiser —
+    `CaptureFrameOut` has a `quality` field, so validating the ORM object re-queried it even
+    after the batch fetch was added, and the count stayed at one per frame.
+    """
+    headers, session_id = capture_with_frames
+
+    with sql as counter:
+        client.get(f"/api/captures/{session_id}/frames", headers=headers, params={"limit": 2})
+        two = counter.count
+    with sql as counter:
+        client.get(f"/api/captures/{session_id}/frames", headers=headers, params={"limit": 6})
+        six = counter.count
+
+    assert two == six, f"{two} queries for two frames, {six} for six — the cost is per row"
+    assert six < 15, f"{six} queries for one page of frames"
+
+
+def test_the_portfolio_costs_the_same_for_one_project_as_for_five(
+    client: TestClient, admin, sql
+) -> None:
+    """The landing page. Twelve queries per project meant ~600 for a contractor with fifty."""
+    headers = auth_headers(client, admin.email)
+    first = client.post(
+        "/api/projects", json={"name": "Folio 0", "code": "QFOL-0"}, headers=headers
+    ).json()
+    building = client.post(
+        f"/api/projects/{first['id']}/buildings", json={"name": "B"}, headers=headers
+    ).json()
+    client.post(
+        f"/api/buildings/{building['id']}/floors",
+        json={"name": "L1", "level": 1},
+        headers=headers,
+    )
+
+    with sql as counter:
+        client.get("/api/dashboard", headers=headers)
+        one = counter.count
+
+    for index in range(1, 5):
+        more = client.post(
+            "/api/projects",
+            json={"name": f"Folio {index}", "code": f"QFOL-{index}"},
+            headers=headers,
+        ).json()
+        block = client.post(
+            f"/api/projects/{more['id']}/buildings", json={"name": "B"}, headers=headers
+        ).json()
+        client.post(
+            f"/api/buildings/{block['id']}/floors",
+            json={"name": "L1", "level": 1},
+            headers=headers,
+        )
+
+    with sql as counter:
+        body = client.get("/api/dashboard", headers=headers).json()
+        five = counter.count
+
+    assert body["total_projects"] == 5
+    assert one == five, f"{one} queries for one project, {five} for five — the cost is per row"
+    assert five < 20, f"{five} queries to render the landing page"
+
+
+def test_the_portfolio_agrees_with_the_coverage_and_frequency_pages(
+    client: TestClient, admin, panorama_factory
+) -> None:
+    """Two ways of computing a number is two numbers unless something holds them together.
+
+    The portfolio aggregates coverage and frequency across every project at once; the project
+    pages compute them one at a time. The due/overdue rule is shared outright, but the coverage
+    ratio has to be aggregated differently to be grouped — so this asks both and compares.
+
+    The shape of the project matters, and a simpler one would make this test worthless. The
+    coverage page clamps each floor's visits to that floor's expectation before summing, so the
+    grouped query is only *visibly* wrong when one floor is covered beyond its expectation while
+    another is not covered at all — a finished floor and an untouched one, which is what a job
+    in progress looks like. With a single floor, `_ratio`'s own cap hides the difference
+    entirely, and an earlier version of this test passed against the bug for exactly that
+    reason. On the demo data the real mistake read 0.82 where the coverage page said 0.42.
+    """
+    from app.database.session import SessionLocal
+    from app.services import monitoring
+    from tests.integration.test_definition_of_done import _await_ready
+
+    headers = auth_headers(client, admin.email)
+    project = client.post(
+        "/api/projects", json={"name": "Agree", "code": "QAGR-1"}, headers=headers
+    ).json()
+    building = client.post(
+        f"/api/projects/{project['id']}/buildings", json={"name": "B"}, headers=headers
+    ).json()
+
+    def floor_with_zone(name: str, level: int, expected: int) -> str:
+        floor = client.post(
+            f"/api/buildings/{building['id']}/floors",
+            json={"name": name, "level": level},
+            headers=headers,
+        ).json()
+        client.post(
+            f"/api/floors/{floor['id']}/zones",
+            json={"name": f"Z{level}", "expected_capture_points": expected},
+            headers=headers,
+        )
+        return str(floor["id"])
+
+    # One floor finished beyond its plan, one not started. The clamp is the difference between
+    # "that floor is done" and "the extra visits make the untouched floor look covered".
+    done_floor = floor_with_zone("Done", 1, expected=2)
+    floor_with_zone("Untouched", 2, expected=10)
+
+    session_id = client.post(
+        "/api/captures", json={"floor_id": done_floor}, headers=headers
+    ).json()["id"]
+    for index in range(3):
+        client.post(
+            f"/api/captures/{session_id}/upload",
+            files={
+                "files": (
+                    f"a{index}.jpg",
+                    panorama_factory((index * 1.2, 0.0, 0.0)),
+                    "image/jpeg",
+                )
+            },
+            headers=headers,
+        )
+    client.post(f"/api/captures/{session_id}/finish", headers=headers)
+    client.post(f"/api/captures/{session_id}/process", json={}, headers=headers)
+    _await_ready(client, headers, session_id)
+
+    # Three visited points on a floor expecting two.
+    frames = client.get(f"/api/captures/{session_id}/frames", headers=headers).json()["items"]
+    for index, frame in enumerate(frames[:3]):
+        placed = client.put(
+            f"/api/frames/{frame['id']}/location",
+            json={"x": 100.0 + index * 50.0, "y": 100.0},
+            headers=headers,
+        )
+        assert placed.status_code == 200, placed.text
+
+    row = next(
+        item
+        for item in client.get("/api/dashboard", headers=headers).json()["projects"]
+        if item["project_id"] == project["id"]
+    )
+    db = SessionLocal()
+    try:
+        coverage = monitoring.compute_coverage(db, project["id"])
+        frequency = monitoring.compute_frequency(db, project["id"])
+    finally:
+        db.close()
+
+    # The project is genuinely part-covered, or the comparison below proves nothing: two
+    # identical zeroes agree just as well as two correct numbers.
+    assert 0.0 < coverage.coverage_ratio < 1.0, (
+        f"the fixture must be partly covered to be worth comparing, got {coverage.coverage_ratio}"
+    )
+    assert row["coverage_ratio"] == pytest.approx(coverage.coverage_ratio), (
+        f"portfolio says {row['coverage_ratio']}, the coverage page says {coverage.coverage_ratio}"
+    )
+    assert row["frequency_status"] == str(frequency.status)
+    assert row["last_capture_at"] is not None

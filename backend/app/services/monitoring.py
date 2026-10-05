@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
@@ -343,6 +344,36 @@ def compute_timeline(
 
 
 # ---- capture frequency -------------------------------------------------------
+def _frequency_verdict(
+    last_capture: datetime | None,
+    *,
+    expected_per_week: float,
+    grace_days: int,
+    now: datetime,
+) -> tuple[CaptureFrequencyStatus, int | None, date | None]:
+    """Due, overdue, or fine — the one place that decides.
+
+    Extracted so the per-project endpoint and the portfolio cannot drift apart. They used to
+    share it by both calling `compute_frequency`, which cost a dozen queries per project on the
+    landing page; now they share the rule instead of the round trips.
+    """
+    if last_capture is None:
+        return CaptureFrequencyStatus.NEVER_CAPTURED, None, None
+
+    days_since = (now - last_capture).days
+    # Two per week means one every 3.5 days; that is the interval, not "twice on Monday".
+    interval_days = 7.0 / expected_per_week if expected_per_week > 0 else None
+    if interval_days is None:
+        return CaptureFrequencyStatus.OK, days_since, None
+
+    next_expected = (last_capture + timedelta(days=interval_days)).date()
+    if now > last_capture + timedelta(days=interval_days + grace_days):
+        return CaptureFrequencyStatus.OVERDUE, days_since, next_expected
+    if now >= last_capture + timedelta(days=interval_days):
+        return CaptureFrequencyStatus.DUE, days_since, next_expected
+    return CaptureFrequencyStatus.OK, days_since, next_expected
+
+
 def compute_frequency(
     db: Session, project_id: str, *, floor_id: str | None = None
 ) -> FrequencyStatusOut:
@@ -394,26 +425,9 @@ def compute_frequency(
         floor = db.get(Floor, floor_id)
         floor_name = floor.name if floor else None
 
-    if last_capture is None:
-        status = CaptureFrequencyStatus.NEVER_CAPTURED
-        days_since = None
-        next_expected = None
-    else:
-        days_since = (now - last_capture).days
-        # Two per week means one every 3.5 days; that is the interval, not "twice on Monday".
-        interval_days = 7.0 / expected_per_week if expected_per_week > 0 else None
-        if interval_days is None:
-            status = CaptureFrequencyStatus.OK
-            next_expected = None
-        else:
-            next_expected = (last_capture + timedelta(days=interval_days)).date()
-            overdue_after = last_capture + timedelta(days=interval_days + grace_days)
-            if now > overdue_after:
-                status = CaptureFrequencyStatus.OVERDUE
-            elif now >= last_capture + timedelta(days=interval_days):
-                status = CaptureFrequencyStatus.DUE
-            else:
-                status = CaptureFrequencyStatus.OK
+    status, days_since, next_expected = _frequency_verdict(
+        last_capture, expected_per_week=expected_per_week, grace_days=grace_days, now=now
+    )
 
     return FrequencyStatusOut(
         project_id=project_id,
@@ -613,74 +627,193 @@ def build_portfolio(
 ) -> PortfolioOut:
     """Cross-project overview for the top-level dashboard.
 
-    ``project_ids`` restricts it to the caller's projects; ``None`` means no restriction, which is
-    what an administrator gets. Passed in rather than resolved here so this service keeps knowing
-    nothing about authentication — the route decides who is asking, and this counts what it is
-    told to count.
+    ``project_ids`` restricts it to the caller's projects; ``None`` means no restriction, which
+    is what an administrator gets. Passed in rather than resolved here so this service keeps
+    knowing nothing about authentication — the route decides who is asking, and this counts what
+    it is told to count.
+
+    Every figure is a grouped query over the whole set rather than a loop over projects. This
+    used to call `compute_coverage` and `compute_frequency` per project and then count sessions,
+    frames and annotations one project at a time: measured at twelve queries per project, so a
+    contractor with fifty live jobs issued around six hundred to render the first screen after
+    signing in. It is now a fixed handful, and `tests/integration/test_query_counts.py` holds it
+    there.
+
+    The risk in computing a number two ways is that the two answers drift. The due/overdue rule
+    is therefore shared outright (`_frequency_verdict`), and the coverage ratio — which has to be
+    aggregated differently to be grouped — is pinned to `compute_coverage` by a test that asks
+    both and compares.
     """
     query = select(Project)
     if project_ids is not None:
         query = query.where(Project.id.in_(project_ids))
     projects = list(db.scalars(query.order_by(Project.name).limit(limit)))
+    if not projects:
+        return PortfolioOut(
+            projects=[], total_projects=0, total_sessions=0, total_frames=0, overdue_count=0
+        )
+
+    ids = [project.id for project in projects]
+    floors_by_project = _floor_ids_by_project(db, ids)
+    sessions_by_project = _counts_by_project(
+        db, select(CaptureSession.project_id, func.count(CaptureSession.id)), ids
+    )
+    frames_by_project = _counts_by_project(
+        db,
+        select(CaptureSession.project_id, func.count(CaptureFrame.id)).join(
+            CaptureFrame, CaptureFrame.session_id == CaptureSession.id
+        ),
+        ids,
+        column=CaptureSession.project_id,
+    )
+    annotations_by_project = _counts_by_project(
+        db,
+        select(Annotation.project_id, func.count(Annotation.id)).where(
+            Annotation.status != AnnotationStatus.RESOLVED
+        ),
+        ids,
+        column=Annotation.project_id,
+    )
+    ratios = _coverage_ratios(db, floors_by_project)
+    last_capture = _last_capture_by_project(db, ids)
+    schedules = _default_schedules(db, ids)
+
+    now = datetime.now(UTC)
     rows: list[PortfolioRow] = []
     overdue = 0
-    total_sessions = 0
-    total_frames = 0
-
     for project in projects:
-        coverage = compute_coverage(db, project.id)
-        frequency = compute_frequency(db, project.id)
-        floor_ids = _floor_ids_for_project(db, project.id)
-        session_count = int(
-            db.scalar(
-                select(func.count(CaptureSession.id)).where(CaptureSession.project_id == project.id)
-            )
-            or 0
+        schedule = schedules.get(project.id)
+        status, _days, _next = _frequency_verdict(
+            last_capture.get(project.id),
+            expected_per_week=(
+                schedule.expected_per_week if schedule else project.expected_captures_per_week
+            ),
+            grace_days=schedule.grace_days if schedule else 1,
+            now=now,
         )
-        frame_count = int(
-            db.scalar(
-                select(func.count(CaptureFrame.id))
-                .join(CaptureSession, CaptureSession.id == CaptureFrame.session_id)
-                .where(CaptureSession.project_id == project.id)
-            )
-            or 0
-        )
-        open_annotations = int(
-            db.scalar(
-                select(func.count(Annotation.id)).where(
-                    Annotation.project_id == project.id,
-                    Annotation.status != AnnotationStatus.RESOLVED,
-                )
-            )
-            or 0
-        )
-        if frequency.status is CaptureFrequencyStatus.OVERDUE:
+        if status is CaptureFrequencyStatus.OVERDUE:
             overdue += 1
-        total_sessions += session_count
-        total_frames += frame_count
-
         rows.append(
             PortfolioRow(
                 project_id=project.id,
                 project_name=project.name,
                 project_code=project.code,
                 status=str(project.status),
-                floor_count=len(floor_ids),
-                session_count=session_count,
-                coverage_ratio=coverage.coverage_ratio,
-                last_capture_at=frequency.last_capture_at,
-                frequency_status=frequency.status,
-                open_annotations=open_annotations,
+                floor_count=len(floors_by_project.get(project.id, [])),
+                session_count=sessions_by_project.get(project.id, 0),
+                coverage_ratio=ratios.get(project.id, 0.0),
+                last_capture_at=last_capture.get(project.id),
+                frequency_status=status,
+                open_annotations=annotations_by_project.get(project.id, 0),
             )
         )
 
     return PortfolioOut(
         projects=rows,
         total_projects=len(rows),
-        total_sessions=total_sessions,
-        total_frames=total_frames,
+        total_sessions=sum(sessions_by_project.get(p.id, 0) for p in projects),
+        total_frames=sum(frames_by_project.get(p.id, 0) for p in projects),
         overdue_count=overdue,
     )
+
+
+def _floor_ids_by_project(db: Session, project_ids: list[str]) -> dict[str, list[str]]:
+    rows = db.execute(
+        select(Building.project_id, Floor.id)
+        .join(Floor, Floor.building_id == Building.id)
+        .where(Building.project_id.in_(project_ids))
+    ).all()
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for project_id, floor_id in rows:
+        grouped[str(project_id)].append(str(floor_id))
+    return grouped
+
+
+def _counts_by_project(
+    db: Session, query: Select, project_ids: list[str], *, column: Any = None
+) -> dict[str, int]:
+    """``{project_id: count}`` from a two-column (id, count) select."""
+    grouping = column if column is not None else CaptureSession.project_id
+    rows = db.execute(query.where(grouping.in_(project_ids)).group_by(grouping)).all()
+    return {str(project_id): int(count) for project_id, count in rows}
+
+
+def _last_capture_by_project(db: Session, project_ids: list[str]) -> dict[str, datetime]:
+    rows = db.execute(
+        select(CaptureSession.project_id, func.max(CaptureSession.started_at))
+        .where(
+            CaptureSession.project_id.in_(project_ids),
+            CaptureSession.status == CaptureSessionStatus.READY,
+        )
+        .group_by(CaptureSession.project_id)
+    ).all()
+    return {str(project_id): moment for project_id, moment in rows if moment is not None}
+
+
+def _default_schedules(db: Session, project_ids: list[str]) -> dict[str, CaptureSchedule]:
+    """The project-wide schedule row, where one exists. Floor overrides do not apply here."""
+    rows = db.scalars(
+        select(CaptureSchedule).where(
+            CaptureSchedule.project_id.in_(project_ids),
+            CaptureSchedule.floor_id.is_(None),
+        )
+    )
+    return {str(row.project_id): row for row in rows}
+
+
+def _coverage_ratios(db: Session, floors_by_project: dict[str, list[str]]) -> dict[str, float]:
+    """Visited capture points over expected, per project, in three queries for all of them.
+
+    The same arithmetic `compute_coverage` does — per floor, the denominator is the declared
+    zone expectations where there are any and the number of points that exist otherwise — but
+    aggregated across every project at once instead of one report at a time. A test compares the
+    two answers rather than trusting that this sentence stays true.
+    """
+    all_floors = [floor_id for ids in floors_by_project.values() for floor_id in ids]
+    if not all_floors:
+        return {}
+
+    expected_by_floor: dict[str, int] = defaultdict(int)
+    for floor_id, expected in db.execute(
+        select(Zone.floor_id, func.sum(Zone.expected_capture_points))
+        .where(Zone.floor_id.in_(all_floors))
+        .group_by(Zone.floor_id)
+    ).all():
+        expected_by_floor[str(floor_id)] = max(int(expected or 0), 0)
+
+    locations_by_floor: dict[str, int] = defaultdict(int)
+    for floor_id, count in db.execute(
+        select(CaptureLocation.floor_id, func.count(CaptureLocation.id))
+        .where(CaptureLocation.floor_id.in_(all_floors))
+        .group_by(CaptureLocation.floor_id)
+    ).all():
+        locations_by_floor[str(floor_id)] = int(count)
+
+    visited_by_floor: dict[str, int] = defaultdict(int)
+    for floor_id, count in db.execute(
+        select(CaptureLocation.floor_id, func.count(func.distinct(CaptureLocation.id)))
+        .join(CaptureFrame, CaptureFrame.location_id == CaptureLocation.id)
+        .where(CaptureLocation.floor_id.in_(all_floors))
+        .group_by(CaptureLocation.floor_id)
+    ).all():
+        visited_by_floor[str(floor_id)] = int(count)
+
+    ratios: dict[str, float] = {}
+    for project_id, floor_ids in floors_by_project.items():
+        expected = 0
+        visited = 0
+        for floor_id in floor_ids:
+            # Declared zone expectations where there are any, else the points that exist —
+            # never a guess, and never zero-divided into a fake 100%.
+            expected_points = expected_by_floor.get(floor_id) or locations_by_floor.get(floor_id, 0)
+            # Clamped per floor, and contributing nothing where nothing is expected. Summing
+            # raw visits instead reported 0.82 where the coverage page said 0.42 on the demo
+            # project — visiting a floor more thoroughly than it was planned for cannot make
+            # the *other* floors look covered.
+            expected += expected_points
+            visited += min(visited_by_floor.get(floor_id, 0), expected_points)
+        ratios[project_id] = _ratio(visited, expected)
+    return ratios
 
 
 # ---- stale areas -------------------------------------------------------------

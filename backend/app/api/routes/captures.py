@@ -632,7 +632,7 @@ def list_capture_frames(
         )
     )
     return Page(
-        items=[viewer_service.frame_detail(db, frame) for frame in frames],
+        items=viewer_service.frame_details(db, frames),
         total=total,
         limit=page.limit,
         offset=page.offset,
@@ -987,7 +987,7 @@ def location_frames(
         )
     )
     return Page(
-        items=[viewer_service.frame_detail(db, frame) for frame in frames],
+        items=viewer_service.frame_details(db, frames),
         total=total,
         limit=page.limit,
         offset=page.offset,

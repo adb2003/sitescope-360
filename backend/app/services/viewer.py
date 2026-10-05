@@ -7,6 +7,7 @@ from datetime import UTC
 import numpy as np
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.errors import NotFoundError, ValidationError
 from app.core.logging import log_event
@@ -37,28 +38,74 @@ MAX_HISTORY = 24
 
 
 def frame_detail(db: Session, frame: CaptureFrame) -> CaptureFrameDetail:
-    context = _context(db, frame)
-    quality = db.scalar(select(QualityResult).where(QualityResult.frame_id == frame.id))
-    annotation_count = int(
-        db.scalar(select(func.count(Annotation.id)).where(Annotation.frame_id == frame.id)) or 0
-    )
+    """One frame's detail. A thin wrapper so there is a single implementation."""
+    return frame_details(db, [frame])[0]
 
-    base = CaptureFrameOut.model_validate(frame).model_dump()
-    base["quality"] = QualityOut.model_validate(quality) if quality else None
 
-    return CaptureFrameDetail(
-        **base,
-        location_code=context.get("location_code"),
-        floor_id=context.get("floor_id"),
-        floor_name=context.get("floor_name"),
-        project_id=context.get("project_id"),
-        project_name=context.get("project_name"),
-        zone_name=context.get("zone_name"),
-        thumbnail=sign(frame.thumbnail_key),
-        preview=sign(frame.preview_key),
-        full=sign(frame.storage_key),
-        annotation_count=annotation_count,
-    )
+def frame_details(db: Session, frames: list[CaptureFrame]) -> list[CaptureFrameDetail]:
+    """A page of frame details in a fixed number of queries, whatever the page size.
+
+    Built per frame, this cost five queries each — a session→floor→project→zone join, a lazy
+    load of the frame's location, a quality row, and an annotation count — so a page of fifty
+    issued about two hundred and fifty. Measured, not suspected: one frame took 9 queries, ten
+    took 54, twenty took 104.
+
+    The join was the worst of them and the clearest sign the shape was wrong. Every frame in a
+    list belongs to a handful of sessions, usually one, so the same query ran fifty times for
+    fifty identical answers. Here it runs once per distinct session.
+
+    The others become one query each over the whole page. Nothing is lazy-loaded: a relationship
+    touched inside a loop is an N+1 that no amount of reading the loop will reveal, which is why
+    the locations are fetched by id rather than through ``frame.location``.
+    """
+    if not frames:
+        return []
+
+    contexts = _contexts(db, {frame.session_id for frame in frames})
+    locations = _location_codes(db, {f.location_id for f in frames if f.location_id})
+
+    frame_ids = [frame.id for frame in frames]
+    quality_rows = {
+        row.frame_id: row
+        for row in db.scalars(select(QualityResult).where(QualityResult.frame_id.in_(frame_ids)))
+    }
+    annotation_counts = {
+        str(frame_id): int(count)
+        for frame_id, count in db.execute(
+            select(Annotation.frame_id, func.count(Annotation.id))
+            .where(Annotation.frame_id.in_(frame_ids))
+            .group_by(Annotation.frame_id)
+        ).all()
+    }
+
+    details: list[CaptureFrameDetail] = []
+    for frame in frames:
+        context = contexts.get(frame.session_id, {})
+        quality = quality_rows.get(frame.id)
+        # Hand the already-fetched row to the relationship before anything reads it.
+        # `CaptureFrameOut` has a `quality` field, so validating the ORM object triggers the
+        # lazy load — one query per frame, arriving *through* the serialiser rather than from
+        # any line that looks like a query. Batching the fetch above did nothing until this was
+        # added: the count stayed at one per frame and the saving was invisible.
+        set_committed_value(frame, "quality", quality)
+        base = CaptureFrameOut.model_validate(frame).model_dump()
+        base["quality"] = QualityOut.model_validate(quality) if quality else None
+        details.append(
+            CaptureFrameDetail(
+                **base,
+                location_code=locations.get(frame.location_id) if frame.location_id else None,
+                floor_id=context.get("floor_id"),
+                floor_name=context.get("floor_name"),
+                project_id=context.get("project_id"),
+                project_name=context.get("project_name"),
+                zone_name=context.get("zone_name"),
+                thumbnail=sign(frame.thumbnail_key),
+                preview=sign(frame.preview_key),
+                full=sign(frame.storage_key),
+                annotation_count=annotation_counts.get(frame.id, 0),
+            )
+        )
+    return details
 
 
 def viewer_manifest(db: Session, frame: CaptureFrame) -> ViewerManifest:
@@ -223,24 +270,47 @@ def _closest(frames: list[CaptureFrame], iso_date: str | None) -> CaptureFrame |
     return min(frames, key=lambda frame: abs((frame.captured_at - target).total_seconds()))
 
 
-def _context(db: Session, frame: CaptureFrame) -> dict[str, str | None]:
-    row = db.execute(
-        select(Floor.id, Floor.name, Project.id, Project.name, Zone.name)
+def _contexts(db: Session, session_ids: set[str]) -> dict[str, dict[str, str | None]]:
+    """Where each of these captures sits: floor, project and zone, in one query.
+
+    Keyed by session rather than by frame on purpose — this is a fact about the capture, and a
+    list of frames shares it. That is the whole saving.
+    """
+    if not session_ids:
+        return {}
+    rows = db.execute(
+        select(
+            CaptureSession.id,
+            Floor.id,
+            Floor.name,
+            Project.id,
+            Project.name,
+            Zone.name,
+        )
         .select_from(CaptureSession)
         .join(Floor, Floor.id == CaptureSession.floor_id)
         .join(Building, Building.id == Floor.building_id)
         .join(Project, Project.id == Building.project_id)
         .outerjoin(Zone, Zone.id == CaptureSession.zone_id)
-        .where(CaptureSession.id == frame.session_id)
-    ).first()
-    if row is None:
-        return {}
-    floor_id, floor_name, project_id, project_name, zone_name = row
+        .where(CaptureSession.id.in_(session_ids))
+    ).all()
     return {
-        "floor_id": floor_id,
-        "floor_name": floor_name,
-        "project_id": project_id,
-        "project_name": project_name,
-        "zone_name": zone_name,
-        "location_code": frame.location.code if frame.location else None,
+        str(session_id): {
+            "floor_id": floor_id,
+            "floor_name": floor_name,
+            "project_id": project_id,
+            "project_name": project_name,
+            "zone_name": zone_name,
+        }
+        for session_id, floor_id, floor_name, project_id, project_name, zone_name in rows
     }
+
+
+def _location_codes(db: Session, location_ids: set[str]) -> dict[str, str]:
+    """``P01`` and friends for a page of frames, without touching ``frame.location``."""
+    if not location_ids:
+        return {}
+    rows = db.execute(
+        select(CaptureLocation.id, CaptureLocation.code).where(CaptureLocation.id.in_(location_ids))
+    ).all()
+    return {str(location_id): str(code) for location_id, code in rows}

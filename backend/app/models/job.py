@@ -31,6 +31,9 @@ class ProcessingJob(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_jobs_session_type", "session_id", "job_type"),
         Index("ix_jobs_status_created", "status", "created_at"),
+        # ON DELETE CASCADE from `capture_files`, on a table that gains a row per stage per
+        # capture. Without this, deleting one uploaded file scans every job ever run.
+        Index("ix_jobs_file", "file_id"),
     )
 
     id: Mapped[str] = pk_column()

@@ -795,6 +795,38 @@ Status is surfaced to the client exactly as §34 specifies:
 `uploading → uploaded → processing → extracting_frames → analyzing → mapping → ready`, or
 `failed` with a machine-readable reason and a retry endpoint.
 
+#### A capture has to survive the worker processing it dying
+
+That status list assumed every stage reaches an end. A worker killed mid-stage reached none: its
+`ProcessingJob` stayed RUNNING, the capture stayed `processing`, and nothing ever reconsidered
+either. The capture was then unrecoverable *through the product* — `/retry` refused because the
+session was `processing` rather than `failed`, `/process` refused because a job was still
+active, and the web client rendered no button at all, since `processing` counts as in-flight and
+hides both. An operator's day of walking a site sat behind a spinner that would never stop, and
+the only way out was a forced reprocess through the API by hand.
+
+**Elapsed time cannot detect this.** A stage commits RUNNING and does not touch the row again
+until it finishes, so a long video extraction and a dead worker look identical from outside. A
+timeout would eventually kill live work and tell somebody to redo something that was running.
+
+So the queue is asked, and each backend can answer exactly:
+
+* `ThreadQueue` runs work in a pool inside the API process, so a job that started before the
+  current queue existed cannot be running in it. That is a fact about the backend, not a guess.
+* `RedisQueue` asks RQ, which knows whether a job is still queued, started or gone.
+
+`is_abandoned` answers **False for "alive *or* cannot tell"** — the two are deliberately the
+same answer, because failing a capture tells an operator their work needs rerunning and that is
+not a decision to take on a maybe. A job with no recorded queue id, or a Redis that cannot be
+reached, is left exactly where it is.
+
+`pipeline.reclaim_abandoned_jobs` runs on every status read rather than from a scheduler: one
+indexed query scoped to the capture somebody is already looking at, so it needs no new
+infrastructure and the operator staring at the stuck capture is the thing that triggers the
+repair. The stage is marked `failed` with `error_code: worker_lost`, the session is marked
+failed with a reason that says what happened, and the ordinary retry button — which needed
+`failed` all along — appears.
+
 The API never performs stage work inline on a request thread. `POST /captures/{id}/process`
 enqueues and returns immediately.
 

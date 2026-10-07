@@ -58,6 +58,7 @@ CAPTURE_EVENTS: tuple[str, ...] = (
     "processing.frames_extracted",
     "processing.completed",
     "processing.failed",
+    "processing.worker_lost",
     "storage.stale_uploads_purged",
 )
 

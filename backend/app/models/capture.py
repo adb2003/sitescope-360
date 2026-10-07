@@ -60,6 +60,15 @@ class CaptureSession(Base, TimestampMixin):
         Index("ix_sessions_floor_started", "floor_id", "started_at"),
         Index("ix_sessions_project_started", "project_id", "started_at"),
         Index("ix_sessions_status", "status"),
+        # Indexed for the delete that fires them, not for a query. On PostgreSQL an
+        # unindexed foreign key makes every parent delete scan the whole child table: removing
+        # one zone would read every capture session in the deployment to find the few that
+        # referenced it. Only the columns whose parent *can* be deleted are here — a user never
+        # is (`DELETE /users/{id}` deactivates), so `operator_id` and the `*_by_id` columns
+        # would be indexes maintained on every write for a cascade that cannot happen.
+        Index("ix_sessions_building", "building_id"),
+        Index("ix_sessions_zone", "zone_id"),
+        Index("ix_sessions_camera_device", "camera_device_id"),
     )
 
     #: Human-legible and sortable: ``CAP-20260910-103022-A8F3``.
@@ -319,6 +328,11 @@ class CaptureLocation(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("floor_id", "code", name="uq_location_floor_code"),
         Index("ix_locations_floor", "floor_id"),
+        # `floor_plan_id` earns its index twice over: it is filtered directly — deleting a plan
+        # checks whether any point still references it — and it is a SET NULL target when one
+        # goes. `zone_id` is the same cascade, for the zone.
+        Index("ix_locations_floor_plan", "floor_plan_id"),
+        Index("ix_locations_zone", "zone_id"),
     )
 
     id: Mapped[str] = pk_column()

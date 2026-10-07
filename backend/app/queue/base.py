@@ -15,6 +15,7 @@ restart — which is why it is not the production default, and why it says so on
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Protocol
 
 from app.core.enums import JobType
@@ -60,6 +61,25 @@ class JobQueue(Protocol):
 
     def enqueue_chain(self, specs: list[JobSpec]) -> list[str]:
         """Submit a dependent sequence — each runs only if its predecessor succeeded."""
+        ...
+
+    def is_abandoned(self, queue_job_id: str | None, started_at: datetime | None) -> bool:
+        """Is this job definitely not being worked on any more?
+
+        Asked about a ``ProcessingJob`` row that still says RUNNING. A worker killed mid-stage
+        leaves that row behind, and nothing else ever reconsiders it: the capture shows a
+        spinner for ever, `/retry` refuses because the session is `processing` rather than
+        `failed`, and the UI renders no button at all. The only way out was a force reprocess
+        through the API by hand.
+
+        Elapsed time cannot answer it. A stage commits RUNNING and then does not touch the row
+        again until it finishes, so a long video extraction and a dead worker look identical
+        from the outside. The queue is the only thing that knows, so the queue is asked.
+
+        **False means "alive, or cannot tell."** The two are deliberately the same answer: this
+        decision fails a capture and tells an operator their work needs rerunning, so it is
+        taken only on a definite no.
+        """
         ...
 
     def health(self) -> dict[str, Any]: ...

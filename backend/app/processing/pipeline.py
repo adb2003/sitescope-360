@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.core.enums import (
     PIPELINE_ORDER,
+    TERMINAL_SESSION_STATUSES,
     CaptureSessionStatus,
     JobStatus,
     JobType,
@@ -134,8 +135,71 @@ def enqueue_pipeline(
     return jobs
 
 
+ABANDONED_REASON = (
+    "The worker running this stage stopped before it finished — most likely a restart or a "
+    "crash. No work was lost that cannot be redone: retry to run it again."
+)
+
+
+def reclaim_abandoned_jobs(db: Session, session_id: str) -> list[ProcessingJob]:
+    """Fail the stages whose worker is gone, so a capture can be retried rather than stuck.
+
+    A worker killed mid-stage leaves its `ProcessingJob` at RUNNING and the capture at
+    PROCESSING, and nothing ever revisited that. The capture then showed a spinner for ever:
+    `/retry` refused because the session was `processing` and not `failed`, `/process` refused
+    because a job was still active, and the web client offered no button at all — the one escape
+    was a forced reprocess through the API by hand.
+
+    Called on every status read rather than from a scheduler. It is one indexed query scoped to
+    the capture somebody is already looking at, so it costs nothing worth saving, and it needs
+    no new infrastructure to run — the operator looking at the stuck capture is the trigger.
+
+    The queue decides, not a timeout. `is_abandoned` answers False for "alive *or* cannot tell",
+    so a slow stage is never failed by mistake; see `queue.base.JobQueue.is_abandoned`.
+    """
+    running = list(
+        db.scalars(
+            select(ProcessingJob).where(
+                ProcessingJob.session_id == session_id,
+                ProcessingJob.status == JobStatus.RUNNING,
+            )
+        )
+    )
+    if not running:
+        return []
+
+    queue = get_queue()
+    reclaimed: list[ProcessingJob] = []
+    for job in running:
+        if not queue.is_abandoned(job.queue_job_id, job.started_at):
+            continue
+        job.status = JobStatus.FAILED
+        job.error_code = "worker_lost"
+        job.error_detail = ABANDONED_REASON
+        job.finished_at = datetime.now(UTC)
+        reclaimed.append(job)
+
+    if not reclaimed:
+        return []
+
+    session = db.get(CaptureSession, session_id)
+    if session is not None and session.status not in TERMINAL_SESSION_STATUSES:
+        mark_session_failed(db, session, ABANDONED_REASON)
+    db.commit()
+    log_event(
+        "processing.worker_lost",
+        session_id=session_id,
+        stages=[str(job.job_type) for job in reclaimed],
+    )
+    return reclaimed
+
+
 def pipeline_progress(db: Session, session_id: str) -> tuple[float, list[ProcessingJob]]:
-    """Fraction of the canonical pipeline that has completed, plus the stage rows."""
+    """Fraction of the canonical pipeline that has completed, plus the stage rows.
+
+    Reclaims abandoned stages first, so reading a capture's status is also what un-sticks it.
+    """
+    reclaim_abandoned_jobs(db, session_id)
     jobs = list(
         db.scalars(
             select(ProcessingJob)

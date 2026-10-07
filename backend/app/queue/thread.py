@@ -13,6 +13,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import UTC, datetime
 from typing import Any
 
 from app.core.config import settings
@@ -47,6 +48,9 @@ class ThreadQueue:
         )
         self._lock = threading.Lock()
         self._futures: dict[str, Future[Any]] = {}
+        #: When this queue came into existence. Work submitted to a previous instance cannot
+        #: still be running, because there is no previous instance — see `is_abandoned`.
+        self._created_at = datetime.now(UTC)
 
     def enqueue(self, spec: JobSpec) -> str:
         return self.enqueue_chain([spec])[0]
@@ -84,6 +88,18 @@ class ThreadQueue:
                 # marked the session failed; downstream stages are skipped.
                 break
         return results
+
+    def is_abandoned(self, queue_job_id: str | None, started_at: datetime | None) -> bool:
+        """A job that started before this queue existed is not running in it.
+
+        Exact rather than a guess, and the one thing this backend can be certain about: the
+        work lives in a thread pool inside the API process, so a restart loses it by
+        definition. The futures dict cannot answer instead — it keys only the head of each
+        chain and prunes itself — but it does not need to.
+        """
+        if started_at is None:
+            return False
+        return started_at < self._created_at
 
     def health(self) -> dict[str, Any]:
         with self._lock:

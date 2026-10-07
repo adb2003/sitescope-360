@@ -432,7 +432,7 @@ geometry would produce a confident, precise and wrong number.
 | GET | `/captures/{id}/files` | File metadata: EXIF, GPS, camera, dimensions, validation. |
 | DELETE | `/captures/{id}/files/{file_id}` | Remove one uploaded file. |
 | POST | `/captures/{id}/process` | Queue the pipeline. Returns immediately. |
-| GET | `/captures/{id}/status` | Live per-stage status and overall progress. |
+| GET | `/captures/{id}/status` | Live per-stage status and overall progress. Also reclaims stages whose worker died. |
 | POST | `/captures/{id}/retry` | Re-run after a failure. |
 | GET | `/captures/{id}/frames` | Paginated frames; filter by `verdict` or `located`. |
 | GET | `/captures/{id}/path` | The ordered capture path for this visit. |
@@ -442,6 +442,18 @@ geometry would produce a confident, precise and wrong number.
 | DELETE | `/captures/{id}/placement` | Undo a placement: unplace every frame and remove the points that placement created. |
 | GET | `/captures/{id}/segments` | Where this upload looks like it stopped being one walkthrough, with the evidence behind each break. |
 | POST | `/captures/{id}/split` | Cut the upload into the walkthroughs an operator confirmed, each on the floor they say it was walked on. |
+
+**A worker that dies does not strand the capture.** Reading `GET /captures/{id}/status` also
+reclaims any stage left RUNNING by a worker that is gone: the stage becomes `failed` with
+`error_code: worker_lost`, the capture becomes `failed` with a reason that says so, and
+`POST /captures/{id}/retry` — which requires `failed` — starts working. Before this the capture
+was unrecoverable through the API: `/retry` refused because the session was `processing`,
+`/process` refused because a job was still active, and only a forced reprocess got out of it.
+
+The queue decides, not a clock. A stage commits RUNNING and does not touch the row again until it
+finishes, so elapsed time cannot tell a long video extraction from a dead worker; the backend is
+asked instead and answers alive whenever it cannot be certain. A capture genuinely still being
+processed is never failed by this, and neither is one whose job id was never recorded.
 
 **One upload, several walkthroughs.** An operator who captures a building in a morning walks one
 floor, takes the lift, and keeps going — and a capture session has exactly one `floor_id`, so

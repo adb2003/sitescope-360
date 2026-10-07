@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime
 from typing import Any
 
 from app.core.config import settings
@@ -63,6 +64,30 @@ class RedisQueue:
             ids.append(str(job.id))
             previous = job
         return ids
+
+    def is_abandoned(self, queue_job_id: str | None, started_at: datetime | None) -> bool:
+        """Ask RQ. It knows whether the job is still queued, started, or gone.
+
+        A worker killed mid-job leaves RQ's record in a terminal state or lets it expire
+        entirely; either way RQ stops calling it live, and that is authoritative in a way no
+        timeout would be. A connection failure answers False — unknown is not dead.
+        """
+        if not queue_job_id:
+            return False
+        try:
+            from rq.exceptions import NoSuchJobError
+            from rq.job import Job
+
+            try:
+                job = Job.fetch(queue_job_id, connection=self._connection)
+            except NoSuchJobError:
+                return True
+            live = {"queued", "started", "deferred", "scheduled"}
+            return job.get_status(refresh=True) not in live
+        except Exception:
+            # Redis unreachable, or a version whose API has moved. Either way this is not
+            # evidence that the work stopped.
+            return False
 
     def health(self) -> dict[str, Any]:
         try:

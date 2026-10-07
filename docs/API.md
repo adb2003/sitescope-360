@@ -1,6 +1,6 @@
 # API reference
 
-126 endpoints across 95 paths. Base prefix `/api`.
+127 endpoints across 96 paths. Base prefix `/api`.
 
 Interactive documentation is generated from the code and is the authoritative source:
 
@@ -324,6 +324,25 @@ An admin cannot remove their own admin role, deactivate their own account, or re
 The flag is checked against the row on every request rather than written into the access token, so it applies to a session opened *before* the reset — which is the case that matters, since the person whose password is being reset because somebody else may be in the account is precisely the person already holding a token. Setting a password through `/auth/change-password` clears it, and the new password must differ from the temporary one, or the requirement could be satisfied by keeping the password the administrator chose.
 
 The temporary password is never echoed in the response. The administrator typed it; repeating it would put it in every log between them and the browser for no gain.
+
+### Storage that no row points at
+
+Every deletion path takes its bytes with it, and each is tested for what it removes. None could
+be tested for what it *left* — so when one of them silently did nothing, nothing noticed.
+
+One did. `delete_session_storage` built its prefix with a trailing slash and handed it to
+`delete_prefix`, which validated it as a key; a trailing slash is a final empty segment, so it
+raised on every call since it was written. The call sat inside a blanket `suppress(Exception)`,
+so the result still read `{"swept_prefix": true, "objects": 0}` — indistinguishable from "swept
+it, there was nothing there". Measured afterwards: 263 files and 23 MB orphaned on a development
+store.
+
+`GET /api/system/storage/orphans?project_id=` makes the question askable. It reports `scanned`,
+`referenced`, `orphaned`, `orphaned_bytes`, a sample of paths, and `truncated` when the listing
+hit its cap — and it **never deletes**. An orphan costs storage; deleting the wrong object costs
+somebody their imagery, and those are not symmetrical. A capture being processed right now also
+has frames on disk whose rows arrive moments later, so the count is a prompt to look rather than
+a list to act on.
 
 ### What the platform records
 
@@ -816,6 +835,7 @@ cannot serve it because it sets `Connection ""`.
 | --- | --- | --- |
 | GET | `/jobs` | The §45 processing dashboard; filter by `status`, `type`, `session_id`. |
 | GET | `/jobs/summary` | Counts by status and stage, mean durations, recent failures, queue health. |
+| GET | `/system/storage/orphans?project_id=` | Stored objects under one project that no row points at. **Reports, never deletes.** |
 | POST | `/jobs/{id}/retry` | Re-run a failed stage **and everything after it**. |
 | GET | `/system/capabilities` | What is implemented, estimated, or unavailable (§46). |
 | GET | `/system/events` | Recent capture lifecycle activity. |

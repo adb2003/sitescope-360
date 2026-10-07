@@ -13,6 +13,7 @@ from app.api.deps import (
     Pagination,
     RequireCaptureRead,
     RequireJobAdmin,
+    get_project_or_404,
     get_session_or_404,
 )
 from app.bim.interfaces import bim_status
@@ -25,7 +26,7 @@ from app.processing.pipeline import enqueue_pipeline
 from app.queue import get_queue
 from app.schemas.capture import ProcessingJobOut
 from app.schemas.common import Page
-from app.storage import get_storage
+from app.storage import get_storage, reconcile
 from app.vision.ai import get_ai_engine
 
 router = APIRouter(tags=["admin"])
@@ -210,6 +211,28 @@ def system_health(db: DbSession) -> dict:
         "queue": queue_health,
         "storage": storage_health,
     }
+
+
+@router.get("/system/storage/orphans")
+def storage_orphans(
+    project_id: str,
+    db: DbSession,
+    user: RequireJobAdmin,
+    limit: Annotated[int, Query(ge=1, le=reconcile.MAX_OBJECTS)] = reconcile.MAX_OBJECTS,
+) -> dict:
+    """Stored objects under one project that no row points at.
+
+    Reports, never deletes. Every deletion path takes its bytes with it and each is tested, but
+    nothing could answer whether they *had* — so a gap in one was silent and permanent. One was:
+    deleting a walkthrough split out of an upload left 263 files behind, because its frames live
+    under the original capture's prefix and its own prefix is empty.
+
+    A fresh upload's objects can appear here legitimately: the pipeline writes frames before the
+    rows that name them. The number is a prompt to look, not a list to act on, which is why
+    nothing deletes from it.
+    """
+    project = get_project_or_404(db, project_id, user)
+    return reconcile.find_orphans(db, project, limit=limit).to_dict()
 
 
 @router.get("/system/events")

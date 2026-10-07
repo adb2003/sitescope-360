@@ -28,7 +28,7 @@ from app.core.errors import (
     ValidationError,
 )
 from app.core.ids import location_code, new_capture_session_id, new_id
-from app.core.logging import log_event
+from app.core.logging import get_logger, log_event
 from app.models import (
     Building,
     CaptureFile,
@@ -52,6 +52,8 @@ from app.storage.multipart import (
     missing_parts,
     plan_parts,
 )
+
+logger = get_logger(__name__)
 
 
 def create_session(db: Session, payload: CaptureSessionCreate, operator: User) -> CaptureSession:
@@ -925,7 +927,9 @@ _FRAME_KEY_COLUMNS = (
 )
 
 
-def delete_session_storage(db: Session, session: CaptureSession) -> dict[str, int | bool]:
+def delete_session_storage(
+    db: Session, session: CaptureSession
+) -> dict[str, int | bool | str | None]:
     """Delete the bytes a capture owns, and only those.
 
     A capture normally owns everything beneath its own storage prefix, and wiping the prefix is
@@ -951,18 +955,66 @@ def delete_session_storage(db: Session, session: CaptureSession) -> dict[str, in
         + "/"
     )
 
-    shared = _keys_under_prefix(db, prefix, excluding_session=session.id)
-    if not shared:
-        with contextlib.suppress(Exception):
-            return {"swept_prefix": True, "objects": storage.delete_prefix(prefix)}
-        return {"swept_prefix": True, "objects": 0}
+    # Its own keys first, wherever they live. A walkthrough split out of an upload owns frames
+    # written under the *original's* prefix, so sweeping only its own prefix sweeps an empty
+    # directory and leaves every byte behind — measured at 263 files and 23 MB from one such
+    # deletion, because this used to return early whenever nothing else reached into the prefix.
+    own = _keys_of(db, session.id)
+    shared: set[str] = set()
+    for other in _prefixes_of(own) | {prefix}:
+        shared |= _keys_under_prefix(db, other, excluding_session=session.id)
 
     removed = 0
-    for key in sorted(_keys_of(db, session.id) - shared):
+    for key in sorted(own - shared):
         with contextlib.suppress(Exception):
             storage.delete(key)
             removed += 1
-    return {"swept_prefix": False, "objects": removed, "kept_for_others": len(shared)}
+
+    # Then the prefix, but only when nothing outside this capture reaches into it. That sweep is
+    # worth keeping for what the rows cannot name: whatever a failed stage left behind, which
+    # nothing points at and nothing else would ever collect.
+    swept = 0
+    sweep_failed: str | None = None
+    intruders = _keys_under_prefix(db, prefix, excluding_session=session.id)
+    if not intruders:
+        try:
+            swept = storage.delete_prefix(prefix)
+        except Exception as exc:
+            # Reported, not suppressed. A blanket `suppress(Exception)` here hid that this call
+            # raised on *every* invocation — the prefix carried a trailing slash that key
+            # validation rejected — so the sweep never ran and the result still said
+            # `swept_prefix: True, objects: 0`, which reads as "swept it, nothing was there".
+            # A destructive step that quietly does nothing is worse than one that fails aloud.
+            sweep_failed = str(exc)
+            logger.warning(
+                "Storage prefix sweep failed",
+                extra={"session_id": session.id, "prefix": prefix, "error": sweep_failed},
+            )
+
+    return {
+        "swept_prefix": not intruders and sweep_failed is None,
+        "objects": removed + swept,
+        "kept_for_others": len(shared),
+        "sweep_error": sweep_failed,
+    }
+
+
+def _prefixes_of(keys: set[str]) -> set[str]:
+    """The capture-session prefixes a set of keys lives under.
+
+    Usually one — its own — and two for a walkthrough that was split out of another upload. The
+    point is to ask about those and no others: a key set can run to tens of thousands on a long
+    video, which is no shape for an ``IN`` clause, while the prefixes it spans stay in single
+    figures.
+    """
+    marker = "/sessions/"
+    prefixes: set[str] = set()
+    for key in keys:
+        head, sep, tail = key.partition(marker)
+        if not sep or "/" not in tail:
+            continue
+        prefixes.add(f"{head}{marker}{tail.split('/', 1)[0]}/")
+    return prefixes
 
 
 def _keys_of(db: Session, session_id: str) -> set[str]:

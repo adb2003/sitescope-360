@@ -67,6 +67,23 @@ def validate_key(key: str) -> str:
     return key
 
 
+def validate_prefix(prefix: str) -> str:
+    """Validate a key *prefix* and return it with exactly one trailing slash.
+
+    A prefix is not a key, and `validate_key` was being asked to approve one: a trailing slash
+    splits into a final empty segment, which it rejects. Every caller wrapped the resulting
+    exception in `contextlib.suppress`, so `delete_prefix` on a capture's storage raised and was
+    swallowed on every call since it was written — and the function reported
+    ``{"swept_prefix": True, "objects": 0}``, which reads as "swept it, there was nothing there".
+
+    The slash matters and is not merely cosmetic. On S3 a prefix match is a string match, so
+    ``projects/ab`` would also delete ``projects/abcdef``; appending it is the difference between
+    one project's objects and a neighbouring project's.
+    """
+    validate_key(prefix.rstrip("/"))
+    return prefix if prefix.endswith("/") else prefix + "/"
+
+
 def extension_of(filename: str) -> str:
     suffix = PurePosixPath(filename).suffix.lower()
     return suffix
@@ -102,6 +119,17 @@ class StorageProvider(Protocol):
     def delete(self, key: str) -> None: ...
 
     def delete_prefix(self, prefix: str) -> int: ...
+
+    def list_keys(self, prefix: str, limit: int) -> tuple[list[str], bool]:
+        """Stored keys under ``prefix``, and whether the listing was cut short.
+
+        Exists so storage can be reconciled against the database — asking "is there anything
+        here that no row points at" is otherwise unanswerable without a script written by hand,
+        which is how the one leak this found was found. Capped on purpose: a bucket can hold
+        millions of objects and no report is worth an unbounded scan, so the caller is told it
+        was truncated rather than handed a quiet half-answer.
+        """
+        ...
 
     def signed_url(self, key: str, ttl_seconds: int | None = None) -> str: ...
 

@@ -21,7 +21,7 @@ from urllib.parse import quote
 
 from app.core.config import settings
 from app.core.errors import NotFoundError, ValidationError
-from app.storage.base import StoredObject, validate_key
+from app.storage.base import StoredObject, validate_key, validate_prefix
 from app.storage.multipart import ReceivedPart
 
 #: Upload ids come back from the client, so they are path segments under client influence. The
@@ -122,12 +122,27 @@ class LocalStorage:
             path.unlink()
 
     def delete_prefix(self, prefix: str) -> int:
-        base = self._resolve(prefix)
+        base = self._resolve(validate_prefix(prefix).rstrip("/"))
         if not base.is_dir():
             return 0
         count = sum(1 for p in base.rglob("*") if p.is_file())
         shutil.rmtree(base, ignore_errors=True)
         return count
+
+    def list_keys(self, prefix: str, limit: int) -> tuple[list[str], bool]:
+        base = self._resolve(validate_prefix(prefix).rstrip("/"))
+        if not base.is_dir():
+            return [], False
+        keys: list[str] = []
+        truncated = False
+        for path in sorted(base.rglob("*")):
+            if not path.is_file():
+                continue
+            if len(keys) >= limit:
+                truncated = True
+                break
+            keys.append(path.relative_to(self.root).as_posix())
+        return keys, truncated
 
     # ---- signed URLs -----------------------------------------------------
     def sign(

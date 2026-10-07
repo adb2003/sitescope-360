@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO
 
 from app.core.config import settings
 from app.core.errors import NotFoundError, SiteScopeError
-from app.storage.base import StoredObject, validate_key
+from app.storage.base import StoredObject, validate_key, validate_prefix
 from app.storage.multipart import ReceivedPart
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -124,7 +124,7 @@ class S3Storage:
         self._client.delete_object(Bucket=self.bucket, Key=key)
 
     def delete_prefix(self, prefix: str) -> int:
-        validate_key(prefix)
+        prefix = validate_prefix(prefix)
         paginator = self._client.get_paginator("list_objects_v2")
         deleted = 0
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
@@ -133,6 +133,17 @@ class S3Storage:
                 self._client.delete_objects(Bucket=self.bucket, Delete={"Objects": objects})
                 deleted += len(objects)
         return deleted
+
+    def list_keys(self, prefix: str, limit: int) -> tuple[list[str], bool]:
+        prefix = validate_prefix(prefix)
+        paginator = self._client.get_paginator("list_objects_v2")
+        keys: list[str] = []
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for item in page.get("Contents", []):
+                if len(keys) >= limit:
+                    return keys, True
+                keys.append(str(item["Key"]))
+        return keys, False
 
     def signed_upload_url(
         self, key: str, content_type: str, ttl_seconds: int | None = None

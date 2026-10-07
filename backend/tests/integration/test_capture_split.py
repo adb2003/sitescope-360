@@ -449,3 +449,58 @@ def test_one_segment_is_not_a_split(client: TestClient, whole_morning) -> None:
 
     assert response.status_code == 422, response.text
     assert "at least two" in response.text
+
+
+def test_deleting_a_walkthrough_removes_the_imagery_it_owns(
+    client: TestClient, whole_morning, db
+) -> None:
+    """The other direction from `test_deleting_the_original_keeps_the_walkthroughs_imagery`.
+
+    A split re-points rows instead of moving bytes, so a walkthrough's frames live under the
+    *original's* storage prefix. Deleting the walkthrough therefore swept its own prefix — an
+    empty directory — and left every byte it owned behind. Measured on a development store
+    before the fix: 263 files and 23 MB orphaned by one deletion, found only by writing an
+    ad-hoc script to compare storage against the database.
+
+    The two tests are the pair that pins the rule: a capture deletes what it owns, wherever that
+    lives, and never what something else still references.
+    """
+    from app.models import CaptureFrame
+    from app.storage import get_storage
+
+    headers, session_id, _ground, upper_id = whole_morning
+    report = _segments(client, headers, session_id)
+    child_id = client.post(
+        f"/api/captures/{session_id}/split",
+        json={"segments": _plan(report, upper_id), "reprocess": False},
+        headers=headers,
+    ).json()["created"][0]["id"]
+
+    child_keys = {
+        key
+        for frame in db.query(CaptureFrame).filter(CaptureFrame.session_id == child_id).all()
+        for key in (frame.storage_key, frame.thumbnail_key, frame.preview_key)
+        if key
+    }
+    parent_keys = {
+        key
+        for frame in db.query(CaptureFrame).filter(CaptureFrame.session_id == session_id).all()
+        for key in (frame.storage_key, frame.thumbnail_key, frame.preview_key)
+        if key
+    }
+    storage = get_storage()
+    # The walkthrough's bytes sit under the *parent's* prefix — that is the whole reason this
+    # goes wrong, so it is asserted rather than assumed.
+    assert child_keys, "the walkthrough should own frames"
+    assert any(f"/sessions/{session_id}/" in key for key in child_keys), sorted(child_keys)[:2]
+    assert all(storage.exists(key) for key in child_keys)
+
+    assert client.delete(f"/api/captures/{child_id}", headers=headers).status_code == 200
+
+    left = sorted(key for key in child_keys if storage.exists(key))
+    assert not left, (
+        f"deleting the walkthrough left {len(left)} of its own objects behind: {left[:3]}"
+    )
+    # And it took nothing belonging to the capture it came from.
+    missing = sorted(key for key in parent_keys if not storage.exists(key))
+    assert not missing, f"it also removed {len(missing)} of the original's objects"

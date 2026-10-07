@@ -265,3 +265,51 @@ def test_the_portfolio_agrees_with_the_coverage_and_frequency_pages(
     )
     assert row["frequency_status"] == str(frequency.status)
     assert row["last_capture_at"] is not None
+
+
+def test_opening_a_panorama_does_not_query_once_per_neighbour(
+    client: TestClient, capture_with_frames, sql
+) -> None:
+    """The viewer manifest is the most-opened endpoint there is, and it was the worst offender.
+
+    `_neighbours` read `item.location.code` per neighbour — six lazy loads on every open, the
+    same N+1 already removed from the frame list and the portfolio, hiding inside an attribute
+    access rather than in anything resembling a query.
+
+    **The frames have to be placed for this to test anything.** The lazy load only fires for a
+    neighbour that has a location, so against unplaced frames the bug and the fix cost exactly
+    the same and an earlier version of this test passed with the bug restored. Placing them is
+    the whole fixture.
+
+    What a query count cannot check is the other half of the change: siblings are now selected
+    as five columns rather than whole entities, which is the same single query either way. That
+    one is visible in `viewer.viewer_manifest` and nowhere else, and it is stated there.
+    """
+    headers, session_id = capture_with_frames
+    frames = client.get(
+        f"/api/captures/{session_id}/frames", headers=headers, params={"limit": 6}
+    ).json()["items"]
+    assert len(frames) >= 4
+
+    for index, frame in enumerate(frames):
+        placed = client.put(
+            f"/api/frames/{frame['id']}/location",
+            json={"x": 100.0 + index * 40.0, "y": 120.0},
+            headers=headers,
+        )
+        assert placed.status_code == 200, placed.text
+
+    with sql as counter:
+        response = client.get(f"/api/frames/{frames[0]['id']}/viewer", headers=headers)
+        queries = counter.count
+
+    assert response.status_code == 200, response.text
+    neighbours = response.json()["neighbours"]
+    # The neighbours must still be answered, and still carry their codes: a cheaper manifest
+    # that stopped naming the places would pass a query count and fail the product.
+    assert neighbours, "the viewer still needs somewhere to walk to"
+    assert any(item["location_code"] for item in neighbours), neighbours
+    assert queries < 14, (
+        f"{queries} queries to open one panorama with {len(neighbours)} placed neighbours — "
+        "one per neighbour is the shape to look for"
+    )

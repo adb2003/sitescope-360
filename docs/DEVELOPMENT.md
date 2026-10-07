@@ -145,7 +145,7 @@ Frontend:
 
 ```bash
 cd frontend
-npm test            # 43 tests
+npm test            # the frontend suite
 npm run lint
 npm run typecheck
 npm run build

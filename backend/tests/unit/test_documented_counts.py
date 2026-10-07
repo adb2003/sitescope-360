@@ -13,9 +13,16 @@ removed without the reference being updated, which is exactly the moment somebod
 position to update it — and it costs one line of a diff rather than a periodic audit nobody
 schedules.
 
-Only this one number is guarded. The test counts in `README.md` are deliberately left alone: a
-test asserting how many tests exist changes its own answer, and a guard that must be edited every
-time anything is added is noise rather than a signal.
+Only this one number is guarded, and that reasoning held: a test asserting how many tests exist
+changes its own answer, and a static count cannot stand in for it — 476 test functions collect as
+515 once parametrisation expands, and the mobile camera tests are 28 in the source and 31 in a
+run.
+
+What did not hold was leaving the numbers in place unguarded. "427 tests" and "117 tests" sat in
+`README.md` until both were adrift by roughly a hundred, in a table whose stated purpose is to
+separate "it builds" from "it works". So they were removed rather than guarded, along with the
+counts in `DEVELOPMENT.md` and `CAMERA_INTEGRATION.md`. The rule the two halves add up to: a
+number in the documentation either has a test behind it or does not belong there.
 """
 
 from __future__ import annotations

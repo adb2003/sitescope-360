@@ -120,7 +120,7 @@ route to this backend. So the server can never be the device that drives a camer
 `Generic360Provider` here remains the right component for a camera sitting on the site LAN, where
 the server *can* reach it. Neither replaces the other.
 
-The mobile client is covered by 31 tests against a fake transport (`osc.test.ts`,
+The mobile client is covered by tests against a fake transport (`osc.test.ts`,
 `cameraCapture.test.ts`), which exercise envelope parsing, the spec's error shape, missing and
 malformed fields, timeouts, address discovery and the finalising-file fallback. None of that
 proves a physical camera behaves as specified — there is no 360 camera on this project, and the

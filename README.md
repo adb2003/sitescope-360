@@ -150,13 +150,13 @@ Why `worker/` and `vision/` live inside `backend/` rather than at the top level 
 ## Testing
 
 ```bash
-# Backend: 427 tests
+# Backend suite
 cd backend && python -m pytest -q
 
 # Backend quality gates
 python -m ruff check app tests alembic && python -m ruff format --check app tests alembic && python -m mypy app
 
-# Frontend: 117 tests
+# Frontend suite, lint, types and a production build
 cd frontend && npm test && npm run lint && npm run typecheck && npm run build
 ```
 
@@ -171,9 +171,15 @@ merely producing plausible output.
 
 Stated plainly, because "it builds" and "it works" are different claims.
 
+Test counts are deliberately not quoted here. They were — "427 tests", "117 tests" — and both
+had drifted by roughly a hundred before anyone noticed, which makes a table about trustworthiness
+the wrong place for a number nothing keeps true. The one count still quoted anywhere is the
+endpoint total in [API.md](docs/API.md), and that one is correct because a test fails when it is
+not. What runs is listed below; [CI](.github/workflows/ci.yml) runs all of it on every commit.
+
 | Area | Status |
 | --- | --- |
-| Backend: 427 tests, ruff, ruff-format, mypy | **Verified** — all pass on this machine |
+| Backend suite, ruff, ruff-format, mypy | **Verified** — all pass on this machine and in CI on every commit |
 | Migrations on SQLite; PostgreSQL DDL generation; no model drift | **Verified** |
 | Full §52 workflow end to end over HTTP | **Verified** |
 | Two-view geometry vs ground truth | **Verified** — known pose recovered to <1° yaw, <0.05 m track error on exact correspondences |
@@ -182,7 +188,14 @@ Stated plainly, because "it builds" and "it works" are different claims.
 | Cross-session placement: a second capture of a floor places itself | **Verified** — over HTTP against the live API and in `test_cross_session.py`; the revisit joined all five of the first capture's points rather than making its own. The parallax bar is a viewpoint tolerance, not an identity test, and points created by recognition record how many hops they are from a point a person placed — see [limitation 6](docs/ROADMAP.md). |
 | Projects scoped to their members | **Verified** — over HTTP against the live API and in `test_project_scoping.py`: removing a member narrows their project list, portfolio totals and offline sync, and a direct fetch of that project returns 404 rather than 403. |
 | Share links: one view, no account | **Verified** — created, opened with no `Authorization` header, and revoked against the live API; the public page checked in a browser with storage cleared. A wrong, expired and revoked token return byte-identical refusals. |
-| Frontend: 117 tests, ESLint, TypeScript, production build | **Verified** |
+| Frontend suite, ESLint, TypeScript, production build | **Verified** — on this machine and in CI |
+| One upload split into its separate walkthroughs | **Verified** — over HTTP and in a browser: a capture crossing two floors reported two walkthroughs from a 9-inlier scene break, split into a second capture on another floor, and the original's imagery survived deleting it. Which floor each walk was on is a person's answer, never inferred. |
+| A forgotten password can be recovered | **Verified** — over HTTP and in a browser: an administrator reset holds the account to `/auth/me` and `/auth/change-password` until it sets its own, including for a session opened *before* the reset, and the temporary password cannot be kept. |
+| Destructive and privilege-changing actions are recorded | **Verified** — the registry in `core/audit.py` is held to the `log_event()` calls in both directions by a unit test. |
+| Capture points drawn only on the plan revision they were placed on | **Verified** — in a browser: switching sheets withholds the others and says so, and switching back restores them, because a sheet already rendered is re-activated rather than rendered again. |
+| Reporting views scoped to project members | **Verified** — six endpoints answered for any project to any account; a route-table guard now fails on any scoped route that resolves no membership. |
+| A capture survives the worker processing it dying | **Verified** — over HTTP: a stage stranded by a dead worker becomes `failed`/`worker_lost` on a status read, and the ordinary retry works. The queue is asked rather than a clock, so live work is never failed. |
+| Hot endpoints cost a fixed number of queries, not one per row | **Verified** — measured before and after: the frame list 104 → 8 at twenty rows, the landing page 149 → 11 at twelve projects, the viewer manifest 15 → 10. Held by `test_query_counts.py`. |
 | Demo seed, live API over HTTP | **Verified** |
 | Docker Compose, Dockerfiles, nginx | **Written, not executed locally** — Docker is not installed on this machine. CI builds both images and runs a stack smoke test. |
 | Mobile: TypeScript, 31 camera-protocol tests | **Verified** — the OSC client takes its transport as a dependency, so it runs under Node in CI. |

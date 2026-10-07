@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC
 
 import numpy as np
@@ -108,16 +109,39 @@ def frame_details(db: Session, frames: list[CaptureFrame]) -> list[CaptureFrameD
     return details
 
 
+@dataclass(frozen=True, slots=True)
+class _Sibling:
+    """One other frame of the same walk, as five columns rather than a whole row.
+
+    The manifest needs an id to link to, a position to measure from, and a location to name.
+    Loading entities instead meant every column of every frame in the session — storage keys,
+    feature blobs, timestamps — to pick six neighbours. On a short walk that is invisible; a
+    two-hour video sampled every two seconds is 3,600 full rows read to open one photograph.
+    """
+
+    id: str
+    rel_x: float | None
+    rel_y: float | None
+    location_id: str | None
+
+
 def viewer_manifest(db: Session, frame: CaptureFrame) -> ViewerManifest:
     """Everything the 360 viewer needs for one frame, in a single request (§11, §35)."""
     detail = frame_detail(db, frame)
-    siblings = list(
-        db.scalars(
-            select(CaptureFrame)
+    siblings = [
+        _Sibling(id=str(row[0]), rel_x=row[2], rel_y=row[3], location_id=row[4])
+        for row in db.execute(
+            select(
+                CaptureFrame.id,
+                CaptureFrame.sequence_index,
+                CaptureFrame.rel_x,
+                CaptureFrame.rel_y,
+                CaptureFrame.location_id,
+            )
             .where(CaptureFrame.session_id == frame.session_id)
             .order_by(CaptureFrame.sequence_index)
-        )
-    )
+        ).all()
+    ]
     index = next((i for i, item in enumerate(siblings) if item.id == frame.id), None)
 
     previous_id = siblings[index - 1].id if index is not None and index > 0 else None
@@ -126,33 +150,41 @@ def viewer_manifest(db: Session, frame: CaptureFrame) -> ViewerManifest:
     log_event("viewer.opened", frame_id=frame.id, session_id=frame.session_id)
     return ViewerManifest(
         frame=detail,
-        neighbours=_neighbours(frame, siblings),
+        neighbours=_neighbours(db, frame, siblings),
         previous_frame_id=previous_id,
         next_frame_id=next_id,
         history=frame_history(db, frame),
     )
 
 
-def _neighbours(frame: CaptureFrame, siblings: list[CaptureFrame]) -> list[ViewerNeighbour]:
+def _neighbours(
+    db: Session, frame: CaptureFrame, siblings: list[_Sibling]
+) -> list[ViewerNeighbour]:
     """Nearest frames by estimated relative position, else by sequence order.
 
     Sorting by geometry rather than by capture order is what makes the viewer feel like walking a
     building instead of scrubbing a video: the frame across the corridor is one click away even
     though it was shot ten minutes later.
+
+    The location codes are fetched once, for the six that survive the sort. Reading
+    ``item.location.code`` per neighbour was a lazy load each time — six queries on every open of
+    the most-opened endpoint in the product, and the same N+1 already removed from the frame list
+    and the portfolio, hiding here in an attribute access.
     """
     if frame.rel_x is None or frame.rel_y is None:
         near = [item for item in siblings if item.id != frame.id][:MAX_NEIGHBOURS]
+        codes = _location_codes(db, {item.location_id for item in near if item.location_id})
         return [
             ViewerNeighbour(
                 frame_id=item.id,
-                location_code=item.location.code if item.location else None,
+                location_code=codes.get(item.location_id) if item.location_id else None,
                 direction_deg=None,
                 distance=None,
             )
             for item in near
         ]
 
-    scored: list[tuple[float, float, CaptureFrame]] = []
+    scored: list[tuple[float, float, _Sibling]] = []
     for item in siblings:
         if item.id == frame.id or item.rel_x is None or item.rel_y is None:
             continue
@@ -163,14 +195,16 @@ def _neighbours(frame: CaptureFrame, siblings: list[CaptureFrame]) -> list[Viewe
         scored.append((distance, bearing, item))
 
     scored.sort(key=lambda entry: entry[0])
+    nearest = scored[:MAX_NEIGHBOURS]
+    codes = _location_codes(db, {item.location_id for _d, _b, item in nearest if item.location_id})
     return [
         ViewerNeighbour(
             frame_id=item.id,
-            location_code=item.location.code if item.location else None,
+            location_code=codes.get(item.location_id) if item.location_id else None,
             direction_deg=round(bearing, 1),
             distance=round(distance, 4),
         )
-        for distance, bearing, item in scored[:MAX_NEIGHBOURS]
+        for distance, bearing, item in nearest
     ]
 
 

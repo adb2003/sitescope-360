@@ -333,6 +333,27 @@ jobs:
           assert body["total_frames"] >= 1, "the seeded capture produced no frames"
           print("dashboard ok:", body["total_projects"], "projects,", body["total_frames"], "frames")'
 
+      - name: Security headers arrive, and exactly one policy per response
+        # The only place the real nginx runs. Locally this config is parsed by a test, which
+        # cannot tell whether a browser would end up with two Content-Security-Policy headers --
+        # and two are both enforced, as their intersection, which is how `/docs` got a blank page
+        # from a policy written for the SPA.
+        run: |
+          set -euo pipefail
+          # GET with the headers dumped, not HEAD: FastAPI answers 405 to a HEAD on a GET
+          # route, so `curl --head --fail` would fail the step rather than read the headers.
+          headers() { curl --fail --silent --show-error --dump-header - --output /dev/null "$1"; }
+          # The SPA, served by the gateway. Its own pages may be framed by this origin.
+          headers http://localhost:8080/ | grep -qi "frame-ancestors 'self'"
+          # The API, which sets its own: nothing in this product frames a JSON response.
+          headers http://localhost:8080/api/system/health | grep -qi "frame-ancestors 'none'"
+          # One policy on the documentation page, and it permits the CDN its HTML loads from.
+          docs=$(headers http://localhost:8080/docs)
+          test "$(printf '%s' "$docs" | grep -ci '^content-security-policy')" = 1
+          printf '%s' "$docs" | grep -qi 'cdn.jsdelivr.net'
+          printf '%s' "$docs" | grep -qi 'x-content-type-options: nosniff'
+          echo "headers ok through the gateway"
+
       - name: The worker is a live RQ worker, not just a running process
         # The previous version grepped its logs for the word "worker", which the startup banner
         # satisfies even if Redis was never reached. This asks the worker's own healthcheck.

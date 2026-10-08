@@ -935,6 +935,34 @@ See [CAMERA_INTEGRATION.md](CAMERA_INTEGRATION.md).
 | Site Engineer | read | create | ✓ | ✓ | — |
 | Viewer | read | read | — | — | — |
 
+### Response headers
+
+Set by whichever side generates the response, which is the only arrangement that works:
+
+- **The application** (`app/api/security_headers.py`) sets `nosniff`, a referrer policy,
+  `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'` on everything it
+  serves — including the 413 the body limit writes in raw ASGI and the 500 page, which is outside
+  the middleware stack and therefore repeats the set itself. The two documentation pages get a
+  document policy instead, naming the CDN origins their HTML actually fetches.
+- **The gateway** (`infrastructure/nginx/nginx.conf`) sets the SPA's policy in the one location it
+  answers for itself. `frame-ancestors 'self'` there covers the public share page at `/s/{token}`.
+- **Nobody sets both.** Two `Content-Security-Policy` headers are both enforced and the browser
+  applies the intersection, so duplicating the proxy's policy over the API's would have re-broken
+  `/docs` whatever the application sent.
+
+These lived only in the gateway config before, which meant an API behind anything else — a cloud
+load balancer, an ingress, plain uvicorn — sent none, and the SPA's `script-src 'self'` was being
+applied to Swagger and ReDoc, which load their viewer from a CDN and start it from an inline
+script: the production stack served a blank documentation page. Both halves are held by
+`tests/integration/test_security_headers.py`, which compares the policy against the HTML it has to
+permit rather than asserting the header is merely present, and `tests/unit/test_gateway_conf.py`,
+which asserts the ownership split in the config.
+
+`Strict-Transport-Security` is off unless `HSTS_MAX_AGE_SECONDS` is set, and is only ever sent on
+a request that arrived over HTTPS. It is the one security header that cannot be taken back: sent
+from a host that is not entirely on TLS, it locks every browser that saw it out of the plain-HTTP
+version for the lifetime of the `max-age`, and no later response can shorten it.
+
 ---
 
 ## 9. Performance strategy

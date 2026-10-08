@@ -272,6 +272,7 @@ ones that change behaviour most:
 | `MAPPING_CONFIDENCE_THRESHOLD` | `0.45` | Below this, an automatic path is refused. Raise to be stricter. |
 | `MAX_UPLOAD_BYTES` | 2 GiB | Enforced while streaming, not from `Content-Length`. |
 | `JWT_SECRET`, `STORAGE_SIGNING_SECRET` | dev placeholders | The API logs an error if these are still defaults with `ENVIRONMENT=production`. |
+| `HSTS_MAX_AGE_SECONDS` | `0` (off) | Sent only on HTTPS requests. Switch on once the deployment is entirely on TLS — a browser that saw it refuses the plain-HTTP host for this long. |
 
 ---
 

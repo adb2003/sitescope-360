@@ -37,6 +37,7 @@ from app.api.routes import (
 # `from __future__ import annotations` above, which works at runtime but is a genuine hazard
 # and defeats static checking.
 from app.api.routes import annotations as annotation_routes
+from app.api.security_headers import SecurityHeadersMiddleware, headers_for
 from app.core.config import settings
 from app.core.errors import RateLimitedError, SiteScopeError
 from app.core.logging import configure_logging, correlation_id, get_logger, log_event
@@ -147,8 +148,11 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
-# Added first, so it wraps outermost and answers before CORS, routing or body parsing. A limit
-# that runs after the body has been read is not a limit on anything.
+# Runs before routing and body parsing, which is the point: a limit that runs after the body has
+# been read is not a limit on anything. It sits *inside* CORS rather than outside — Starlette's
+# `add_middleware` inserts at the front of the list and the stack is built in reverse, so the
+# last one added is the outermost. That is the better order anyway: a browser can only read the
+# 413 if the CORS headers are on it.
 app.add_middleware(
     BodySizeLimitMiddleware,
     default_limit=settings.max_json_body_bytes,
@@ -188,6 +192,17 @@ async def correlation_middleware(
     response.headers["X-Correlation-Id"] = cid
     response.headers["X-Response-Time-Ms"] = f"{elapsed_ms:.1f}"
     return response
+
+
+# Added last, so it is the outermost of the application's middleware and every response it wraps
+# carries the headers — including the 413 the body limit writes by hand and the CORS preflight.
+# The two documentation pages need a policy of their own; the paths come from the application
+# rather than being spelled again here, so moving them moves the policy with them.
+app.add_middleware(
+    SecurityHeadersMiddleware,
+    document_paths=frozenset(path for path in (app.docs_url, app.redoc_url) if path),
+    hsts_max_age=settings.hsts_max_age_seconds,
+)
 
 
 # ---- error handling ----------------------------------------------------------
@@ -255,6 +270,11 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
             "message": "An unexpected error occurred",
             "details": {"correlation_id": cid},
         },
+        # The one response that does not pass back through the middleware stack: a handler for
+        # `Exception` becomes `ServerErrorMiddleware`'s, which wraps everything the application
+        # adds. Without this the 500 page would be the only response in the API with no security
+        # headers on it, and "every response" is the claim worth being able to make.
+        headers=dict(headers_for(document=False)),
     )
 
 

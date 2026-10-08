@@ -89,6 +89,15 @@ class Settings(BaseSettings):
     #: it, as `infrastructure/nginx/nginx.conf` does.
     trust_proxy_headers: bool = False
 
+    #: `Strict-Transport-Security` lifetime, in seconds. 0 (the default) sends no header.
+    #:
+    #: Off by default because switching it on is a claim about a deployment rather than a
+    #: preference, and it is the one security header that cannot be taken back: sent from a host
+    #: that is not entirely on HTTPS, it locks every browser that saw it out of the plain-HTTP
+    #: version for this long, and no later response can shorten it. Only ever sent on a request
+    #: that arrived over HTTPS. 31536000 (a year) is the usual value once a deployment is sure.
+    hsts_max_age_seconds: int = 0
+
     # ---- storage ---------------------------------------------------------
     storage_backend: Literal["local", "s3"] = "local"
     storage_root: Path = REPO_ROOT / "var" / "storage"

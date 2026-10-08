@@ -17,7 +17,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.enums import ProjectStatus
+from app.core.enums import ProjectStatus, Role
 from app.database.base import (
     Base,
     EnumType,
@@ -83,10 +83,17 @@ class ProjectMember(Base, TimestampMixin):
     fine for a single-contractor install and wrong for anything else, and no role change fixes
     it, because "viewer" was never meant to mean "viewer of everything".
 
-    Membership is deliberately **not** a second role. A user's global role still decides their
-    capabilities; this decides which projects those capabilities reach. Per-project roles — a
-    project manager on one job and a viewer on another — are a redesign of the §27 matrix rather
-    than an addition to it, and are not attempted here.
+    It carries the **role held on this project**, which is the answer to the other half of the
+    question. An account's role was the only one there was, so somebody who had to edit one job
+    edited every job they could see: the only way to let a subcontractor's lead run their own
+    site was to make them a project manager everywhere. Now the account role is a *ceiling* and
+    this is what they actually are here, so the same person can be a manager on one job and a
+    viewer on the next.
+
+    The ceiling is enforced on every read, not only when a role is assigned
+    (`membership.effective_role` takes the lower of the two). Lowering an account therefore
+    lowers it everywhere immediately, which is the direction that must not need a sweep: an
+    administrator demoting somebody should not have to remember the five projects they are on.
 
     Administrators are not listed and do not need to be: they hold `settings:system` and
     `user:manage`, so a deployment where an admin could be locked out of a project would have an
@@ -107,13 +114,21 @@ class ProjectMember(Base, TimestampMixin):
     user_id: Mapped[str] = mapped_column(
         PKType, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
+    #: What this user is **on this project**, never above their account role.
+    #:
+    #: Not nullable and not "inherit". A membership that deferred to the account role would move
+    #: when the account moved, so promoting an engineer to manage one job would quietly promote
+    #: them on every other job they are on — which is the failure this column exists to prevent.
+    #: Existing rows were backfilled with the account role they effectively had, so the change
+    #: altered nobody's access.
+    role: Mapped[Role] = mapped_column(EnumType(Role, 32), nullable=False, default=Role.VIEWER)
     #: Who granted the access. Null for the migration backfill, which nobody performed.
     added_by_id: Mapped[str | None] = mapped_column(
         PKType, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
 
     def __repr__(self) -> str:  # pragma: no cover
-        return f"<ProjectMember project={self.project_id} user={self.user_id}>"
+        return f"<ProjectMember project={self.project_id} user={self.user_id} {self.role}>"
 
 
 class Building(Base, TimestampMixin):

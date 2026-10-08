@@ -113,7 +113,15 @@ def logout(payload: RefreshRequest, db: DbSession) -> Message:
 
 @router.get("/me", response_model=SessionInfo)
 def me(user: UserSettingPassword) -> SessionInfo:
-    """Who is signed in, and what they may do.
+    """Who is signed in, and what their **account** may do.
+
+    A ceiling, not an answer: a role is held on a project (§27), so this list says what the
+    account could do somewhere, and `your_capabilities` on each project says what they can do
+    there. An interface that gates project controls on this alone offers a manager's buttons on a
+    job where the person is a viewer — the fields are named `your_*` on the project for exactly
+    that reason, and the web client uses `useProjectCan` wherever a project is in hand. What this
+    list is right for is the capabilities that have no project: `user:manage`, `settings:system`,
+    `job:admin`, and creating a project in the first place.
 
     Reachable by an account held for a password reset, unlike everything else — the client has
     to be able to render a shell and read `user.must_change_password` to know where to send

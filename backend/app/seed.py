@@ -583,7 +583,9 @@ def _staff(db: Session, project: Project, users: dict, *, added_by_id: str) -> N
     right place for it: a demo should show the product, not its access-control edge cases.
     """
     for account in users.values():
-        grant(db, project.id, account.id, added_by_id=added_by_id)
+        # Each with the role their account carries, so the demo shows four different views of
+        # the same job rather than four copies of one.
+        grant(db, project.id, account.id, role=account.role, added_by_id=added_by_id)
 
 
 # ---- entrypoint --------------------------------------------------------------

@@ -76,6 +76,10 @@ ACTIVITY_EVENTS: tuple[str, ...] = (
     "api.ready",
     "project.created",
     "project.member_added",
+    # A role on a project is a privilege change like `auth.role_changed`, and it is the one more
+    # likely to be asked about later: an account role is set once by an administrator, while a
+    # project role is handed around by whoever runs the job.
+    "project.member_role_changed",
     "project.member_removed",
     "floor.created",
     "floorplan.uploaded",

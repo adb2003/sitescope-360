@@ -51,7 +51,8 @@ import {
   useZones,
   type UploadProgress,
 } from '@/hooks/queries'
-import { Capability, useAuth } from '@/hooks/useAuth'
+import { Capability } from '@/hooks/useAuth'
+import { useProjectCan } from '@/hooks/useProjectCan'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { ApiError } from '@/lib/api'
 import {
@@ -64,7 +65,7 @@ import { cn, formatBytes, formatDateTime, formatRelative } from '@/lib/utils'
 
 export function CapturePage() {
   const { projectId } = useProjectContext()
-  const { can } = useAuth()
+  const { can } = useProjectCan(projectId)
   const navigate = useNavigate()
 
   const canCapture = can(Capability.CaptureCreate)

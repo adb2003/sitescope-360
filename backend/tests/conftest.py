@@ -206,17 +206,37 @@ def panorama_factory(demo_room: object):
     return factory
 
 
-def join_project(client: TestClient, admin_headers: dict[str, str], project_id: str, user_id: str):
-    """Give a non-admin user access to a project (§27).
+def join_project(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    project_id: str,
+    user_id: str,
+    role: Role | str | None = None,
+):
+    """Give a non-admin user access to a project, as something (§27).
 
     Explicit, and deliberately not an autouse fixture. Membership is enforced in tests exactly as
     it is in production — granting it automatically everywhere would mean no test could ever
     catch a scoping regression, which is most of the value of having the check at all. A test
     that needs a viewer to see an admin's project says so on the line that makes it true.
+
+    `role` defaults to the account's own, which is what every one of these calls meant before a
+    membership could hold a role of its own: the suite's users are named after their roles, so
+    "the engineer joins" has always meant "joins as an engineer". A test about per-project roles
+    passes one explicitly, and that is the only kind of test that should.
     """
+    if role is None:
+        from app.database.session import SessionLocal
+        from app.models import User
+
+        with SessionLocal() as session:
+            account = session.get(User, user_id)
+            assert account is not None, f"no such user {user_id}"
+            role = account.role
+
     response = client.post(
         f"/api/projects/{project_id}/members",
-        json={"user_id": user_id},
+        json={"user_id": user_id, "role": str(role)},
         headers=admin_headers,
     )
     assert response.status_code in {200, 201}, response.text

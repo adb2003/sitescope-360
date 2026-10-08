@@ -5,9 +5,16 @@ asked, so every authenticated user could read every project in the deployment: a
 viewer account could open the main contractor's other jobs, and no role change could prevent it
 because "viewer" was never meant to mean "viewer of everything".
 
-Membership is the missing half. It is not a second role — a user's global role still decides
-their capabilities, and this decides which projects those capabilities reach. Keeping the two
-separate is what stops this becoming a redesign of the §27 matrix.
+Membership is the missing half, and it carries a **role of its own**. A role used to be one
+value on the account, so somebody who had to edit one job could edit every job they could see:
+the only way to let a subcontractor's lead run their own site was to make them a project manager
+everywhere. Now the account role is a ceiling and the membership says what they are on this
+project, so the same person can manage one job and only look at the next.
+
+`effective_role` is the single answer to "what is this person here", and it takes the **lower**
+of the two every time it is asked rather than trusting what was stored. That matters in one
+direction above all: demoting an account has to demote it everywhere at once, without anyone
+remembering which five projects the person is on.
 
 **Enforced through the resource resolvers**, not route by route. `app.api.deps` already loads the
 project behind every path — a frame resolves to a session, a session to a project — and the
@@ -31,7 +38,8 @@ from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
 from app.auth.rbac import Capability, has_capability
-from app.core.errors import NotFoundError
+from app.core.enums import ROLE_RANK, Role
+from app.core.errors import NotFoundError, PermissionDeniedError
 from app.models import Building, Floor, ProjectMember, User
 
 
@@ -116,8 +124,21 @@ def member_floor_ids(db: Session, user: User) -> list[str] | None:
     )
 
 
-def grant(db: Session, project_id: str, user_id: str, *, added_by_id: str | None = None) -> bool:
-    """Add a member, idempotently. Returns whether a row was created."""
+def grant(
+    db: Session,
+    project_id: str,
+    user_id: str,
+    *,
+    role: Role,
+    added_by_id: str | None = None,
+) -> bool:
+    """Add a member, idempotently. Returns whether a row was created.
+
+    `role` is required and has no default. A default would have to be either the account role,
+    which quietly re-creates the deployment-wide role this column exists to end, or `viewer`,
+    which silently withholds access somebody meant to give — and whichever was chosen, the call
+    sites that did not think about it would be invisible.
+    """
     existing = db.scalar(
         select(ProjectMember.id).where(
             ProjectMember.project_id == project_id, ProjectMember.user_id == user_id
@@ -125,6 +146,105 @@ def grant(db: Session, project_id: str, user_id: str, *, added_by_id: str | None
     )
     if existing is not None:
         return False
-    db.add(ProjectMember(project_id=project_id, user_id=user_id, added_by_id=added_by_id))
+    db.add(
+        ProjectMember(project_id=project_id, user_id=user_id, role=role, added_by_id=added_by_id)
+    )
     db.flush()
     return True
+
+
+def membership_of(db: Session, user_id: str, project_id: str) -> ProjectMember | None:
+    return db.scalar(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id, ProjectMember.user_id == user_id
+        )
+    )
+
+
+# ---- what a person is on one project -----------------------------------------
+def capped(account_role: Role, project_role: Role) -> Role:
+    """The lower of the two, which is the only answer anything here should use.
+
+    One function rather than the same `min` written out in three places, and that is not
+    tidiness: it is the line the ceiling actually lives in, so it is the one worth being able to
+    break on purpose and watch tests fail. Three do — the role a project reports for the caller,
+    the capability list sent with it, and the members list.
+
+    Where it is *not* load-bearing is the authorization check itself, which is worth saying so
+    nobody mistakes this for the guard: the route's own signature has already refused anything
+    the account cannot do, and the capability sets are nested, so taking the minimum there can
+    only re-refuse what was refused. What it protects is the answer to "what can I do here",
+    which an interface believes and draws buttons from.
+    """
+    return min(account_role, project_role, key=lambda role: ROLE_RANK[role])
+
+
+def effective_role(db: Session, user: User, project_id: str) -> Role | None:
+    """The role this user holds **on this project**, or ``None`` if they hold none.
+
+    The lower of the account role and the project role, always. Storing the pair and taking the
+    minimum on every read is what makes a demotion take effect everywhere the moment it is
+    saved: the alternative is a sweep over every membership, which is the kind of thing that is
+    correct on the day it is written and half-applied a year later.
+
+    Exempt accounts (administrators) answer with their account role without a membership row,
+    for the reason `sees_every_project` gives.
+    """
+    if sees_every_project(user):
+        return user.role
+    member = membership_of(db, user.id, project_id)
+    if member is None:
+        return None
+    return capped(user.role, member.role)
+
+
+def project_roles_for(db: Session, user: User, project_ids: list[str]) -> dict[str, Role]:
+    """Effective roles for a page of projects, in one query rather than one each.
+
+    The project list renders what the caller may do on every row — a "New capture" button that
+    turns into a 403 is worse than no button — and asking per row would add a query per project
+    to a list that already costs several.
+    """
+    if sees_every_project(user):
+        return dict.fromkeys(project_ids, user.role)
+    if not project_ids:
+        return {}
+    rows = db.execute(
+        select(ProjectMember.project_id, ProjectMember.role).where(
+            ProjectMember.user_id == user.id, ProjectMember.project_id.in_(project_ids)
+        )
+    ).all()
+    return {project_id: capped(user.role, role) for project_id, role in rows}
+
+
+def can(db: Session, user: User, project_id: str, capability: Capability) -> bool:
+    role = effective_role(db, user, project_id)
+    return role is not None and has_capability(role, capability)
+
+
+def assert_can(
+    db: Session,
+    user: User,
+    project_id: str,
+    capability: Capability,
+    *,
+    what: str = "Project",
+) -> Role:
+    """Raise unless this user may do this **here**. Returns the role they are doing it with.
+
+    Two different refusals, because they answer two different people. Someone who is not a member
+    gets the 404 `assert_member` gives, for the reason written there — the existence of a project
+    is itself worth not confirming. Someone who *is* a member and lacks the capability gets a 403
+    naming the role they hold on this project, because they can see the job, they are looking at
+    a button that did not work, and "not found" would be a lie they cannot act on.
+    """
+    role = effective_role(db, user, project_id)
+    if role is None:
+        raise NotFoundError(f"{what} not found")
+    if not has_capability(role, capability):
+        raise PermissionDeniedError(
+            f"Your role on this project ({role}) cannot perform this action",
+            required_capability=str(capability),
+            project_role=str(role),
+        )
+    return role

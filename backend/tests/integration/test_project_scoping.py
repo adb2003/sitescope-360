@@ -249,7 +249,9 @@ def test_you_cannot_staff_a_project_you_are_not_on(
     headers = auth_headers(client, manager.email)
 
     refused = client.post(
-        f"/api/projects/{theirs['id']}/members", json={"user_id": viewer.id}, headers=headers
+        f"/api/projects/{theirs['id']}/members",
+        json={"user_id": viewer.id, "role": "viewer"},
+        headers=headers,
     )
 
     assert refused.status_code == 404, refused.text
@@ -258,7 +260,11 @@ def test_you_cannot_staff_a_project_you_are_not_on(
 def test_the_member_list_states_each_persons_role(
     client, admin_headers, viewer, two_projects
 ) -> None:
-    """Membership is not a role. The list has to show both, or it implies it is one."""
+    """A membership now carries a role, and the list has to show it next to the account's.
+
+    Both, because they differ in the ordinary case and a list showing one of them cannot explain
+    why somebody cannot do a thing their role appears to permit.
+    """
     _mine, theirs = two_projects
     join_project(client, admin_headers, theirs["id"], viewer.id)
 
@@ -266,6 +272,8 @@ def test_the_member_list_states_each_persons_role(
 
     entry = next(m for m in members if m["user_id"] == viewer.id)
     assert entry["role"] == "viewer"
+    assert entry["account_role"] == "viewer"
+    assert entry["effective_role"] == "viewer"
     assert entry["email"] == viewer.email
 
 
@@ -279,7 +287,7 @@ def test_a_member_can_be_named_by_email(client, admin_headers, viewer, two_proje
 
     added = client.post(
         f"/api/projects/{theirs['id']}/members",
-        json={"email": viewer.email},
+        json={"email": viewer.email, "role": "viewer"},
         headers=admin_headers,
     )
 
@@ -295,7 +303,7 @@ def test_naming_a_member_both_ways_at_once_is_refused(
 
     refused = client.post(
         f"/api/projects/{theirs['id']}/members",
-        json={"user_id": viewer.id, "email": viewer.email},
+        json={"user_id": viewer.id, "email": viewer.email, "role": "viewer"},
         headers=admin_headers,
     )
 

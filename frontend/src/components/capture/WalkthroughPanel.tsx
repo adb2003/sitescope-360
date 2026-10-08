@@ -23,7 +23,8 @@ import { useMemo, useState } from 'react'
 
 import { Badge, Button, Callout, Card, CardHeader, Field, Select } from '@/components/ui'
 import { useCaptureSegments, useProjectFloors, useSplitCapture } from '@/hooks/queries'
-import { Capability, useAuth } from '@/hooks/useAuth'
+import { Capability } from '@/hooks/useAuth'
+import { useProjectCan } from '@/hooks/useProjectCan'
 import { ApiError } from '@/lib/api'
 import type { CaptureSessionDetail, WalkthroughBoundary } from '@/types/api'
 
@@ -31,7 +32,9 @@ import type { CaptureSessionDetail, WalkthroughBoundary } from '@/types/api'
 type FloorChoice = Record<number, string>
 
 export function WalkthroughPanel({ session }: { session: CaptureSessionDetail }) {
-  const { can } = useAuth()
+  // Scoped to the capture's own project: this panel is reached from a capture, and the
+  // account may hold `capture:create` on other jobs and not this one.
+  const { can } = useProjectCan(session.project_id)
   const report = useCaptureSegments(session.id)
   const floors = useProjectFloors(session.project_id)
   const split = useSplitCapture(session.id)

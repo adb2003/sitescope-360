@@ -33,7 +33,8 @@ import {
   useUploadFloorPlan,
   useZones,
 } from '@/hooks/queries'
-import { Capability, useAuth } from '@/hooks/useAuth'
+import { Capability } from '@/hooks/useAuth'
+import { useProjectCan } from '@/hooks/useProjectCan'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { api, ApiError } from '@/lib/api'
 import { formatArea, formatPercent, humanize } from '@/lib/utils'
@@ -41,7 +42,7 @@ import type { CaptureLocation } from '@/types/api'
 
 export function FloorPlansPage() {
   const { projectId } = useProjectContext()
-  const { can } = useAuth()
+  const { can } = useProjectCan(projectId)
   const navigate = useNavigate()
 
   const floors = useProjectFloors(projectId)

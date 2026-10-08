@@ -119,6 +119,15 @@ export interface Project {
 }
 
 export interface ProjectSummary extends Project {
+  /**
+   * What the caller is on THIS project, and what that lets them do here (§27).
+   *
+   * Not the same as the capability list from `/auth/me`, which describes the account and
+   * is only a ceiling: a site engineer can be a viewer on one job, and an interface built
+   * on the account alone would offer them an upload button that returns 403.
+   */
+  your_role: Role | null
+  your_capabilities: string[]
   building_count: number
   floor_count: number
   zone_count: number
@@ -233,7 +242,12 @@ export interface ProjectMember {
   user_id: string
   email: string
   full_name: string
+  /** What they are on this project. */
   role: Role
+  /** Their account role, which is the ceiling `role` is held under. */
+  account_role: Role
+  /** `role` capped by `account_role` — what the API will actually enforce. */
+  effective_role: Role
   is_active: boolean
   added_at: string
   added_by_id: string | null

@@ -28,7 +28,8 @@ import {
   useReportTypes,
   useReports,
 } from '@/hooks/queries'
-import { Capability, useAuth } from '@/hooks/useAuth'
+import { Capability } from '@/hooks/useAuth'
+import { useProjectCan } from '@/hooks/useProjectCan'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { ApiError, api } from '@/lib/api'
 import { downloadBlob, formatBytes, formatDateTime, humanize } from '@/lib/utils'
@@ -36,7 +37,7 @@ import type { Report } from '@/types/api'
 
 export function ReportsPage() {
   const { projectId } = useProjectContext()
-  const { can } = useAuth()
+  const { can } = useProjectCan(projectId)
   const reports = useReports(projectId)
   const catalogue = useReportTypes()
   const [creating, setCreating] = useState(false)

@@ -18,6 +18,7 @@ from app.api.deps import (
     get_project_or_404,
     get_report_or_404,
 )
+from app.auth.rbac import Capability
 from app.core.enums import ReportFormat, ReportStatus, ReportType
 from app.core.errors import NotFoundError, SiteScopeError
 from app.core.ids import new_id
@@ -57,7 +58,7 @@ def generate_report(
     so queueing them would add a polling round trip for no benefit. The pipeline's queue exists
     for work that decodes video; this is not that.
     """
-    project = get_project_or_404(db, project_id, user)
+    project = get_project_or_404(db, project_id, user, needs=Capability.REPORT_GENERATE)
 
     record = Report(
         id=new_id(),
@@ -184,7 +185,7 @@ def download_report(report_id: str, db: DbSession, user: RequireProjectRead) -> 
 
 @router.delete("/reports/{report_id}", response_model=Message)
 def delete_report(report_id: str, db: DbSession, user: RequireReportGenerate) -> Message:
-    record = _get_or_404(db, report_id, user)
+    record = _get_or_404(db, report_id, user, needs=Capability.REPORT_GENERATE)
     if record.storage_key:
         with contextlib.suppress(Exception):
             get_storage().delete(record.storage_key)
@@ -229,14 +230,16 @@ def list_report_types(_: RequireProjectRead) -> dict:
     }
 
 
-def _get_or_404(db: DbSession, report_id: str, user: User) -> Report:
+def _get_or_404(
+    db: DbSession, report_id: str, user: User, *, needs: Capability = Capability.PROJECT_READ
+) -> Report:
     """Load a report and check the caller can reach its project (§27).
 
     A report is addressed by its own id, so nothing on the path resolves a project. It also
     carries the numbers rather than pointing at them — a leaked report id is the figures, not a
     route to them.
     """
-    return get_report_or_404(db, report_id, user)
+    return get_report_or_404(db, report_id, user, needs=needs)
 
 
 def _out(record: Report) -> ReportOut:

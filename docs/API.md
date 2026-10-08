@@ -1,6 +1,6 @@
 # API reference
 
-127 endpoints across 96 paths. Base prefix `/api`.
+128 endpoints across 96 paths. Base prefix `/api`.
 
 Interactive documentation is generated from the code and is the authoritative source:
 
@@ -148,20 +148,41 @@ than re-deriving the role table.
 A test asserts capabilities grow monotonically with role — a more privileged role can never lose
 one a lesser role has.
 
-#### Projects are scoped to their members
+#### A role is held on a project
 
-The role matrix says *what* a user may do. `project_members` says *which projects* they may do it
-to, and the two are separate on purpose: membership is not a second role, and a user has one
-global role everywhere. (Per-project roles — project manager on one job, viewer on another —
-would be a redesign of the matrix rather than an addition to it, and are not implemented.)
+The table above is the capability set for a role. **Which role somebody holds depends on the
+project**: `project_members.role` says what they are there, and the account role is a ceiling over
+it. The same person can run one job and only look at the next, which is how construction work is
+actually staffed — and the alternative was worse than it sounds, because the only way to let a
+subcontractor's lead manage their own site was to make them a project manager on every job they
+could see.
+
+    effective role on a project = min(account role, membership role)
+
+Taken on every request rather than written down once. Demoting an account therefore demotes it
+everywhere the moment it is saved, with nobody having to remember which projects the person is on.
 
 | | |
 | --- | --- |
-| `GET /projects/{id}/members` | Who can see this project. Readable by any member. |
-| `POST /projects/{id}/members` | Grant access. Needs `settings:project` **and** membership. |
-| `DELETE /projects/{id}/members/{user_id}` | Take it away. |
+| `GET /projects/{id}/members` | Who is on this project, with `role`, `account_role` and the `effective_role` that will be enforced. Readable by any member. |
+| `POST /projects/{id}/members` | Add somebody, as a named role. Needs `settings:project` **on this project**. |
+| `PATCH /projects/{id}/members/{user_id}` | Change what they are here. Same gate. |
+| `DELETE /projects/{id}/members/{user_id}` | Take access away. |
 
-Three things worth knowing:
+**Nobody hands out a role above their own.** A project manager staffing their own job cannot mint
+an administrator and then ask that person for the rest — which is what `settings:project` would
+otherwise be worth.
+
+**Every project reports what the caller is on it.** `GET /projects` and `GET /projects/{id}` carry
+`your_role` and `your_capabilities`, expanded server-side. `/auth/me` describes the *account*, so
+an interface built on it alone would offer a manager's buttons on a job where the person is a
+viewer and turn every one of them into a 403.
+
+**It takes effect without signing anyone out.** The access token carries the account role, which
+is checked against the row on every request; a project role is read from the database when it is
+needed, so a promotion works on the next click.
+
+Three further things worth knowing:
 
 **A non-member gets 404, not 403.** A 403 on a project a stranger was never told about confirms
 that it exists, and project codes are short and guessable. A member who has genuinely lost access

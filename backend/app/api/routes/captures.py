@@ -25,6 +25,7 @@ from app.api.deps import (
     get_session_or_404,
 )
 from app.auth.membership import restrict_to_member_projects
+from app.auth.rbac import Capability
 from app.core.enums import (
     CaptureSessionStatus,
     JobType,
@@ -98,7 +99,7 @@ def create_capture_session(
     # plain `db.get` and answers no authorization question — so without this an engineer with
     # `capture:create` could start a capture on any floor id in the deployment, which is a write
     # into another company's job rather than merely a read of it.
-    get_floor_or_404(db, payload.floor_id, user)
+    get_floor_or_404(db, payload.floor_id, user, needs=Capability.CAPTURE_CREATE)
     session = capture_service.create_session(db, payload, user)
     return CaptureSessionOut.model_validate(session)
 
@@ -196,7 +197,7 @@ def get_capture_session(
 def update_capture_session(
     session_id: str, payload: CaptureSessionUpdate, db: DbSession, user: RequireCaptureCreate
 ) -> CaptureSessionOut:
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.CAPTURE_CREATE)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(session, field, value)
     db.commit()
@@ -208,7 +209,7 @@ def finish_capture_session(
     session_id: str, db: DbSession, user: RequireCaptureCreate
 ) -> CaptureSessionOut:
     """Close the recording window. Does not start processing — that is an explicit step."""
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.CAPTURE_CREATE)
     if session.ended_at is None:
         session.ended_at = datetime.now(UTC)
     if session.status in (CaptureSessionStatus.DRAFT, CaptureSessionStatus.RECORDING):
@@ -224,7 +225,7 @@ def finish_capture_session(
 def cancel_capture_session(
     session_id: str, db: DbSession, user: RequireCaptureCreate
 ) -> CaptureSessionOut:
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.CAPTURE_CREATE)
     if session.status is CaptureSessionStatus.READY:
         raise ConflictError("A completed capture cannot be cancelled; delete it instead")
     session.status = CaptureSessionStatus.CANCELLED
@@ -235,7 +236,7 @@ def cancel_capture_session(
 
 @router.delete("/captures/{session_id}", response_model=Message)
 def delete_capture_session(session_id: str, db: DbSession, user: RequireCaptureDelete) -> Message:
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.CAPTURE_DELETE)
     # Not a blind prefix wipe: an upload that was split into several walkthroughs shares its
     # stored frames with them, and this capture may be the one holding the bytes.
     storage = capture_service.delete_session_storage(db, session)
@@ -274,7 +275,7 @@ def upload_capture_files(
     Files are streamed to the storage provider; nothing is buffered in memory and the request
     thread does no image processing — that happens on the queue (§8).
     """
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.UPLOAD)
     if not files:
         raise ValidationError("No files were included in the request")
 
@@ -311,7 +312,7 @@ def create_direct_upload_url(
     Two steps, not one, because the server cannot check bytes it has not seen. Nothing is
     recorded until the upload is registered and the object has been inspected.
     """
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.UPLOAD)
     ticket = capture_service.prepare_direct_upload(
         db,
         session,
@@ -362,7 +363,7 @@ def start_multipart_upload(
     on a site uplink is the difference between a walkthrough that eventually arrives and one
     that never does.
     """
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.UPLOAD)
     return _ticket_out(
         capture_service.prepare_multipart_upload(
             db,
@@ -387,7 +388,7 @@ def resume_multipart_upload(
     storage key and an upload id — are long, and putting them in a query string writes them into
     every access log and proxy cache between here and the client.
     """
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.UPLOAD)
     return _ticket_out(
         capture_service.resume_multipart_upload(
             session,
@@ -416,7 +417,7 @@ def finish_multipart_upload(
     assembling anything, so the client can resume rather than having to start over — which would
     make the resumable route no better than the one it replaces at the only moment it matters.
     """
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.UPLOAD)
     record = capture_service.complete_multipart_upload(
         db,
         session,
@@ -441,7 +442,7 @@ def abort_multipart_upload(
     looks for them, and on S3 they are billed until something says otherwise. So giving up needs
     to be an action a client can take, not just something it does by going quiet.
     """
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.UPLOAD)
     capture_service.abort_multipart_upload(
         session, storage_key=payload.storage_key, upload_id=payload.upload_id
     )
@@ -468,7 +469,7 @@ def register_direct_upload(
     Safe to call twice: a key already registered returns the existing record rather than a
     second row, which is what a client retrying over a site connection will do.
     """
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.UPLOAD)
     record = capture_service.register_direct_upload(
         db,
         session,
@@ -525,7 +526,7 @@ def list_capture_files(
 def delete_capture_file(
     session_id: str, file_id: str, db: DbSession, user: RequireCaptureDelete
 ) -> Message:
-    get_session_or_404(db, session_id, user)
+    get_session_or_404(db, session_id, user, needs=Capability.CAPTURE_DELETE)
     record = get_capture_file_or_404(db, file_id, user)
     if record is None or record.session_id != session_id:
         raise NotFoundError(f"File {file_id} not found in this capture")
@@ -561,7 +562,7 @@ def process_capture(
     The body is optional: ``POST /captures/{id}/process`` with no body runs the full pipeline
     with the session's configured frame interval, which is the common case from the UI.
     """
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.UPLOAD)
     options = payload or ProcessRequest()
     enqueue_pipeline(
         db,
@@ -582,7 +583,7 @@ def capture_status(session_id: str, db: DbSession, user: RequireCaptureRead) -> 
 @router.post("/captures/{session_id}/retry", response_model=ProcessingStatus)
 def retry_capture(session_id: str, db: DbSession, user: RequireUpload) -> ProcessingStatus:
     """Re-run the pipeline from the stage that failed (§34)."""
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.UPLOAD)
     if session.status is not CaptureSessionStatus.FAILED:
         raise ConflictError(
             f"This capture is {session.status}, not failed. Use /process with force=true to "
@@ -661,7 +662,7 @@ def assign_frame_location(
     Either reference an existing location, or give ``x``/``y`` to create one and bind in a single
     call, which is what the floor-plan editor does when a user drops a new pin on a frame.
     """
-    frame = get_frame_or_404(db, frame_id, user)
+    frame = get_frame_or_404(db, frame_id, user, needs=Capability.LOCATION_EDIT)
     session = get_session_or_404(db, frame.session_id, user)
 
     if payload.location_id:
@@ -692,7 +693,7 @@ def assign_frame_location(
 def unassign_frame_location(
     frame_id: str, db: DbSession, user: RequireLocationEdit
 ) -> CaptureFrameDetail:
-    frame = get_frame_or_404(db, frame_id, user)
+    frame = get_frame_or_404(db, frame_id, user, needs=Capability.LOCATION_EDIT)
     session = get_session_or_404(db, frame.session_id, user)
     frame.location_id = None
     frame.position_provenance = None
@@ -740,7 +741,7 @@ def split_capture(
     split somewhere nothing was proposed. What the platform insists on is that the segments
     tile the capture exactly — every frame in one walkthrough, none in two.
     """
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.CAPTURE_CREATE)
     outcome = grouping_service.split_session(
         db,
         session,
@@ -799,7 +800,7 @@ def align_capture_to_plan(
     are collinear in the estimated track, or a residual too large to believe. A placed track that
     is wrong is worse than an unplaced one, because it looks measured.
     """
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.LOCATION_EDIT)
     result = alignment_service.align_session_to_plan(
         db,
         session,
@@ -841,7 +842,7 @@ def localize_capture_from_earlier_captures(
     Never raises for the ordinary refusals. "No earlier capture to match against" and "nothing
     recognised" are answers, not errors, and both leave the capture exactly as it was.
     """
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.LOCATION_EDIT)
     outcome = relocalization_service.localize_session_to_plan(
         db, session, user_id=user.id, replace_existing=replace_existing
     )
@@ -889,7 +890,7 @@ def clear_capture_placement(
     Points the capture only *joined* are left alone: they belong to whoever created them, and
     another capture may be standing on them. So are any an operator declared by hand.
     """
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.LOCATION_EDIT)
     cleared = relocalization_service.clear_session_placement(db, session)
     db.commit()
     return ClearPlacementResult(

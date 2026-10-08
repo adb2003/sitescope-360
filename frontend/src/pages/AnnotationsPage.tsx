@@ -22,7 +22,8 @@ import {
   Tr,
 } from '@/components/ui'
 import { useProjectAnnotations, useProjectFloors, useUpdateAnnotation } from '@/hooks/queries'
-import { Capability, useAuth } from '@/hooks/useAuth'
+import { Capability } from '@/hooks/useAuth'
+import { useProjectCan } from '@/hooks/useProjectCan'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { formatDateTime, humanize } from '@/lib/utils'
 import {
@@ -33,7 +34,7 @@ import {
 
 export function AnnotationsPage() {
   const { projectId } = useProjectContext()
-  const { can } = useAuth()
+  const { can } = useProjectCan(projectId)
   const navigate = useNavigate()
   const floors = useProjectFloors(projectId)
 

@@ -99,18 +99,35 @@ const SPLIT_RESULT = {
   note: 'Split into 2 walkthroughs.',
 }
 
+/**
+ * The project this capture belongs to, because the panel's controls are gated on the role held
+ * *there* rather than on the account (§27). An engineer on one job can be a viewer on the next,
+ * so a split button drawn from `/auth/me` alone would appear on a capture it cannot touch.
+ */
+const PROJECT = {
+  id: CAPTURE.project_id,
+  your_role: 'admin',
+  your_capabilities: ['capture:read', 'capture:create', 'upload'],
+}
+
 function bodyFor(url: string): unknown {
   if (url.includes('/split')) return SPLIT_RESULT
   if (url.includes('/segments')) return null // set per test
   if (url.includes('/floors')) return FLOORS
   if (url.includes('/auth/me')) return SESSION
+  if (url.includes(`/projects/${CAPTURE.project_id}`)) return PROJECT
   return undefined
 }
 
-function show(segments: WalkthroughReport) {
+function show(segments: WalkthroughReport, project: Record<string, unknown> = PROJECT) {
   fetchMock.mockImplementation((input: string | URL) => {
     const url = String(input)
-    const body = url.includes('/segments') ? segments : bodyFor(url)
+    const scoped = url.includes(`/projects/${CAPTURE.project_id}`) && !url.includes('/floors')
+    const body = url.includes('/segments')
+      ? segments
+      : scoped
+        ? project
+        : bodyFor(url)
     if (body === undefined) {
       return Promise.resolve(
         new Response(JSON.stringify({ message: `unmocked: ${url}` }), { status: 404 }),
@@ -230,5 +247,27 @@ describe('WalkthroughPanel', () => {
     await screen.findByText(/looks like 2 walkthroughs/i)
     expect(screen.getAllByRole('combobox')).toHaveLength(1)
     expect(screen.getByText(/Stays in this capture on Level 00/)).toBeInTheDocument()
+  })
+
+  /*
+    A role is held on a project (§27), so the account's capability list is the wrong question for
+    a control that writes to one job. This account holds `capture:create` — the session payload
+    says so, and it is an administrator — and is a viewer *here*. The finding still has to be
+    readable: the panel's whole purpose is telling somebody what the imagery concluded, and
+    hiding that from a viewer would be hiding information, not a permission.
+  */
+  it('withholds the split from somebody who is only a viewer on this project', async () => {
+    show(report(), {
+      id: CAPTURE.project_id,
+      your_role: 'viewer',
+      your_capabilities: ['project:read', 'capture:read'],
+    })
+
+    expect(await screen.findByText(/looks like 2 walkthroughs/i)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('button', { name: /Split into 2 walkthroughs/ }),
+      ).not.toBeInTheDocument()
+    })
   })
 })

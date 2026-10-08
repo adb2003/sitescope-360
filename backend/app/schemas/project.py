@@ -56,6 +56,20 @@ class ProjectOut(ORMModel):
 class ProjectSummary(ProjectOut):
     """Project plus the roll-ups the project list and dashboard need (§21)."""
 
+    #: What the caller is **on this project**, and what that lets them do here (§27).
+    #:
+    #: Sent with every project because a role is per-project now: the capability list from
+    #: `/auth/me` describes the account, which is only a ceiling, so an interface built on it
+    #: alone would offer a manager's buttons on a job where the person is a viewer and turn every
+    #: one of them into a 403. The capabilities are expanded server-side for the same reason
+    #: `/auth/me` expands them — a client that re-derives the role table has a second copy of it
+    #: to keep in step.
+    #:
+    #: `None` only for an administrator reading a project nobody is a member of, which is the one
+    #: case where there is no membership and no restriction either.
+    your_role: Role | None = None
+    your_capabilities: list[str] = Field(default_factory=list)
+
     building_count: int = 0
     floor_count: int = 0
     zone_count: int = 0
@@ -194,21 +208,28 @@ class CaptureLocationUpdate(BaseModel):
 
 
 class ProjectMemberOut(BaseModel):
-    """One person who can see this project."""
+    """One person on this project, and what they are **here** (§27)."""
 
     user_id: str
     email: str
     full_name: str
-    #: The user's global role, which decides what they may do here. Membership decides only
-    #: *whether* they reach this project at all — the two are separate on purpose (§27).
+    #: What they are on this project: the role that decides every capability check for them here.
     role: Role
+    #: Their account role, which is the ceiling `role` is held under. Reported because the two
+    #: differing is the normal case now and a members list showing only one of them cannot
+    #: explain why a project manager here cannot upload — their account says `viewer`.
+    account_role: Role
+    #: `role` capped by `account_role`: what the API will actually enforce. Equal to `role` unless
+    #: somebody's account was lowered after they were given this project, which is exactly when a
+    #: list showing the stored value alone would be wrong.
+    effective_role: Role
     is_active: bool
     added_at: datetime
     added_by_id: str | None
 
 
 class ProjectMemberAdd(BaseModel):
-    """Who to add, named either way.
+    """Who to add, named either way, and as what.
 
     By id when the caller already has one — an administrator picking from the user list. By email
     otherwise, which is the only option a project manager has: listing users needs `user:manage`,
@@ -218,12 +239,22 @@ class ProjectMemberAdd(BaseModel):
 
     user_id: str | None = None
     email: EmailStr | None = None
+    #: What they are on this project. Required, with no default: a default would be either the
+    #: account role — recreating the deployment-wide role this replaced — or `viewer`, quietly
+    #: withholding the access somebody meant to give. The caller says.
+    role: Role
 
     @model_validator(mode="after")
     def exactly_one(self) -> ProjectMemberAdd:
         if bool(self.user_id) == bool(self.email):
             raise ValueError("Give either user_id or email, not both")
         return self
+
+
+class ProjectMemberRoleUpdate(BaseModel):
+    """Change what somebody is on this project, without removing and re-adding them."""
+
+    role: Role
 
 
 class SheetOut(BaseModel):

@@ -926,10 +926,29 @@ export function useProjectMembers(projectId: string | null | undefined) {
 export function useAddProjectMember(projectId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (body: { email?: string; user_id?: string }) =>
+    mutationFn: (body: { email?: string; user_id?: string; role: Role }) =>
       api.post<ProjectMember>(`/projects/${projectId}/members`, body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.projectMembers(projectId) })
+      void queryClient.invalidateQueries({ queryKey: keys.projects() })
+    },
+  })
+}
+
+/**
+ * Change what somebody is on this project.
+ *
+ * Invalidates the project itself as well as the member list, because changing your *own* role
+ * changes `your_capabilities` — the controls on screen have to follow it without a reload.
+ */
+export function useSetProjectMemberRole(projectId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ userId, role }: { userId: string; role: Role }) =>
+      api.patch<ProjectMember>(`/projects/${projectId}/members/${userId}`, { role }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.projectMembers(projectId) })
+      void queryClient.invalidateQueries({ queryKey: keys.project(projectId) })
       void queryClient.invalidateQueries({ queryKey: keys.projects() })
     },
   })

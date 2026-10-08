@@ -42,7 +42,7 @@ router = APIRouter(tags=["annotations"])
 def create_annotation(
     frame_id: str, payload: AnnotationCreate, db: DbSession, user: RequireAnnotate
 ) -> AnnotationDetail:
-    frame = get_frame_or_404(db, frame_id, user)
+    frame = get_frame_or_404(db, frame_id, user, needs=Capability.ANNOTATE)
     session = get_session_or_404(db, frame.session_id, user)
 
     annotation = Annotation(
@@ -126,7 +126,7 @@ def get_annotation(annotation_id: str, db: DbSession, user: RequireCaptureRead) 
 def update_annotation(
     annotation_id: str, payload: AnnotationUpdate, db: DbSession, user: RequireAnnotate
 ) -> AnnotationDetail:
-    annotation = _get_or_404(db, annotation_id, user)
+    annotation = _get_or_404(db, annotation_id, user, needs=Capability.ANNOTATE)
     updates = payload.model_dump(exclude_unset=True)
 
     # Anyone who can annotate may edit their own note; resolving someone else's finding is a
@@ -158,7 +158,7 @@ def update_annotation(
 
 @router.delete("/annotations/{annotation_id}", response_model=Message)
 def delete_annotation(annotation_id: str, db: DbSession, user: RequireAnnotate) -> Message:
-    annotation = _get_or_404(db, annotation_id, user)
+    annotation = _get_or_404(db, annotation_id, user, needs=Capability.ANNOTATE)
     if annotation.created_by_id != user.id and not has_capability(
         user.role, Capability.ANNOTATION_RESOLVE
     ):
@@ -180,7 +180,13 @@ def delete_annotation(annotation_id: str, db: DbSession, user: RequireAnnotate) 
     return Message(message="Annotation deleted")
 
 
-def _get_or_404(db: DbSession, annotation_id: str, user: User) -> Annotation:
+def _get_or_404(
+    db: DbSession,
+    annotation_id: str,
+    user: User,
+    *,
+    needs: Capability = Capability.CAPTURE_READ,
+) -> Annotation:
     """Load an annotation and check the caller can reach its project (§27).
 
     These three routes address an annotation directly, so nothing on the path resolves a frame or

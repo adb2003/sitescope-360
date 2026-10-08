@@ -45,7 +45,8 @@ import {
   useLocations,
   useViewerManifest,
 } from '@/hooks/queries'
-import { Capability, useAuth } from '@/hooks/useAuth'
+import { Capability } from '@/hooks/useAuth'
+import { useProjectCan } from '@/hooks/useProjectCan'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { ApiError } from '@/lib/api'
 import type { AlignTrackResult, ClearPlacementResult, LocalizeResult } from '@/types/api'
@@ -68,7 +69,7 @@ export function ViewerPage() {
   const params = useParams<{ frameId: string }>()
   const navigate = useNavigate()
   const { projectId } = useProjectContext()
-  const { can } = useAuth()
+  const { can } = useProjectCan(projectId)
 
   const [frameId, setFrameId] = useState<string | null>(params.frameId ?? null)
   // Mirrored from the viewer so the minimap's cone follows where the operator is looking.

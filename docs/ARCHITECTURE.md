@@ -935,6 +935,41 @@ See [CAMERA_INTEGRATION.md](CAMERA_INTEGRATION.md).
 | Site Engineer | read | create | ✓ | ✓ | — |
 | Viewer | read | read | — | — | — |
 
+### A role is held on a project
+
+The table above is what a role *can do*. Which role somebody holds is a property of the
+**membership**, not of the account:
+
+    effective role on a project = min(account role, project_members.role)
+
+The account role became a ceiling, and `project_members.role` says what they are on that job. The
+same person can manage one site and only look at the next — which is how this work is staffed, and
+what the previous design could not express: the only way to let a subcontractor's lead run their
+own site was to make them a project manager on every job they could see.
+
+Three consequences worth having in one place:
+
+- **The minimum is taken on every request, not written down once.** Lowering an account lowers it
+  on every project at once, with nobody having to remember which ones. A sweep would be correct
+  the day it was written and half-applied a year later.
+- **The capability in a route's signature is now a ceiling check, so it cannot be the only one.**
+  `require_capability` sees the account; the role that decides is the one held on whichever
+  project the request turns out to touch, and the only place that is known is the resolver in
+  `app/api/deps.py`. So a resolver takes the capability its route needs — `get_frame_or_404(…,
+  needs=Capability.ANNOTATE)` — and `test_project_roles.py` reads the route table to fail any
+  write route that declares a capability in its signature and never names one at a resolver. A
+  route that forgot would be judged on the ceiling alone, which is the hole this closed.
+- **Nobody grants a role above their own on that project.** Otherwise `settings:project` is worth
+  `settings:system`: a manager could make somebody an administrator and ask them for the rest.
+
+Reads need no capability argument, and that is not an omission. Every member holds `project:read`
+and `capture:read` — `viewer` is the lowest role and has both — so a resolver called without one
+performs exactly the membership check it always did.
+
+Clients are told rather than left to infer: `GET /projects` and `GET /projects/{id}` carry
+`your_role` and `your_capabilities` for the caller, expanded server-side, because an interface
+built on `/auth/me` alone would draw a manager's buttons on a job where the person is a viewer.
+
 ### Response headers
 
 Set by whichever side generates the response, which is the only arrangement that works:

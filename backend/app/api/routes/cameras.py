@@ -15,6 +15,7 @@ from app.api.deps import (
     RequireUpload,
     get_session_or_404,
 )
+from app.auth.rbac import Capability
 from app.cameras import UnsupportedOperation, get_provider, selectable_providers
 from app.core.errors import NotFoundError, ValidationError
 from app.models import CameraDevice
@@ -148,7 +149,7 @@ def import_from_camera(
     sniffing, size limits, checksums and de-duplication behave identically no matter how the
     bytes arrived.
     """
-    session = get_session_or_404(db, session_id, user)
+    session = get_session_or_404(db, session_id, user, needs=Capability.UPLOAD)
     device = _get_or_404(db, device_id)
     provider = get_provider(device.provider_key)
     config = device.config or {}

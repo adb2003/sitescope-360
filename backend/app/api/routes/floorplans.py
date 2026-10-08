@@ -23,6 +23,7 @@ from app.api.deps import (
     get_plan_or_404,
     project_id_for_floor,
 )
+from app.auth.rbac import Capability
 from app.core.config import settings
 from app.core.errors import (
     NotFoundError,
@@ -81,7 +82,7 @@ def upload_floor_plan(
     ] = 1,
 ) -> FloorPlanOut:
     # Existence check only: a 404 here is the point, the row itself is not needed.
-    get_floor_or_404(db, floor_id, user)
+    get_floor_or_404(db, floor_id, user, needs=Capability.FLOORPLAN_EDIT)
     project_id = project_id_for_floor(db, floor_id, user)
 
     filename = (file.filename or "floorplan").strip()
@@ -209,7 +210,7 @@ def get_active_floor_plan(floor_id: str, db: DbSession, user: RequireProjectRead
 
 @router.post("/floorplans/{plan_id}/activate", response_model=FloorPlanOut)
 def activate_floor_plan(plan_id: str, db: DbSession, user: RequireFloorPlanEdit) -> FloorPlanOut:
-    plan = get_plan_or_404(db, plan_id, user)
+    plan = get_plan_or_404(db, plan_id, user, needs=Capability.FLOORPLAN_EDIT)
     for other in db.scalars(select(FloorPlan).where(FloorPlan.floor_id == plan.floor_id)):
         other.is_active = other.id == plan.id
     db.commit()
@@ -229,7 +230,7 @@ def calibrate_floor_plan(
     alignment will build on — so it is entered by a human against a dimension printed on the
     drawing, and stored as ``manual``. Nothing infers it.
     """
-    plan = get_plan_or_404(db, plan_id, user)
+    plan = get_plan_or_404(db, plan_id, user, needs=Capability.FLOORPLAN_EDIT)
 
     pixel_distance = math.hypot(payload.x2 - payload.x1, payload.y2 - payload.y1)
     if pixel_distance < 1.0:
@@ -251,7 +252,7 @@ def calibrate_floor_plan(
 
 @router.delete("/floorplans/{plan_id}", response_model=Message)
 def delete_floor_plan(plan_id: str, db: DbSession, user: RequireFloorPlanEdit) -> Message:
-    plan = get_plan_or_404(db, plan_id, user)
+    plan = get_plan_or_404(db, plan_id, user, needs=Capability.FLOORPLAN_EDIT)
     located = db.scalar(
         select(CaptureLocation.id).where(CaptureLocation.floor_plan_id == plan.id).limit(1)
     )
@@ -323,7 +324,7 @@ def create_capture_location(
     db: DbSession,
     user: RequireLocationEdit,
 ) -> CaptureLocationOut:
-    floor = get_floor_or_404(db, floor_id, user)
+    floor = get_floor_or_404(db, floor_id, user, needs=Capability.LOCATION_EDIT)
     location = capture_service.create_location(
         db,
         floor,
@@ -449,7 +450,7 @@ def update_capture_location(
     user: RequireLocationEdit,
 ) -> CaptureLocationOut:
     """Move or relabel a capture point — the drag interaction in the floor-plan editor."""
-    location = get_location_or_404(db, location_id, user)
+    location = get_location_or_404(db, location_id, user, needs=Capability.LOCATION_EDIT)
 
     updates = payload.model_dump(exclude_unset=True)
     if "x" in updates or "y" in updates:
@@ -480,7 +481,7 @@ def update_capture_location(
 
 @router.delete("/locations/{location_id}", response_model=Message)
 def delete_capture_location(location_id: str, db: DbSession, user: RequireLocationEdit) -> Message:
-    location = get_location_or_404(db, location_id, user)
+    location = get_location_or_404(db, location_id, user, needs=Capability.LOCATION_EDIT)
 
     # Frames keep existing; they simply become unplaced (ON DELETE SET NULL).
     affected = list(db.scalars(select(CaptureFrame).where(CaptureFrame.location_id == location.id)))
@@ -620,7 +621,7 @@ def choose_plan_sheet(
     A sheet already rendered for this floor is re-activated rather than rendered again, so
     switching away and back returns to the revision the points are on.
     """
-    plan = get_plan_or_404(db, plan_id, user)
+    plan = get_plan_or_404(db, plan_id, user, needs=Capability.FLOORPLAN_EDIT)
     revision = sheets_service.choose_sheet(db, plan, page, user)
 
     # Points are not moved — that is the whole reason this is a revision — and the editor no

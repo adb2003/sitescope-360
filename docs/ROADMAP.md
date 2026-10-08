@@ -30,7 +30,7 @@ Everything in the §52 Definition of Done, verified end to end through HTTP by
 | Reports | ✅ | 4 types × 3 formats, with a provenance section that survives CSV export. |
 | Processing pipeline | ✅ | 7 independent, idempotent, retryable stages on a pluggable queue. |
 | Observability | ✅ | Structured JSON events, correlation ids, admin job dashboard. |
-| Project access control | ✅ | `project_members` scopes every read and write; a non-member gets 404 rather than 403, and administrators are exempt. |
+| Project access control | ✅ | `project_members` scopes every read and write, and carries the **role held on that project** — the account role is a ceiling over it, so one person can manage one job and only view another. A non-member gets 404 rather than 403, a member lacking a capability gets 403 naming their role here, and administrators are exempt. |
 | Share links | ✅ | A read-only link to one view, openable with no account. Token stored only as a hash and shown once; expiry mandatory and capped; revocable by any member. |
 | Docker / CI | ⚠ written | Compose, Dockerfiles, nginx and a 6-job CI workflow exist but were not executed locally (no Docker here). CI runs them. |
 
@@ -302,11 +302,16 @@ Collected in one place, all documented at their source:
    real. The API warns at startup and the API reports `"durable": false`.
 11. **Two adapters are unverified against hardware** (OSC, Insta360) and report
    `implemented: false`.
-12. **One role per user, everywhere.** `project_members` decides which projects a user reaches
-   and their global role decides what they may do once there, so somebody who manages one job and
-   merely views another cannot be expressed: they are a project manager on both. Per-project
-   roles are a redesign of the §27 matrix rather than an addition to it — every capability check
-   would need a project in hand — and were deliberately not attempted alongside the scoping.
+12. **A role is per project; the account role is a ceiling over it.** This was a known
+   limitation — one role everywhere, so somebody who managed one job and merely viewed another
+   was a project manager on both — and is now `project_members.role`, with every check taking
+   `min(account role, project role)` on every request rather than trusting a stored value.
+   What that still does not give you is a role *above* your account anywhere: making somebody a
+   manager on one job means raising their account to manager, which grants nothing by itself
+   (capabilities only apply where you are a member) except the ability to create a project of
+   their own. That is a deliberate trade — the alternative is that the route-level capability
+   guard can no longer refuse anything, since any account might be elevated on some project, and
+   it would have to query memberships before routing.
 13. **Password recovery is an administrator action, never self-service.** Proving you own an
    address means sending something to it, and no feature here may depend on a mail service to
    run locally — so there is no "forgot password" link and there will not be one while that

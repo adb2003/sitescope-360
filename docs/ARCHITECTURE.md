@@ -381,7 +381,7 @@ fails in production having worked locally:
 
 #### The queue has to be recoverable, not just durable
 
-Durability was never the problem — SQLite and the device filesystem had that. Two ways a capture
+Durability was never the problem — SQLite and the device filesystem had that. Three ways a capture
 could get *stuck* were:
 
 **A file nobody could remove.** `queue.ts` had `enqueueFile` and `discardUploaded` and nothing for
@@ -404,7 +404,41 @@ never uploaded and nothing on screen explained why. `openQueue` now returns thos
 `pending`: nothing can legitimately be uploading at the moment the database opens, so they are
 all orphans.
 
-Both rules live in `mobile/src/lib/queuePolicy.ts` rather than in `queue.ts`, so the Node test
+**A refusal retried for ever, blocking everything behind it.** The drain stops on the first
+failure, which is right for the usual one — no signal, and spending battery on the rest of the
+queue achieves nothing — and wrong once the server has decided. A file the API will never accept
+was the oldest `failed` row on every drain from then on, so it was tried first, failed, and
+stopped the run. The paragraph above offers the operator a way out of that by hand, which presumes
+they work out that they have to.
+
+Per-project roles made it ordinary rather than exotic: an engineer who is a viewer on *this* job
+gets 403 on the upload, and no amount of signal changes that. A file type the API does not accept
+(422), one larger than the endpoint takes (413) and a capture deleted in the web app (404) always
+behaved the same way.
+
+`afterUploadFailure` decides both halves together, because they are one decision: a permanent
+refusal is terminal **and** the drain carries on past it; a transient failure is kept for retry
+**and** the drain stops. 401 is transient — signing in again fixes it — as are 408, 429 and every
+5xx. A failure with no status at all is transient, which is the safe direction: a file wrongly
+kept is retried, a file wrongly refused is work somebody has to redo.
+
+Two details decide whether that works at all:
+
+- **The status is read through the wrapper.** A chunked upload wraps every failure in
+  `ResumableUploadInterrupted` so the next drain can resume from the parts already sent, and the
+  real error is underneath as `cause`. Multipart is the route large files take, and large files are
+  the ones refused for being too large or the wrong type — so without walking the chain the status
+  would be invisible on exactly the route where it matters most.
+- **Nothing is deleted.** A refused file keeps its bytes and its reason, the queue screen says what
+  happened instead of showing it as waiting, and the heading never reads "everything is uploaded"
+  while something refused is still on the device. The phone frequently holds the only copy of a
+  walk somebody physically took.
+
+A session the server refuses permanently is recorded the same way (`sessions.refused_reason`) and
+not re-sent on every drain; a later successful push clears the mark, so an operator put back on a
+project does not have to re-record the walk.
+
+All three rules live in `mobile/src/lib/queuePolicy.ts` rather than in `queue.ts`, so the Node test
 runner reaches them without booting expo-sqlite — the same split as `syncPolicy.ts`.
 
 #### Offline in both directions: the reference-data cache
@@ -1020,6 +1054,18 @@ version for the lifetime of the `max-age`, and no later response can shorten it.
   one — plus one quality query and one grouped annotation count for the whole page. Per frame it
   cost five: 9 queries for one frame, 54 for ten, 104 for twenty, so the default page of fifty
   ran to about 254. It is now eight at any page size.
+- `GET /projects` was the last endpoint in the API that grew with its rows, and it hid behind the
+  fix above: that one rewrote `build_portfolio` for the dashboard, while the project list went
+  through a different helper counting one project at a time. Seven queries per project — 10 for
+  one, 45 for six, 87 for twelve — on the endpoint behind the sidebar, which loads on every page.
+  It is now seven grouped queries at any page size. A sweep of every other list endpoint
+  (locations, zones, floors, captures, coverage, timeline, frequency, members, shares,
+  annotations, users, cameras, sync, reports) found all of them already fixed-cost between two
+  rows and ten.
+- The counts themselves were checked separately from the query count, against the development
+  database: the grouped version and the per-project version agree on all seven figures for all
+  six projects, including the four with no captures at all, which is the case the grouped version
+  answers from an absent key rather than a zero row.
 - Neither is visible on demo data, which is why both are held by `tests/integration/
   test_query_counts.py` — it counts statements and asserts the count does not change with the
   number of rows. A ceiling alone would not do: the frame list passed `< 15` while still growing

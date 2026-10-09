@@ -29,7 +29,13 @@ import { Platform } from 'react-native'
 import type * as SQLiteTypes from 'expo-sqlite'
 
 import { api } from './api'
-import { isRemovable, stuckUploadIds } from './queuePolicy'
+import {
+  afterUploadFailure,
+  isPermanentRefusal,
+  isRemovable,
+  statusOf,
+  stuckUploadIds,
+} from './queuePolicy'
 import { isAlreadyProcessing, sessionsReadyForProcessing } from './syncPolicy'
 import { clearOrphanedParts, expoUploadIO } from './uploadIO'
 import { ResumableUploadInterrupted, abandonUpload, uploadFile, type ResumeHandle } from './uploads'
@@ -37,7 +43,12 @@ import { ResumableUploadInterrupted, abandonUpload, uploadFile, type ResumeHandl
 const DB_NAME = 'sitescope.db'
 const UPLOAD_DIR = `${FileSystem.documentDirectory}captures/`
 
-export type QueueStatus = 'pending' | 'uploading' | 'uploaded' | 'failed'
+/**
+ * `refused` is terminal and the others are not: the server answered, and it will answer the same
+ * way next time (see `isPermanentRefusal`). The row keeps the file and the reason so the operator
+ * can read it and decide; nothing is deleted on their behalf.
+ */
+export type QueueStatus = 'pending' | 'uploading' | 'uploaded' | 'failed' | 'refused'
 
 export interface PendingSession {
   id: string
@@ -52,6 +63,15 @@ export interface PendingSession {
   latitude: number | null
   longitude: number | null
   synced: number
+  /**
+   * Why the server will not take this session, if it said so.
+   *
+   * Set only for a refusal that will be repeated — a floor this operator may no longer capture
+   * to, a project they were taken off. A session carrying one is not pushed again, so the drain
+   * stops asking a question that has been answered, and the screen can say what happened instead
+   * of showing a walk that never leaves.
+   */
+  refusedReason: string | null
 }
 
 export interface PendingFile {
@@ -166,6 +186,7 @@ export async function openQueue(): Promise<SQLiteTypes.SQLiteDatabase> {
 
   await addColumnIfMissing(database, 'files', 'resume_key', 'TEXT')
   await addColumnIfMissing(database, 'files', 'resume_upload_id', 'TEXT')
+  await addColumnIfMissing(database, 'sessions', 'refused_reason', 'TEXT')
 
   // Nothing can be mid-upload at the moment the database opens, so any row claiming to be is
   // from a run the OS ended. Left alone it would never be retried and never explained.
@@ -196,7 +217,9 @@ export function newSessionId(when: Date = new Date()): string {
 
 // ---- sessions ---------------------------------------------------------------
 export async function createLocalSession(
-  session: Omit<PendingSession, 'synced'>,
+  // `refusedReason` too: a session is created by the capture screen, which has nothing to say
+  // about a refusal that has not happened yet.
+  session: Omit<PendingSession, 'synced' | 'refusedReason'>,
 ): Promise<PendingSession> {
   const db = await openQueue()
   await db.runAsync(
@@ -218,7 +241,7 @@ export async function createLocalSession(
       session.longitude,
     ],
   )
-  return { ...session, synced: 0 }
+  return { ...session, synced: 0, refusedReason: null }
 }
 
 export async function finishLocalSession(sessionId: string): Promise<void> {
@@ -313,6 +336,8 @@ export interface SyncResult {
   sessionsCreated: number
   filesUploaded: number
   filesFailed: number
+  /** Files the server refused outright, which no later drain will retry. */
+  filesRefused: number
   /** Sessions handed to the processing pipeline, so they appear in the web app. */
   sessionsProcessing: number
   errors: string[]
@@ -338,11 +363,14 @@ export async function sync(): Promise<SyncResult> {
     sessionsCreated: 0,
     filesUploaded: 0,
     filesFailed: 0,
+    filesRefused: 0,
     sessionsProcessing: 0,
     errors: [],
   }
 
-  const unsynced = (await listSessions()).filter((session) => session.synced === 0)
+  const unsynced = (await listSessions()).filter(
+    (session) => session.synced === 0 && session.refusedReason === null,
+  )
   for (const session of unsynced) {
     try {
       // Idempotent on client_session_id: a retry returns the existing session (§32, §33).
@@ -358,10 +386,24 @@ export async function sync(): Promise<SyncResult> {
         gps_latitude: session.latitude ?? undefined,
         gps_longitude: session.longitude ?? undefined,
       })
-      await db.runAsync('UPDATE sessions SET synced = 1 WHERE id = ?', [session.id])
+      await db.runAsync(
+        'UPDATE sessions SET synced = 1, refused_reason = NULL WHERE id = ?',
+        [session.id],
+      )
       result.sessionsCreated += 1
     } catch (error) {
-      result.errors.push(`Session ${session.id}: ${describe(error)}`)
+      const message = describe(error)
+      result.errors.push(`Session ${session.id}: ${message}`)
+      if (isPermanentRefusal(statusOf(error))) {
+        // The same decision as for a file, one level up: a session the server will not accept —
+        // a floor somebody may no longer capture to, a project they were taken off — is recorded
+        // as refused rather than re-sent on every drain for the life of the device. Its files
+        // are already skipped, because they wait on `synced`.
+        await db.runAsync('UPDATE sessions SET refused_reason = ? WHERE id = ?', [
+          message,
+          session.id,
+        ])
+      }
       // Without the session on the server its files cannot be uploaded; skip them this run.
       continue
     }
@@ -410,14 +452,37 @@ export async function sync(): Promise<SyncResult> {
       // would succeed, slowly, having re-sent everything.
       const resume =
         error instanceof ResumableUploadInterrupted ? error.resume : (file.resume ?? null)
+
+      // Both halves of the decision come from one place, and `queuePolicy.test.ts` can reach it:
+      // a refusal is terminal and the drain carries on past it, a transient failure is kept for
+      // retry and the drain stops. A refused file keeps no resume handle — there is nothing to
+      // resume towards.
+      const outcome = afterUploadFailure(statusOf(error))
+      if (outcome.status === 'refused' && resume) {
+        // Nothing will ever complete this multipart upload, so its parts are told to go now
+        // rather than waiting for `purge_stale_uploads` or an S3 lifecycle rule. Best effort and
+        // nothing hangs on it, exactly as `removeFile` treats the same call: the operator is
+        // usually short of signal, and the parts are bounded either way.
+        await abandonUpload(expoUploadIO, file.sessionId, resume, {
+          name: file.name,
+          sizeBytes: file.sizeBytes,
+        }).catch(() => undefined)
+      }
       await db.runAsync(
-        "UPDATE files SET status = 'failed', attempts = attempts + 1, last_error = ?, " +
+        'UPDATE files SET status = ?, attempts = attempts + 1, last_error = ?, ' +
           'resume_key = ?, resume_upload_id = ? WHERE id = ?',
-        [message, resume?.storageKey ?? null, resume?.uploadId ?? null, file.id],
+        [
+          outcome.status,
+          message,
+          outcome.status === 'refused' ? null : (resume?.storageKey ?? null),
+          outcome.status === 'refused' ? null : (resume?.uploadId ?? null),
+          file.id,
+        ],
       )
-      result.filesFailed += 1
       result.errors.push(`${file.name}: ${message}`)
-      break
+      if (outcome.status === 'refused') result.filesRefused += 1
+      else result.filesFailed += 1
+      if (outcome.stopDraining) break
     }
   }
 
@@ -575,6 +640,7 @@ function rowToSession(row: Record<string, unknown>): PendingSession {
     latitude: (row.latitude as number | null) ?? null,
     longitude: (row.longitude as number | null) ?? null,
     synced: Number(row.synced ?? 0),
+    refusedReason: (row.refused_reason as string | null) ?? null,
   }
 }
 
@@ -611,3 +677,4 @@ function describe(error: unknown): string {
   if (error instanceof Error) return error.message
   return String(error)
 }
+

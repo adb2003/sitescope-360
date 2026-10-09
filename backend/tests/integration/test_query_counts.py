@@ -313,3 +313,64 @@ def test_opening_a_panorama_does_not_query_once_per_neighbour(
         f"{queries} queries to open one panorama with {len(neighbours)} placed neighbours — "
         "one per neighbour is the shape to look for"
     )
+
+
+def test_the_project_list_costs_the_same_for_one_project_as_for_six(
+    client: TestClient, admin, sql
+) -> None:
+    """The sidebar, which loads on every sign-in and on every page.
+
+    The last endpoint in this API that grew with its rows, and it hid behind the portfolio fix:
+    that one rewrote `monitoring.build_portfolio` for `GET /dashboard`, while `GET /projects`
+    went through a different helper counting one project at a time. Measured at seven queries per
+    project — 10 for one, 45 for six, 87 for twelve — so around 360 for a contractor with fifty
+    live jobs, before anything on the page was drawn.
+
+    The counts themselves were checked a different way, against the development database, where
+    the grouped version and the per-project version agreed on all seven figures for all six
+    projects including the four with no captures at all. This test is only about the shape.
+    """
+    headers = auth_headers(client, admin.email)
+
+    def add(index: int) -> None:
+        project = client.post(
+            "/api/projects",
+            json={"name": f"List {index}", "code": f"QLST-{index}"},
+            headers=headers,
+        ).json()
+        building = client.post(
+            f"/api/projects/{project['id']}/buildings", json={"name": "B"}, headers=headers
+        ).json()
+        floor = client.post(
+            f"/api/buildings/{building['id']}/floors",
+            json={"name": "L1", "level": 1},
+            headers=headers,
+        ).json()
+        # Rows under the floor as well: zones and capture points are counted through a join, so
+        # a project with none of them would not exercise the grouping.
+        client.post(f"/api/floors/{floor['id']}/zones", json={"name": "Z"}, headers=headers)
+        client.post(
+            f"/api/floors/{floor['id']}/locations",
+            json={"code": f"P{index:02d}", "x": 0.5, "y": 0.5},
+            headers=headers,
+        )
+
+    add(0)
+    with sql as counter:
+        client.get("/api/projects", headers=headers)
+        one = counter.count
+
+    for index in range(1, 6):
+        add(index)
+
+    with sql as counter:
+        body = client.get("/api/projects", headers=headers).json()
+        six = counter.count
+
+    assert body["total"] == 6
+    # Every row still carries its roll-ups; a fixed cost that returned zeros would pass a count
+    # assertion and be useless.
+    assert all(row["floor_count"] == 1 and row["zone_count"] == 1 for row in body["items"])
+    assert all(row["location_count"] == 1 for row in body["items"])
+    assert one == six, f"{one} queries for one project, {six} for six — the cost is per row"
+    assert six < 15, f"{six} queries to render the project list"

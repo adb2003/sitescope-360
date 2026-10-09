@@ -59,7 +59,10 @@ export function QueueScreen({
       const result = await sync()
       setMessage(
         `${result.sessionsCreated} session(s) registered, ${result.filesUploaded} file(s) uploaded` +
-          (result.filesFailed ? `, ${result.filesFailed} failed` : ''),
+          (result.filesFailed ? `, ${result.filesFailed} failed` : '') +
+          // Counted apart from a failure on purpose: one will go up when there is signal and the
+          // other never will, and a single "2 failed" invites the operator to wait for the first.
+          (result.filesRefused ? `, ${result.filesRefused} refused by the server` : ''),
       )
       setErrors(result.errors)
     } finally {
@@ -120,6 +123,9 @@ export function QueueScreen({
 
   const pending = files.filter((file) => file.status === 'pending' || file.status === 'failed')
   const uploaded = files.filter((file) => file.status === 'uploaded')
+  // Not "waiting": nothing is going to collect these. Counted separately so the queue total does
+  // not keep a number on screen that no amount of signal will bring down.
+  const refused = files.filter((file) => file.status === 'refused')
 
   if (!QUEUE_IS_AVAILABLE) {
     // Expo web has no durable local database, so there is no queue to show. Saying that plainly
@@ -148,7 +154,12 @@ export function QueueScreen({
         <Heading>
           {pending.length
             ? `${pending.length} file(s) waiting for upload`
-            : 'Everything is uploaded'}
+            : refused.length
+              ? // Never "everything is uploaded" while something is sitting here that the server
+                // refused. Nothing is going to collect it, and a screen that says the queue is
+                // clear is how an operator wipes a device holding the only copy of a walk.
+                `${refused.length} file(s) refused — nothing waiting`
+              : 'Everything is uploaded'}
         </Heading>
 
         {!online ? (
@@ -192,7 +203,9 @@ export function QueueScreen({
           <Heading>Capture sessions on this device</Heading>
           {sessions.map((session) => {
             const sessionFiles = files.filter((file) => file.sessionId === session.id)
-            const outstanding = sessionFiles.filter((file) => file.status !== 'uploaded')
+            const outstanding = sessionFiles.filter(
+              (file) => file.status !== 'uploaded' && file.status !== 'refused',
+            )
             const allUploaded = sessionFiles.length > 0 && outstanding.length === 0
 
             return (
@@ -226,7 +239,7 @@ export function QueueScreen({
                       tone={
                         file.status === 'uploaded'
                           ? 'good'
-                          : file.status === 'failed'
+                          : file.status === 'failed' || file.status === 'refused'
                             ? 'bad'
                             : file.status === 'uploading'
                               ? 'brand'
@@ -246,9 +259,36 @@ export function QueueScreen({
                   </View>
                 ))}
 
-                {sessionFiles.some((file) => file.lastError) ? (
+                {/*
+                  A refusal is not a retry. The queue will not try these again, so the screen has
+                  to say what happened and leave the decision with the operator: the bytes are
+                  still here, and on this product the phone often holds the only copy of a walk
+                  somebody physically took.
+                */}
+                {session.refusedReason ? (
+                  <Callout tone="bad" title="The server will not accept this session">
+                    {session.refusedReason}
+                    {'\n'}It will not be sent again. If this was a permissions change, ask to be
+                    put back on the project and push again.
+                  </Callout>
+                ) : null}
+
+                {sessionFiles.some((file) => file.status === 'refused') ? (
+                  <Callout tone="bad" title="Refused by the server">
+                    {sessionFiles.find((file) => file.status === 'refused')?.lastError}
+                    {'\n'}These will not be retried. The files are still on the device — remove
+                    them when you have finished with them.
+                  </Callout>
+                ) : null}
+
+                {sessionFiles.some(
+                  (file) => file.lastError && file.status !== 'refused',
+                ) ? (
                   <Text style={styles.errorText}>
-                    {sessionFiles.find((file) => file.lastError)?.lastError}
+                    {
+                      sessionFiles.find((file) => file.lastError && file.status !== 'refused')
+                        ?.lastError
+                    }
                   </Text>
                 ) : null}
 

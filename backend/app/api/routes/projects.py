@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from collections import defaultdict
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 
 from app.api.deps import (
     DbSession,
@@ -144,10 +145,12 @@ def list_projects(
 
     total = int(db.scalar(select(func.count()).select_from(query.subquery())) or 0)
     projects = list(db.scalars(query.order_by(Project.name).limit(page.limit).offset(page.offset)))
-    # One query for the whole page's roles, not one per row.
-    roles = project_roles_for(db, user, [project.id for project in projects])
+    # One query for the whole page's roles, and a fixed handful for its roll-ups.
+    roles: dict[str, Role | None] = dict(
+        project_roles_for(db, user, [project.id for project in projects])
+    )
     return Page(
-        items=[_summarize(db, project, roles.get(project.id)) for project in projects],
+        items=_summaries(db, projects, roles),
         total=total,
         limit=page.limit,
         offset=page.offset,
@@ -213,60 +216,122 @@ def delete_project(
     return Message(message=f"Project {project.code} deleted")
 
 
-def _summarize(db: DbSession, project: Project, role: Role | None = None) -> ProjectSummary:
-    floor_ids = list(
-        db.scalars(select(Floor.id).join(Building).where(Building.project_id == project.id))
-    )
-    building_count = int(
-        db.scalar(select(func.count(Building.id)).where(Building.project_id == project.id)) or 0
-    )
-    zone_count = (
-        int(db.scalar(select(func.count(Zone.id)).where(Zone.floor_id.in_(floor_ids))) or 0)
-        if floor_ids
-        else 0
-    )
-    location_count = (
-        int(
-            db.scalar(
-                select(func.count(CaptureLocation.id)).where(
-                    CaptureLocation.floor_id.in_(floor_ids)
-                )
-            )
-            or 0
-        )
-        if floor_ids
-        else 0
-    )
-    session_count = int(
-        db.scalar(
-            select(func.count(CaptureSession.id)).where(CaptureSession.project_id == project.id)
-        )
-        or 0
-    )
-    frame_count = int(
-        db.scalar(
-            select(func.count(CaptureFrame.id))
-            .join(CaptureSession, CaptureSession.id == CaptureFrame.session_id)
-            .where(CaptureSession.project_id == project.id)
-        )
-        or 0
-    )
-    last_capture = db.scalar(
-        select(func.max(CaptureSession.started_at)).where(CaptureSession.project_id == project.id)
-    )
+def _summaries(
+    db: DbSession, projects: list[Project], roles: dict[str, Role | None]
+) -> list[ProjectSummary]:
+    """Roll-ups for a page of projects, in a fixed number of queries (§40).
 
-    return ProjectSummary(
-        **ProjectOut.model_validate(project).model_dump(),
-        your_role=role,
-        your_capabilities=sorted(str(name) for name in capabilities_for(role)) if role else [],
-        building_count=building_count,
-        floor_count=len(floor_ids),
-        zone_count=zone_count,
-        capture_session_count=session_count,
-        frame_count=frame_count,
-        location_count=location_count,
-        last_capture_at=last_capture,
+    This counted one project at a time, and the cost was measured rather than suspected: seven
+    queries per project, so 10 for one, 45 for six and 87 for twelve. `GET /projects` is the
+    sidebar — it loads on every sign-in and on every page — so a contractor with fifty live jobs
+    paid around 360 queries for the first screen. Every other list endpoint in this API is
+    fixed-cost; this was the last one that grew with its rows.
+
+    Seven grouped queries now, for any page size, and `test_query_counts.py` holds it there.
+
+    The counts are deliberately *not* taken from `monitoring.build_portfolio`'s helpers, which
+    look almost identical and are not: `_last_capture_by_project` there considers only `READY`
+    sessions, because the dashboard's "last capture" means "last one you can look at". Here it
+    has always meant the last one *started*, which is what a project list is for — a walk
+    uploaded an hour ago and still processing should not make the row read "2 weeks ago". Sharing
+    the helper would have changed a number on screen while claiming to be a performance fix.
+    """
+    if not projects:
+        return []
+
+    ids = [project.id for project in projects]
+    floors_by_project: dict[str, list[str]] = defaultdict(list)
+    for project_id, floor_id in db.execute(
+        select(Building.project_id, Floor.id)
+        .join(Floor, Floor.building_id == Building.id)
+        .where(Building.project_id.in_(ids))
+    ).all():
+        floors_by_project[str(project_id)].append(str(floor_id))
+
+    buildings = _counted(
+        db,
+        select(Building.project_id, func.count(Building.id)).where(Building.project_id.in_(ids)),
+        Building.project_id,
     )
+    sessions = _counted(
+        db,
+        select(CaptureSession.project_id, func.count(CaptureSession.id)).where(
+            CaptureSession.project_id.in_(ids)
+        ),
+        CaptureSession.project_id,
+    )
+    frames = _counted(
+        db,
+        select(CaptureSession.project_id, func.count(CaptureFrame.id))
+        .join(CaptureFrame, CaptureFrame.session_id == CaptureSession.id)
+        .where(CaptureSession.project_id.in_(ids)),
+        CaptureSession.project_id,
+    )
+    # Zones and capture points hang off a floor, so they are grouped by the building's project
+    # through the same join rather than by a list of floor ids per project.
+    zones = _counted(
+        db,
+        select(Building.project_id, func.count(Zone.id))
+        .join(Floor, Floor.building_id == Building.id)
+        .join(Zone, Zone.floor_id == Floor.id)
+        .where(Building.project_id.in_(ids)),
+        Building.project_id,
+    )
+    locations = _counted(
+        db,
+        select(Building.project_id, func.count(CaptureLocation.id))
+        .join(Floor, Floor.building_id == Building.id)
+        .join(CaptureLocation, CaptureLocation.floor_id == Floor.id)
+        .where(Building.project_id.in_(ids)),
+        Building.project_id,
+    )
+    last_capture = {
+        str(project_id): moment
+        for project_id, moment in db.execute(
+            select(CaptureSession.project_id, func.max(CaptureSession.started_at))
+            .where(CaptureSession.project_id.in_(ids))
+            .group_by(CaptureSession.project_id)
+        ).all()
+        if moment is not None
+    }
+
+    summaries = []
+    for project in projects:
+        role = roles.get(project.id)
+        summaries.append(
+            ProjectSummary(
+                **ProjectOut.model_validate(project).model_dump(),
+                your_role=role,
+                your_capabilities=sorted(str(name) for name in capabilities_for(role))
+                if role
+                else [],
+                building_count=buildings.get(project.id, 0),
+                floor_count=len(floors_by_project.get(project.id, ())),
+                zone_count=zones.get(project.id, 0),
+                capture_session_count=sessions.get(project.id, 0),
+                frame_count=frames.get(project.id, 0),
+                location_count=locations.get(project.id, 0),
+                last_capture_at=last_capture.get(project.id),
+            )
+        )
+    return summaries
+
+
+def _counted(db: DbSession, query: Select, grouping: Any) -> dict[str, int]:
+    """``{project_id: count}`` from a two-column (id, count) select.
+
+    A project with none of whatever is being counted is absent from the result rather than zero
+    — an inner join cannot produce a row for it — so every read of these goes through `.get(id,
+    0)`. That is the one thing to get wrong here, and it fails as a missing key rather than a
+    wrong number, which is the better way round.
+    """
+    rows = db.execute(query.group_by(grouping)).all()
+    return {str(project_id): int(count) for project_id, count in rows}
+
+
+def _summarize(db: DbSession, project: Project, role: Role | None = None) -> ProjectSummary:
+    """One project, through the same path as a page of them, so the two cannot disagree."""
+    return _summaries(db, [project], {project.id: role})[0]
 
 
 # ---- buildings ---------------------------------------------------------------

@@ -155,7 +155,7 @@ npm run build
 
 | File | What it proves |
 | --- | --- |
-| `tests/integration/test_definition_of_done.py` | The whole §52 workflow, in order, through real HTTP. One test, shared state — because the requirement is that the *workflow* works, not that 18 endpoints each work alone. |
+| `tests/integration/test_definition_of_done.py` | The whole §52 workflow, in order, through real HTTP. One test, shared state — because the requirement is that the *workflow* works, not that each endpoint works alone. |
 | `tests/vision/test_geometry.py` | The two-view geometry recovers a **known** camera pose from rendered projections (yaw to <1°, translation direction to cos > 0.99). The only way to know the maths is right rather than plausible. |
 | `tests/vision/test_mapping.py` | Track accuracy vs ground truth — split into a deterministic geometry test (exact correspondences, centimetre bound, portable) and a `slow`-marked end-to-end test through ORB whose bound is a fraction of the room diagonal because the detector is platform-dependent. Also that wide frame spacing is refused rather than guessed. |
 | `tests/integration/test_pipeline.py` | Video frame extraction at a configurable interval, failure/retry, idempotent reprocessing, and that reprocessing **never deletes an original upload**. |

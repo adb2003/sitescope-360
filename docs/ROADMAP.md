@@ -32,7 +32,7 @@ Everything in the §52 Definition of Done, verified end to end through HTTP by
 | Observability | ✅ | Structured JSON events, correlation ids, admin job dashboard. |
 | Project access control | ✅ | `project_members` scopes every read and write, and carries the **role held on that project** — the account role is a ceiling over it, so one person can manage one job and only view another. A non-member gets 404 rather than 403, a member lacking a capability gets 403 naming their role here, and administrators are exempt. |
 | Share links | ✅ | A read-only link to one view, openable with no account. Token stored only as a hash and shown once; expiry mandatory and capped; revocable by any member. |
-| Docker / CI | ⚠ written | Compose, Dockerfiles, nginx and a 6-job CI workflow exist but were not executed locally (no Docker here). CI runs them. |
+| Docker / CI | ⚠ written | Compose, Dockerfiles, nginx and the CI workflow exist but were not executed locally (no Docker here). CI runs them on every commit: lint, types and tests for all three codebases, migrations against PostgreSQL, the generated contracts, both image builds, and a stack smoke test that seeds, signs in and reads the security headers back through the real nginx. The job count used to be quoted here and was wrong by one. |
 
 ### Beyond the brief's Phase 1
 

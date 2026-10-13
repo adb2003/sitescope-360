@@ -556,7 +556,21 @@ export function Callout({
   const Icon = config.icon
 
   return (
-    <div className={cn('flex gap-2 rounded border px-3 py-2', config.cls, className)}>
+    <div
+      /*
+        A `bad` callout is always the report of something that just failed — an upload refused, a
+        role that could not be changed, a capture that would not process. On screen it appears
+        next to the control that failed; to a screen reader it appeared not at all, because
+        nothing announced it. `alert` is right rather than `status`: the user asked for something
+        and it did not happen, so it interrupts.
+
+        The quieter tones are left silent deliberately. Most of them are standing explanations —
+        what the platform does not claim, why a position is estimated — and announcing those on
+        every render would train people to ignore the ones that matter.
+      */
+      role={tone === 'bad' ? 'alert' : undefined}
+      className={cn('flex gap-2 rounded border px-3 py-2', config.cls, className)}
+    >
       <Icon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
       <div className="min-w-0 text-xs leading-relaxed">
         {title ? <p className="font-semibold">{title}</p> : null}

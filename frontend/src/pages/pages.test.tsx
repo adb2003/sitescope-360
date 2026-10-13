@@ -193,6 +193,24 @@ describe('PortfolioPage', () => {
     ).toBeInTheDocument()
   })
 
+  it('names the browser tab after the page, not after the product', async () => {
+    /*
+      Every route used to set the same title. Two jobs open side by side — the comparison this
+      product exists for — gave two tabs reading "SiteScope 360", a history menu of one repeated
+      word, and nothing for a screen reader to announce on navigation.
+
+      Asserted through a real page rather than on the helper alone, because the wiring is the
+      part that breaks: the title is set by `PageHeader`, so that it and the `h1` are the same
+      string and cannot drift.
+    */
+    mockApi({ '/auth/me': SESSION, '/api/dashboard': PORTFOLIO, '/projects': { items: [], total: 0, limit: 50, offset: 0 } })
+
+    renderPage(<PortfolioPage />)
+
+    await screen.findByText('Chevron Phase 2')
+    expect(document.title).toBe('Dashboard · SiteScope 360')
+  })
+
   it('declares up front that progress and defect AI are absent', async () => {
     mockApi({ '/auth/me': SESSION, '/api/dashboard': PORTFOLIO, '/projects': { items: [], total: 0, limit: 50, offset: 0 } })
     renderPage(<PortfolioPage />)

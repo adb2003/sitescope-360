@@ -17,14 +17,22 @@
   --line-strong: 202 208 206;
   --ink: 22 29 32;
   --ink-muted: 88 100 104;
-  --ink-subtle: 130 142 145;
+  /*
+   * 4.77:1 on `surface`, 4.60:1 on `canvas` — above the 4.5:1 WCAG AA floor for text this size.
+   * It was `130 142 145`, which measured 3.37:1: a shade chosen to look quiet that was, on the
+   * tablet this gets used on outdoors, closer to invisible. Every contrast failure in the app
+   * came from this one token in each theme, and from nothing else.
+   */
+  --ink-subtle: 104 114 116;
 
   --brand: 13 92 78;
   --brand-soft: 224 240 236;
   --brand-ink: 255 255 255;
 
   --good: 22 128 92;
-  --warn: 176 118 8;
+  /* 4.63:1 at worst. Was `176 118 8` = 3.59:1, and it is not a decorative amber: it carries the
+     open-issue count at 11px and the "overdue" badge, both of them small text. */
+  --warn: 157 99 0;
   --bad: 190 42 42;
   --info: 32 96 152;
   --estimated: 122 92 168;
@@ -40,7 +48,9 @@
   --line-strong: 54 70 80;
   --ink: 232 238 240;
   --ink-muted: 152 168 175;
-  --ink-subtle: 110 126 134;
+  /* 4.63:1 against `surface-raised`, the lightest thing it sits on. Was `110 126 134` = 3.88:1
+     there. See the note in the light palette. */
+  --ink-subtle: 124 139 146;
 
   --brand: 46 170 142;
   --brand-soft: 20 46 42;

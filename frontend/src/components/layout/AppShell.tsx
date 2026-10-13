@@ -34,6 +34,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { Badge, Button, Spinner } from '@/components/ui'
 import { useAuth } from '@/hooks/useAuth'
 import { useCaptureEvents } from '@/hooks/useCaptureEvents'
+import { useDocumentTitle } from '@/hooks/useDocumentTitle'
 import { useProjectContext } from '@/hooks/useProjectContext'
 import { useProjects } from '@/hooks/queries'
 import { cn, humanize, initials } from '@/lib/utils'
@@ -108,6 +109,23 @@ export function AppShell() {
 
   return (
     <div className="flex min-h-screen bg-canvas">
+      {/*
+        First in the DOM, because that is the only place it can be first in the tab order — and
+        a skip link that is not first skips nothing. It started out below the sidebar, where it
+        measured fourteenth: a keyboard user reached it after walking three nav groups, eleven
+        links, the project switcher and the sign-out button, which is the walk it exists to
+        avoid.
+
+        `fixed` rather than `absolute` once focused, so it is in the viewport rather than at the
+        top of the document — Tab can be pressed on a scrolled page.
+      */}
+      <a
+        href="#main-content"
+        className="sr-only rounded bg-brand px-3 py-2 text-sm font-medium text-brand-ink shadow-lg focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50"
+      >
+        Skip to content
+      </a>
+
       {/* Mobile drawer backdrop */}
       {mobileOpen ? (
         <button
@@ -201,7 +219,7 @@ export function AppShell() {
           </Link>
         </header>
 
-        <main className="min-w-0 flex-1">
+        <main id="main-content" tabIndex={-1} className="min-w-0 flex-1 focus:outline-none">
           {/* Inside the shell, so a page that throws leaves the navigation intact — an operator
               whose viewer crashed can still reach the upload queue and see their capture is
               safe. Keyed on the path so walking away from the broken page clears it, rather than
@@ -324,6 +342,14 @@ export function PageHeader({
   actions?: React.ReactNode
   breadcrumbs?: Array<{ label: string; to?: string }>
 }) {
+  // The tab is named here rather than by each page, so it and the `h1` are the same string and
+  // cannot drift. The project code comes too: this product is used with two jobs open side by
+  // side, and identical tabs are the reason that is harder than it should be.
+  const { projectId } = useProjectContext()
+  const projects = useProjects()
+  const current = projects.data?.items.find((project) => project.id === projectId)
+  useDocumentTitle(title, current?.code)
+
   return (
     <div className="border-b border-line bg-surface/50 px-4 py-3 lg:px-6">
       {breadcrumbs?.length ? (

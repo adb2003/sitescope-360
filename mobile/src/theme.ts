@@ -1,14 +1,23 @@
-/** Shared styling tokens, mirroring the web app's dark palette so the two feel like one product. */
+/**
+ * Shared styling tokens, mirroring the web app's dark palette so the two feel like one product.
+ *
+ * Mirroring includes the contrast floor. `inkSubtle` was `#6e7e86`, copied from the web before
+ * that value was measured at 3.88:1 against the lightest surface it sits on — below the 4.5:1
+ * WCAG AA floor, and it carries every hint, field label and input placeholder in this app. On a
+ * phone held in gloves in bright sun, which is the whole point of this client, it was the worst
+ * place in the product to have it. `theme.test.ts` holds both halves of that promise: the
+ * contrast, and that the palette still matches the web's.
+ */
 
 export const theme = {
   canvas: '#0b1116',
-  surface: '#121b1f',
+  surface: '#12191f',
   surfaceRaised: '#182128',
   line: '#243038',
   lineStrong: '#364650',
   ink: '#e8eef0',
   inkMuted: '#98a8af',
-  inkSubtle: '#6e7e86',
+  inkSubtle: '#7c8b92',
   brand: '#2eaa8e',
   brandInk: '#081412',
   good: '#3aba82',

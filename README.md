@@ -1,6 +1,8 @@
 # SiteScope 360
 
-An independent construction 360° site capture and monitoring platform.
+An independent construction 360° site capture and monitoring platform — the same kind of
+workflow commercial tools like OpenSpace popularised, built from scratch (see *Independence*,
+below).
 
 Create a project, add buildings, floors and zones, upload 360 imagery or video from any camera,
 process it into viewable panoramas, place those panoramas on a floor plan, walk the site in a

@@ -285,6 +285,11 @@ Development for this project was done on Windows, so a few specifics:
 - PowerShell has no `&&`. Use `A; if ($?) { B }`, or run commands separately.
 - `python` on a stock Windows install may be the Microsoft Store stub. `uv venv --python 3.12`
   downloads a real interpreter and sidesteps it.
+- Clone to a short path. Storage keys nest two 32-character ids
+  (`var/storage/projects/<id>/floors/<id>/...`), so from a repository root ~150 characters deep
+  the seeder dies partway through with `FileNotFoundError: [WinError 206] The filename or
+  extension is too long` — measured, not theoretical. `C:\dev\sitescope-360` has room to spare;
+  a clone under a deep temporary directory does not.
 - The temporary file used to hand a video path to OpenCV is closed before OpenCV opens it, because
   Windows will not allow a second open on a file still held by Python
   (`app/processing/stages.py::_staged_file`).
